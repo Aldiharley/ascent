@@ -4,6 +4,8 @@ mod models;
 #[allow(dead_code)]
 mod normalise;
 #[allow(dead_code)]
+mod report;
+#[allow(dead_code)]
 mod runner;
 #[allow(dead_code)]
 mod scope;
