@@ -2,7 +2,12 @@
 name = "ascent"
 version = "0.1.0"
 edition = "2021"
+default-run = "ascent"
 license = "Apache-2.0"
+
+[[bin]]
+name = "dashboard"
+path = "src/bin/dashboard.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -15,3 +20,9 @@ url = "2"
 # features off: drops its `anthropic` HTTPS client, so this binary carries no
 # network code at all and triage is the offline MockTriager.
 crux = { path = "../crux", default-features = false }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
