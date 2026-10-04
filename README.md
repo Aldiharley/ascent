@@ -6,7 +6,7 @@ Ascent is an open-source, scope-enforced, human-in-the-loop AppSec pipeline, wri
 
 Ascent drives external open-source scanners (subfinder, httpx, katana, nuclei) as subprocesses through a scope-checked runner. They are invoked, never vendored or linked into the Ascent binary.
 
-Triage uses [Crux](https://github.com/Aldiharley/crux), the author's Apache-2.0 triage engine, linked as a library (`crux = { path = "../crux", default-features = false }`). With default features off, Crux's HTTPS client is compiled out, so the Ascent binary contains no network code and triage runs Crux's offline `MockTriager`.
+Triage uses [Crux](https://github.com/Aldiharley/crux), the author's Apache-2.0 triage engine, linked as a library (`crux = { path = "../crux", default-features = false }`). With default features off, Crux's HTTPS client is compiled out, so the `ascent` CLI binary links no network code and triage runs Crux's offline `MockTriager`. The separate `dashboard` binary serves loopback-only HTTP (see below).
 
 ## Building
 
@@ -27,8 +27,10 @@ A local web dashboard shows the triaged findings, the pending human-approval gat
 1. Produce an out dir with the pipeline:
 
    ```
-   ascent run --engagement samples/engagement.example.yaml --out out
+   cargo run -- run --engagement samples/engagement.example.yaml --out out
    ```
+
+   (Or install the CLI with `cargo install --path .` and run `ascent run --engagement samples/engagement.example.yaml --out out`.)
 
    The dashboard reads `queue.json`, `audit.jsonl` and `report.md` from it.
 
@@ -50,20 +52,27 @@ A local web dashboard shows the triaged findings, the pending human-approval gat
    ASCENT_OUT=out cargo run --bin dashboard
    ```
 
-   `ASCENT_ENG` points at the engagement file shown in the topbar (default `samples/engagement.example.yaml`).
+   `ASCENT_ENG` points at the engagement file shown in the topbar (default `samples/engagement.example.yaml`). `ASCENT_DIST` points at the built UI (default: `frontend/dist` inside the crate, so it works from any working directory).
 
 5. Open <http://127.0.0.1:8787>.
 
 Safety properties:
 
 - It binds to loopback (`127.0.0.1:8787`) only.
-- It never transmits findings anywhere; the UI only talks to its own backend.
+- It never transmits findings anywhere. The UI only fetches its own backend's `/api/*`; the only third-party requests are the Google Fonts stylesheet and font files, which carry no finding data. The Content-Security-Policy enforces this.
+- Every response carries `X-Frame-Options: DENY` and CSP `frame-ancestors 'none'`, so another page cannot frame the dashboard to trick a click on Approve.
 - Approve and Deny only record a decision in the hash-chained audit log. They never run the command; the exploitation stage consumes approvals.
 - The backend rejects any request whose `Host` is not `127.0.0.1:8787` or `localhost:8787`. Every POST also needs `Origin: http://127.0.0.1:8787` (or the `localhost` equivalent) and `X-Ascent: 1`. Non-browser clients must send both headers, for example:
 
   ```
-  curl -X POST http://127.0.0.1:8787/api/gates/g1/approve     -H "Origin: http://127.0.0.1:8787" -H "X-Ascent: 1"
+  curl -X POST http://127.0.0.1:8787/api/gates/g1/approve \
+    -H "Origin: http://127.0.0.1:8787" \
+    -H "X-Ascent: 1"
   ```
+
+- Approve is refused (HTTP 422) unless the gate's `in_scope` is `true`; Deny is always allowed. Each decision records `gate_hash`, the hash of the gate as approved, inside the chained entry.
+
+> **Warning:** don't decide gates while an `ascent run` is writing to the same out dir. The audit log is hash-chained and a concurrent append would break the chain; the dashboard then refuses further decisions (it fails closed).
 
 Dev loop: with the backend running, `cd frontend && npm run dev` serves the UI with hot reload and proxies `/api` to it.
 
