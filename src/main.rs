@@ -7,6 +7,8 @@ mod normalise;
 mod runner;
 #[allow(dead_code)]
 mod scope;
+#[allow(dead_code)]
+mod stages;
 
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
