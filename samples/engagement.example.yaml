@@ -1,0 +1,14 @@
+# Example engagement scope for Ascent.
+# AUTHORISED LAB TARGETS ONLY: never list a host, network or URL you do not
+# own or have explicit written permission to test. This sample targets the
+# local machine only.
+name: ascent-local-lab
+hosts:
+  - localhost
+cidrs:
+  - 127.0.0.0/8
+urls:
+  - http://localhost:3000/
+# ISO-8601 with timezone. Stored but not enforced in the MVP.
+starts: "2026-01-01T00:00:00Z"
+ends: "2030-01-01T00:00:00Z"
