@@ -9,6 +9,11 @@ use axum::{
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 
+// wired into routes in Task 3
+#[allow(dead_code)]
+#[path = "../dashboard/mod.rs"]
+mod dashboard;
+
 /// Only these `Host` values are served; anything else is a DNS-rebinding attempt.
 const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1:8787", "localhost:8787"];
 /// State-changing requests must also come from one of these origins.
