@@ -134,7 +134,7 @@ tbody tr:hover td{background:rgba(255,255,255,.82)}
 .note{font-size:11px;color:var(--faint);text-align:center}
 .audit{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
 .audit h3{margin:0;font-size:14px}
-.feed{display:flex;flex-direction:column;gap:11px}
+.feed{display:flex;flex-direction:column;gap:11px;max-height:340px;overflow:auto;padding-right:4px}
 .ev{display:flex;gap:10px;font-size:12px}
 .ev .tick{width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none;background:var(--accent)}
 .ev .m{color:var(--ink);line-height:1.4}

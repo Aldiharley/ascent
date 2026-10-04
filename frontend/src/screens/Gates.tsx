@@ -15,7 +15,12 @@ interface ToastMsg {
 
 const TOAST_MS = 5000;
 
-export function Gates() {
+export interface GatesProps {
+  /** Called after a decision is recorded (or found already recorded), so a sibling audit view can refresh. */
+  onDecided?: () => void;
+}
+
+export function Gates({ onDecided }: GatesProps = {}) {
   const [state, setState] = useState<State>({ status: "loading" });
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [toast, setToast] = useState<ToastMsg | null>(null);
@@ -63,6 +68,7 @@ export function Gates() {
       await decideGate(gate.id, decision);
       if (!live.current) return;
       removeGate(gate.id);
+      onDecided?.();
       notify({
         kind: "ok",
         title: `${verb}: recorded in the audit log`,
@@ -72,6 +78,7 @@ export function Gates() {
       if (!live.current) return;
       if (e instanceof GateDecisionError && e.status === 409) {
         removeGate(gate.id);
+        onDecided?.();
         notify({
           kind: "ok",
           title: "Already decided",

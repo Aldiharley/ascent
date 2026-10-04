@@ -151,3 +151,20 @@ export async function getAudit(): Promise<AuditLog> {
   }
   return { entries: body.entries, chain_ok: body.chain_ok };
 }
+
+// GET /api/engagement: the parsed engagement file, or null when none is loaded.
+export interface Engagement {
+  name?: string;
+}
+
+export async function getEngagement(): Promise<Engagement | null> {
+  const res = await fetch("/api/engagement");
+  if (!res.ok) {
+    throw new Error(`GET /api/engagement failed: ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+  return body as Engagement;
+}
