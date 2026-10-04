@@ -86,6 +86,49 @@ impl Runner for ToolRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scope::Engagement;
+
+    fn runner(dry_run: bool) -> ToolRunner {
+        let e = Engagement {
+            name: "t".into(),
+            hosts: vec!["example.com".into()],
+            cidrs: vec![],
+            urls: vec![],
+            starts: "2026-01-01T00:00:00Z".into(),
+            ends: "2026-12-31T00:00:00Z".into(),
+        };
+        ToolRunner::new(ScopeGuard::new(&e), dry_run)
+    }
+
+    #[test]
+    fn run_json_refuses_out_of_scope_even_in_dry_run() {
+        let r = runner(true);
+        let err = r.run_json("httpx", &[], &["evil.com".into()]).unwrap_err();
+        assert!(err.to_string().contains("not in engagement scope"));
+    }
+
+    #[test]
+    fn run_text_refuses_out_of_scope_even_in_dry_run() {
+        let r = runner(true);
+        assert!(r.run_text("httpx", &[], &["evil.com".into()]).is_err());
+    }
+
+    #[test]
+    fn one_out_of_scope_target_among_many_refuses_whole_call() {
+        let r = runner(true);
+        let targets = ["example.com".to_string(), "evil.com".to_string()];
+        assert!(r.run_json("httpx", &[], &targets).is_err());
+    }
+
+    #[test]
+    fn in_scope_dry_run_passes_gate_and_returns_empty_without_spawning() {
+        let r = runner(true);
+        let v = r.run_json("httpx", &[], &["example.com".into()]).unwrap();
+        assert!(v.is_empty());
+        let t = r.run_text("httpx", &[], &["example.com".into()]).unwrap();
+        assert!(t.is_empty());
+    }
+
     #[test]
     fn jsonl_parses_lines() {
         let v = parse_jsonl("{\"a\":1}\n{\"a\":2}\n");
