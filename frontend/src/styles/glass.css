@@ -164,3 +164,10 @@ h1{font-size:0;margin:0}
 @media (max-width:640px){ .app.no-side{grid-template-columns:1fr} }
 /* visible keyboard focus for the glass controls */
 .nav button:focus-visible,.nav-foot:focus-visible,.segs button:focus-visible,.btn:focus-visible,.approve:focus-visible,.deny:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---- additions for the approval-gate screen (not in the mockup) ---- */
+.scope-bad{font-size:11px;color:var(--crit);font-weight:600}
+.approve:disabled,.deny:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
+.toast-error .ic{background:linear-gradient(145deg,var(--crit),#b21f24);font-weight:800}
+/* keep action feedback visible on narrow screens (the mockup toast is hidden there) */
+@media (max-width:640px){ .toast.gate-toast{display:flex;left:12px;right:12px;max-width:none} }

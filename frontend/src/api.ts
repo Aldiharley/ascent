@@ -43,3 +43,52 @@ export async function getFindings(): Promise<TriageItem[]> {
   }
   return body as TriageItem[];
 }
+
+// A pending human-approval gate (GET /api/gates). Like findings, every string
+// can originate from a scanned target: render as React text only.
+export interface Gate {
+  id: string;
+  title: string;
+  why: string;
+  command: string;
+  target: string;
+  in_scope: boolean;
+}
+
+export type GateDecision = "approve" | "deny";
+
+/** Thrown by decideGate on a non-2xx response so callers can branch on status. */
+export class GateDecisionError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`POST /api/gates decision failed: ${status}`);
+    this.name = "GateDecisionError";
+    this.status = status;
+  }
+}
+
+export async function getGates(): Promise<Gate[]> {
+  const res = await fetch("/api/gates");
+  if (!res.ok) {
+    throw new Error(`GET /api/gates failed: ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) {
+    throw new Error("GET /api/gates returned an unexpected payload");
+  }
+  return body as Gate[];
+}
+
+/**
+ * Records a human decision in the audit log. It never runs the command.
+ * The backend's request guard requires `X-Ascent: 1` on every POST (CSRF).
+ */
+export async function decideGate(id: string, decision: GateDecision): Promise<void> {
+  const res = await fetch(`/api/gates/${encodeURIComponent(id)}/${decision}`, {
+    method: "POST",
+    headers: { "X-Ascent": "1" },
+  });
+  if (!res.ok) {
+    throw new GateDecisionError(res.status);
+  }
+}
