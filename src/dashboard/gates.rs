@@ -13,6 +13,8 @@ pub enum DecideError {
     NotFound,
     /// The gate already carries a `status`.
     Resolved,
+    /// Approve was requested for a gate whose `in_scope` is not `true`.
+    OutOfScope,
     /// The audit chain failed verification; nothing was written.
     ChainBroken(String),
     /// A filesystem error.
@@ -76,6 +78,19 @@ pub fn read_pending_gates(out_dir: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Crux canonical hash of a gate as it was presented for decision: the gate
+/// object minus its resolution fields (`status`, `decided_at`). Recorded in the
+/// chained `gate_decision` entry, so an approval stays bound to the exact
+/// command/target that was approved even though `gates.json` is not chained.
+pub fn gate_hash(gate: &Value) -> String {
+    let mut g = gate.clone();
+    if let Some(obj) = g.as_object_mut() {
+        obj.remove("status");
+        obj.remove("decided_at");
+    }
+    crux::canon::hash_value(&g)
+}
+
 fn now_ts() -> String {
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -84,11 +99,13 @@ fn now_ts() -> String {
 }
 
 /// Append one Crux-compatible `gate_decision` entry. The caller has already
-/// verified the chain.
+/// verified the chain. `gate_hash` (see [`gate_hash`]) is part of the hashed
+/// body, so it is covered by the chain.
 pub fn append_decision(
     audit: &Path,
     gate_id: &str,
     decision: &str,
+    gate_hash: &str,
     ts: &str,
 ) -> Result<(), String> {
     let text = match std::fs::read_to_string(audit) {
@@ -114,6 +131,7 @@ pub fn append_decision(
     body.insert("type".into(), Value::from("gate_decision"));
     body.insert("gate_id".into(), Value::from(gate_id));
     body.insert("decision".into(), Value::from(decision));
+    body.insert("gate_hash".into(), Value::from(gate_hash));
     body.insert("prev_hash".into(), Value::from(prev));
     let entry_hash = Value::from(crux::canon::hash_value(&Value::Object(body.clone())));
 
@@ -132,7 +150,9 @@ pub fn append_decision(
         .append(true)
         .open(audit)
         .map_err(|e| format!("cannot open audit log: {e}"))?;
-    writeln!(fh, "{sep}{line}").map_err(|e| format!("cannot write audit log: {e}"))?;
+    // One write call for the whole line, so it cannot be split across writes.
+    fh.write_all(format!("{sep}{line}\n").as_bytes())
+        .map_err(|e| format!("cannot write audit log: {e}"))?;
     fh.sync_all()
         .map_err(|e| format!("cannot flush audit log: {e}"))
 }
@@ -174,6 +194,11 @@ pub fn decide_gate(out_dir: &str, id: &str, approve: bool) -> Result<(), DecideE
         None if gates.iter().any(id_matches) => return Err(DecideError::Resolved),
         None => return Err(DecideError::NotFound),
     };
+    // Only a gate the scope guard marked in-scope may be approved; deny is
+    // always allowed. Checked before anything is read or written.
+    if approve && gates[idx].get("in_scope") != Some(&Value::Bool(true)) {
+        return Err(DecideError::OutOfScope);
+    }
 
     let audit = Path::new(out_dir).join("audit.jsonl");
     let (ok, msg) = crux::AuditLog::new(&audit).verify();
@@ -194,7 +219,8 @@ pub fn decide_gate(out_dir: &str, id: &str, approve: bool) -> Result<(), DecideE
     }
 
     let (status, ts) = (if approve { "approved" } else { "denied" }, now_ts());
-    append_decision(&audit, id, status, &ts).map_err(DecideError::Io)?;
+    let hash = gate_hash(&gates[idx]);
+    append_decision(&audit, id, status, &hash, &ts).map_err(DecideError::Io)?;
 
     mark_resolved(&mut gates[idx], status, ts);
     write_gates_atomic(out_dir, &gates).map_err(DecideError::Io)
@@ -302,6 +328,79 @@ mod tests {
         decide_gate(s(&dir), "g1", true).unwrap();
         assert_eq!(std::fs::read_to_string(&audit).unwrap().lines().count(), 2);
         assert!(crux::AuditLog::new(&audit).verify().0);
+    }
+
+    fn last_entry(audit: &Path) -> Value {
+        let text = std::fs::read_to_string(audit).unwrap();
+        serde_json::from_str(text.lines().last().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn decision_binds_gate_hash_into_chain() {
+        let dir = tmp();
+        put(&dir, json!([gate("g1")]));
+        let audit = dir.join("audit.jsonl");
+        crux::AuditLog::new(&audit)
+            .append("f1", "h", "mock", "ABSTAIN", 0.1, 0.5)
+            .unwrap();
+        let listed = read_pending_gates(s(&dir)).remove(0);
+        decide_gate(s(&dir), "g1", true).unwrap();
+        let entry = last_entry(&audit);
+        assert_eq!(entry["type"], "gate_decision");
+        // the hash of the gate exactly as it was listed (pending) when decided
+        assert_eq!(entry["gate_hash"], crux::canon::hash_value(&listed));
+        // gate_hash is inside the hashed body, so the chain still verifies ...
+        assert!(crux::AuditLog::new(&audit).verify().0);
+        // ... and tampering with it breaks the chain
+        let text = std::fs::read_to_string(&audit).unwrap();
+        let h = entry["gate_hash"].as_str().unwrap();
+        std::fs::write(&audit, text.replace(h, &"0".repeat(64))).unwrap();
+        assert!(!crux::AuditLog::new(&audit).verify().0);
+    }
+
+    #[test]
+    fn gate_hash_ignores_resolution_fields() {
+        let dir = tmp();
+        put(&dir, json!([gate("g1")]));
+        decide_gate(s(&dir), "g1", false).unwrap();
+        let stored = all_gates(s(&dir)).remove(0);
+        assert_eq!(stored["status"], "denied");
+        // the resolved gate in gates.json still matches what the log recorded
+        assert_eq!(
+            gate_hash(&stored),
+            last_entry(&dir.join("audit.jsonl"))["gate_hash"]
+        );
+        assert_eq!(gate_hash(&stored), crux::canon::hash_value(&gate("g1")));
+    }
+
+    #[test]
+    fn edited_gate_no_longer_matches_its_approval() {
+        let dir = tmp();
+        put(&dir, json!([gate("g1")]));
+        decide_gate(s(&dir), "g1", true).unwrap();
+        let recorded = last_entry(&dir.join("audit.jsonl"))["gate_hash"].clone();
+        let mut edited = all_gates(s(&dir)).remove(0);
+        assert_eq!(gate_hash(&edited), recorded);
+        edited["command"] = json!("rm -rf /");
+        assert_ne!(gate_hash(&edited), recorded);
+        let mut retargeted = all_gates(s(&dir)).remove(0);
+        retargeted["target"] = json!("http://elsewhere.example");
+        assert_ne!(gate_hash(&retargeted), recorded);
+    }
+
+    #[test]
+    fn approve_out_of_scope_writes_nothing() {
+        let dir = tmp();
+        let mut g = gate("g1");
+        g["in_scope"] = json!(false);
+        put(&dir, json!([g]));
+        assert_eq!(
+            decide_gate(s(&dir), "g1", true),
+            Err(DecideError::OutOfScope)
+        );
+        assert!(!dir.join("audit.jsonl").exists());
+        assert_eq!(read_pending_gates(s(&dir)).len(), 1);
+        decide_gate(s(&dir), "g1", false).unwrap();
     }
 
     #[test]

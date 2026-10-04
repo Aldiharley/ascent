@@ -110,6 +110,10 @@ async fn decide(
         Ok(()) => Ok(Json(json!({ "ok": true }))),
         Err(DecideError::NotFound) => Err(err(StatusCode::NOT_FOUND, "unknown gate")),
         Err(DecideError::Resolved) => Err(err(StatusCode::CONFLICT, "gate already resolved")),
+        Err(DecideError::OutOfScope) => Err(err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "gate is not in scope; only deny is allowed",
+        )),
         Err(DecideError::ChainBroken(m)) => Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("audit chain failed verification; decision not recorded: {m}"),
@@ -426,6 +430,7 @@ mod tests {
         assert_eq!(lines[1]["gate_id"], "g1");
         assert_eq!(lines[1]["decision"], "approved");
         assert_eq!(lines[1]["prev_hash"], lines[0]["entry_hash"]);
+        assert_eq!(lines[1]["gate_hash"], crux::canon::hash_value(&gate("g1")));
         assert!(crux::AuditLog::new(dir.join("audit.jsonl")).verify().0);
         let resp = app.oneshot(api_get("/api/gates")).await.unwrap();
         assert_eq!(body_json(resp).await, json!([]));
@@ -551,6 +556,7 @@ mod tests {
             &dir.join("audit.jsonl"),
             id,
             decision,
+            &dashboard::gates::gate_hash(&gate(id)),
             "2026-10-04T00:00:00.000000+00:00",
         )
         .unwrap();
@@ -707,5 +713,60 @@ mod tests {
         assert_eq!(d, std::path::PathBuf::from("C:/somewhere/dist"));
         // an empty value is treated as unset
         assert!(dist_dir_from(Some(String::new())).ends_with("frontend/dist"));
+    }
+
+    // ---- F8: server-side approve requires in_scope == true ----
+
+    #[tokio::test]
+    async fn approve_out_of_scope_gate_is_422_and_writes_nothing() {
+        // false, null, a truthy-looking string, and a missing field are all refused.
+        for in_scope in [
+            Some(json!(false)),
+            Some(json!(null)),
+            Some(json!("true")),
+            None,
+        ] {
+            let dir = tmp();
+            let mut g = gate("g1");
+            match &in_scope {
+                Some(v) => g["in_scope"] = v.clone(),
+                None => {
+                    g.as_object_mut().unwrap().remove("in_scope");
+                }
+            }
+            write_gates(&dir, json!([g]));
+            crux_audit(&dir);
+            let audit_before = std::fs::read(dir.join("audit.jsonl")).unwrap();
+            let gates_before = std::fs::read(dir.join("gates.json")).unwrap();
+            let resp = app_for(&dir)
+                .oneshot(api_post("/api/gates/g1/approve"))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "in_scope={in_scope:?}"
+            );
+            assert_eq!(body_json(resp).await["ok"], false);
+            assert_eq!(
+                std::fs::read(dir.join("audit.jsonl")).unwrap(),
+                audit_before
+            );
+            assert_eq!(std::fs::read(dir.join("gates.json")).unwrap(), gates_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_out_of_scope_gate_is_allowed() {
+        let dir = tmp();
+        let mut g = gate("g1");
+        g["in_scope"] = json!(false);
+        write_gates(&dir, json!([g]));
+        let resp = app_for(&dir)
+            .oneshot(api_post("/api/gates/g1/deny"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(audit_lines(&dir)[0]["decision"], "denied");
     }
 }
