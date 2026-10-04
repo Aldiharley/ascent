@@ -1,5 +1,9 @@
 // Wired into the pipeline in later tasks; until then the public API is only exercised by tests.
 #[allow(dead_code)]
+mod models;
+#[allow(dead_code)]
+mod normalise;
+#[allow(dead_code)]
 mod runner;
 #[allow(dead_code)]
 mod scope;
