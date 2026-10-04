@@ -9,6 +9,8 @@ mod runner;
 mod scope;
 #[allow(dead_code)]
 mod stages;
+#[allow(dead_code)]
+mod triage;
 
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
