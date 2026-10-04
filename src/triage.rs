@@ -1,7 +1,7 @@
 use crate::models::Finding;
 use serde::Deserialize;
 use serde_json::Value;
-use std::process::Command;
+use std::path::Path;
 
 #[derive(Deserialize, Debug)]
 pub struct TriageItem {
@@ -21,17 +21,16 @@ pub trait TriageEngine {
     ) -> Result<Vec<TriageItem>, Box<dyn std::error::Error>>;
 }
 
-pub fn parse_crux_queue(json: &str) -> Result<Vec<TriageItem>, serde_json::Error> {
-    serde_json::from_str(json)
-}
-
+/// Triage through Crux, linked in-process: offline `MockTriager`, Crux's abstain
+/// gate and dedup, and a hash-chained audit log at `<out_dir>/audit.jsonl` that is
+/// verified before any result is returned.
 pub struct CruxTriager {
-    pub python: String,
+    pub abstain_below: f64,
 }
 impl Default for CruxTriager {
     fn default() -> Self {
         CruxTriager {
-            python: "python".into(),
+            abstain_below: crux::DEFAULT_ABSTAIN_BELOW,
         }
     }
 }
@@ -42,38 +41,93 @@ impl TriageEngine for CruxTriager {
         findings: &[Finding],
         out_dir: &str,
     ) -> Result<Vec<TriageItem>, Box<dyn std::error::Error>> {
-        let dir = std::path::Path::new(out_dir);
+        let dir = Path::new(out_dir);
         std::fs::create_dir_all(dir)?;
-        let in_path = dir.join("findings.json");
-        let q_path = dir.join("queue.json");
-        let audit = dir.join("audit.jsonl");
-        let arr: Vec<Value> = findings.iter().map(|f| f.to_crux_json()).collect();
-        std::fs::write(&in_path, serde_json::to_string(&arr)?)?;
-        let status = Command::new(&self.python)
-            .args(["-m", "crux", "--input"])
-            .arg(&in_path)
-            .args(["--mock", "--emit-json"])
-            .arg(&q_path)
-            .arg("--audit")
-            .arg(&audit)
-            .arg("--out")
-            .arg(dir.join("triage_report.md"))
-            .status()?;
-        if !status.success() {
-            return Err(format!("crux triage failed: {status}").into());
+        // Same JSON contract Crux's loader validates, so a malformed finding is rejected.
+        let crux_findings = findings
+            .iter()
+            .map(|f| crux::Finding::parse(&f.to_crux_json()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut audit = crux::AuditLog::new(dir.join("audit.jsonl"));
+        let items = crux::triage(
+            &crux_findings,
+            &crux::MockTriager,
+            &mut audit,
+            self.abstain_below,
+        )?;
+        let (ok, msg) = audit.verify();
+        if !ok {
+            return Err(format!("crux audit log failed verification: {msg}").into());
         }
-        Ok(parse_crux_queue(&std::fs::read_to_string(&q_path)?)?)
+        // Crux's queue-entry serialisation is the `--emit-json` shape TriageItem reads.
+        items
+            .iter()
+            .map(|it| Ok(serde_json::from_value(serde_json::to_value(it)?)?))
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn unique_dir() -> std::path::PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "ascent_triage_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn dast(id: &str, url: &str) -> Finding {
+        Finding {
+            id: id.into(),
+            tool: "nuclei".into(),
+            rule_id: "CVE-2021-1234".into(),
+            severity: "HIGH".into(),
+            title: "Example RCE".into(),
+            message: "m".into(),
+            url: url.into(),
+            category: "DAST".into(),
+            cwe: "CWE-78".into(),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn parses_queue() {
-        let j = r#"[{"finding":{"title":"SQLi"},"verdict":"TRUE_POSITIVE","confidence":0.9,
-                     "fp_likelihood":0.1,"rationale":"r","remediation":"fix"}]"#;
-        let items = parse_crux_queue(j).unwrap();
-        assert_eq!(items[0].verdict, "TRUE_POSITIVE");
+    fn crux_triages_dast_findings_and_writes_verified_audit() {
+        let dir = unique_dir();
+        let items = CruxTriager::default()
+            .triage(
+                &[dast("n1", "http://localhost:3000/ping")],
+                dir.to_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(["TRUE_POSITIVE", "ABSTAIN", "LIKELY_FALSE_POSITIVE"]
+            .contains(&items[0].verdict.as_str()));
+        assert_eq!(items[0].finding["url"], "http://localhost:3000/ping");
+        assert_eq!(items[0].finding["category"], "DAST");
+        assert!(dir.join("audit.jsonl").exists());
+    }
+
+    #[test]
+    fn crux_merges_duplicate_findings() {
+        // Same CWE + same locus from two ids: Crux dedups them into one queue item.
+        let dir = unique_dir();
+        let items = CruxTriager::default()
+            .triage(
+                &[
+                    dast("a", "http://localhost:3000/ping"),
+                    dast("b", "http://localhost:3000/ping"),
+                ],
+                dir.to_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(items.len(), 1);
     }
 }

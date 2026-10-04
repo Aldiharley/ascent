@@ -7,11 +7,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ascent
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: ascent
+      # Crux is a path dependency (../crux), so check it out alongside.
+      - uses: actions/checkout@v4
+        with:
+          repository: Aldiharley/crux
+          path: crux
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test

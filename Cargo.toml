@@ -11,3 +11,7 @@ serde_yaml_ng = "0.10"   # maintained fork of serde_yaml
 clap = { version = "4", features = ["derive"] }
 ipnet = "2"
 url = "2"
+# Crux (the author's Apache-2.0 triage engine), linked as a library. Default
+# features off: drops its `anthropic` HTTPS client, so this binary carries no
+# network code at all and triage is the offline MockTriager.
+crux = { path = "../crux", default-features = false }
