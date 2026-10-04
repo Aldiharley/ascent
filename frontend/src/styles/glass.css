@@ -134,7 +134,9 @@ tbody tr:hover td{background:rgba(255,255,255,.82)}
 .note{font-size:11px;color:var(--faint);text-align:center}
 .audit{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
 .audit h3{margin:0;font-size:14px}
-.feed{display:flex;flex-direction:column;gap:11px;max-height:340px;overflow:auto;padding-right:4px}
+.feed{display:flex;flex-direction:column;gap:11px;overflow:auto;padding-right:4px}
+.side .feed{max-height:340px}
+.main .feed{max-height:calc(100vh - 220px)}
 .ev{display:flex;gap:10px;font-size:12px}
 .ev .tick{width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none;background:var(--accent)}
 .ev .m{color:var(--ink);line-height:1.4}
@@ -166,7 +168,7 @@ h1{font-size:0;margin:0}
 .nav button:focus-visible,.nav-foot:focus-visible,.segs button:focus-visible,.btn:focus-visible,.approve:focus-visible,.deny:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* ---- additions for the approval-gate screen (not in the mockup) ---- */
-.scope-bad{font-size:11px;color:var(--crit);font-weight:600}
+.scope-bad{font-size:11px;color:#b21f24;font-weight:600}
 .approve:disabled,.deny:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
 .toast-error .ic{background:linear-gradient(145deg,var(--crit),#b21f24);font-weight:800}
 /* keep action feedback visible on narrow screens (the mockup toast is hidden there) */
