@@ -24,8 +24,10 @@ pub struct Engagement {
     #[serde(default)]
     pub urls: Vec<String>,
     /// ISO-8601 with timezone. Stored but not enforced in the MVP.
+    #[allow(dead_code)]
     pub starts: String,
     /// ISO-8601 with timezone. Stored but not enforced in the MVP.
+    #[allow(dead_code)]
     pub ends: String,
 }
 
