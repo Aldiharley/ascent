@@ -171,3 +171,23 @@ h1{font-size:0;margin:0}
 .toast-error .ic{background:linear-gradient(145deg,var(--crit),#b21f24);font-weight:800}
 /* keep action feedback visible on narrow screens (the mockup toast is hidden there) */
 @media (max-width:640px){ .toast.gate-toast{display:flex;left:12px;right:12px;max-width:none} }
+
+/* ---- Report + Audit screens (not in the mockup) ---- */
+.report{padding:6px 22px 22px;overflow:auto;font-size:13.5px;line-height:1.6;color:var(--ink);overflow-wrap:anywhere}
+.report .report-title{font-size:22px;font-weight:800;letter-spacing:-.02em;margin:10px 0 8px}
+.report h2{font-size:17px;font-weight:700;margin:22px 0 8px}
+.report h3{font-size:14.5px;font-weight:700;margin:16px 0 6px}
+.report p{margin:8px 0}
+.report ul,.report ol{margin:8px 0;padding-left:22px}
+.report a{color:var(--accent);font-weight:600}
+.report code{font-family:var(--mono);font-size:12px;background:rgba(21,35,59,.06);padding:1px 5px;border-radius:6px}
+.report pre{background:rgba(21,35,59,.06);padding:12px 14px;border-radius:12px;overflow:auto}
+.report pre code{background:none;padding:0}
+.report blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid var(--stroke-soft);color:var(--muted)}
+.report table{border-collapse:collapse;margin:10px 0;display:block;overflow:auto}
+.report th,.report td{border:1px solid var(--stroke-soft);padding:6px 10px;text-align:left}
+.report hr{border:0;border-top:1px solid var(--stroke-soft);margin:16px 0}
+.chain{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;padding:8px 12px;border-radius:12px}
+.chain-ok{color:#0b6f69;background:rgba(18,165,148,.14)}
+.chain-fail{color:#fff;background:var(--crit);font-size:13px;box-shadow:0 8px 22px -10px var(--crit)}
+.ev .tick.human{background:var(--violet)}

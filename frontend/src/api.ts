@@ -92,3 +92,62 @@ export async function decideGate(id: string, decision: GateDecision): Promise<vo
     throw new GateDecisionError(res.status);
   }
 }
+
+// GET /api/report: the markdown report ("" when none exists yet). The text can
+// contain scanned-target data (titles, URLs): the Report screen must never
+// render it as raw HTML.
+export async function getReport(): Promise<string> {
+  const res = await fetch("/api/report");
+  if (!res.ok) {
+    throw new Error(`GET /api/report failed: ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  const md = (body as { markdown?: unknown } | null)?.markdown;
+  if (typeof md !== "string") {
+    throw new Error("GET /api/report returned an unexpected payload");
+  }
+  return md;
+}
+
+// GET /api/audit: hash-chained log. Two entry kinds share one list. Strings
+// may be attacker-influenced: render as React text only.
+export interface TriageAuditEntry {
+  ts?: string;
+  finding_id?: string;
+  finding_hash?: string;
+  triager?: string;
+  verdict?: string;
+  confidence?: number;
+  fp_likelihood?: number;
+  type?: undefined;
+  prev_hash?: string;
+  entry_hash?: string;
+}
+
+export interface GateAuditEntry {
+  ts?: string;
+  type: "gate_decision";
+  gate_id?: string;
+  decision?: "approved" | "denied";
+  prev_hash?: string;
+  entry_hash?: string;
+}
+
+export type AuditEntry = TriageAuditEntry | GateAuditEntry;
+
+export interface AuditLog {
+  entries: AuditEntry[];
+  chain_ok: boolean;
+}
+
+export async function getAudit(): Promise<AuditLog> {
+  const res = await fetch("/api/audit");
+  if (!res.ok) {
+    throw new Error(`GET /api/audit failed: ${res.status}`);
+  }
+  const body = (await res.json()) as Partial<AuditLog> | null;
+  if (!body || !Array.isArray(body.entries) || typeof body.chain_ok !== "boolean") {
+    throw new Error("GET /api/audit returned an unexpected payload");
+  }
+  return { entries: body.entries, chain_ok: body.chain_ok };
+}
