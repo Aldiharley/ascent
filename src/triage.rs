@@ -59,6 +59,10 @@ impl TriageEngine for CruxTriager {
         if !ok {
             return Err(format!("crux audit log failed verification: {msg}").into());
         }
+        std::fs::write(
+            dir.join("queue.json"),
+            serde_json::to_string_pretty(&items)? + "\n",
+        )?;
         // Crux's queue-entry serialisation is the `--emit-json` shape TriageItem reads.
         items
             .iter()
@@ -129,5 +133,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn crux_writes_queue_json_in_emit_json_shape() {
+        let dir = unique_dir();
+        CruxTriager::default()
+            .triage(
+                &[dast("n1", "http://localhost:3000/ping")],
+                dir.to_str().unwrap(),
+            )
+            .unwrap();
+        let q: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("queue.json")).unwrap())
+                .unwrap();
+        assert_eq!(q.len(), 1);
+        for k in [
+            "finding",
+            "verdict",
+            "confidence",
+            "fp_likelihood",
+            "rationale",
+            "remediation",
+            "triager",
+            "duplicates",
+        ] {
+            assert!(q[0].get(k).is_some(), "queue.json entry missing {k}");
+        }
+        assert_eq!(q[0]["finding"]["url"], "http://localhost:3000/ping");
     }
 }
