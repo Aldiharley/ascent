@@ -509,6 +509,50 @@ mod tests {
         assert!(!dir.join("audit.jsonl").exists());
     }
 
+    /// Failure mode: the audit append succeeded but gates.json was never
+    /// updated (e.g. rename failed), so the gate still looks pending.
+    fn crash_after_audit(dir: &Path, id: &str, decision: &str) {
+        crux_audit(dir);
+        dashboard::gates::append_decision(
+            &dir.join("audit.jsonl"),
+            id,
+            decision,
+            "2026-10-04T00:00:00.000000+00:00",
+        )
+        .unwrap();
+        write_gates(dir, json!([gate(id)]));
+    }
+
+    #[tokio::test]
+    async fn already_audited_gate_is_409_and_self_heals() {
+        let dir = tmp();
+        crash_after_audit(&dir, "g1", "approved");
+        let before = std::fs::read(dir.join("audit.jsonl")).unwrap();
+        // retry with the OPPOSITE decision must not be recorded
+        let resp = app_for(&dir)
+            .oneshot(api_post("/api/gates/g1/deny"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(std::fs::read(dir.join("audit.jsonl")).unwrap(), before);
+        assert_eq!(audit_lines(&dir).len(), 2);
+        assert!(crux::AuditLog::new(dir.join("audit.jsonl")).verify().0);
+        let stored: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("gates.json")).unwrap())
+                .unwrap();
+        assert_eq!(stored[0]["status"], "approved");
+        assert_eq!(stored[0]["decided_at"], "2026-10-04T00:00:00.000000+00:00");
+    }
+
+    #[tokio::test]
+    async fn gates_route_omits_already_audited_gate() {
+        let dir = tmp();
+        crash_after_audit(&dir, "g1", "denied");
+        let resp = app_for(&dir).oneshot(api_get("/api/gates")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await, json!([]));
+    }
+
     // ---- guard coverage carried over from Task 1 review ----
 
     #[tokio::test]

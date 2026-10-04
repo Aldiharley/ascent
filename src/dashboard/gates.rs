@@ -34,10 +34,46 @@ fn is_pending(gate: &Value) -> bool {
     gate.is_object() && gate.get("status").is_none()
 }
 
-/// Gates still awaiting a decision (no `status` field). Missing or invalid
-/// file -> empty.
+/// First `gate_decision` recorded in the audit log for each gate, as
+/// `(gate_id, status, ts)`. The audit log is the source of truth for decisions:
+/// it is written before `gates.json`, so it can be ahead of it after a failure.
+fn recorded_decisions(out_dir: &str) -> Vec<(String, &'static str, String)> {
+    let text = std::fs::read_to_string(Path::new(out_dir).join("audit.jsonl")).unwrap_or_default();
+    let mut seen: Vec<(String, &'static str, String)> = Vec::new();
+    for entry in text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+    {
+        if entry["type"] != "gate_decision" {
+            continue;
+        }
+        let (Some(id), Some(ts)) = (entry["gate_id"].as_str(), entry["ts"].as_str()) else {
+            continue;
+        };
+        let status = match entry["decision"].as_str() {
+            Some("approved") => "approved",
+            Some("denied") => "denied",
+            _ => continue,
+        };
+        if !seen.iter().any(|(i, _, _)| i == id) {
+            seen.push((id.to_string(), status, ts.to_string()));
+        }
+    }
+    seen
+}
+
+/// Gates still awaiting a decision: no `status` field and no recorded
+/// `gate_decision` in the audit log. Missing or invalid file -> empty.
 pub fn read_pending_gates(out_dir: &str) -> Vec<Value> {
-    all_gates(out_dir).into_iter().filter(is_pending).collect()
+    let decided = recorded_decisions(out_dir);
+    all_gates(out_dir)
+        .into_iter()
+        .filter(is_pending)
+        .filter(|g| {
+            let id = g.get("id").and_then(Value::as_str);
+            !decided.iter().any(|(d, _, _)| Some(d.as_str()) == id)
+        })
+        .collect()
 }
 
 fn now_ts() -> String {
@@ -49,7 +85,12 @@ fn now_ts() -> String {
 
 /// Append one Crux-compatible `gate_decision` entry. The caller has already
 /// verified the chain.
-fn append_decision(audit: &Path, gate_id: &str, decision: &str, ts: &str) -> Result<(), String> {
+pub fn append_decision(
+    audit: &Path,
+    gate_id: &str,
+    decision: &str,
+    ts: &str,
+) -> Result<(), String> {
     let text = match std::fs::read_to_string(audit) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -113,8 +154,16 @@ fn write_gates_atomic(out_dir: &str, gates: &[Value]) -> Result<(), String> {
     })
 }
 
+fn mark_resolved(gate: &mut Value, status: &str, ts: String) {
+    if let Some(obj) = gate.as_object_mut() {
+        obj.insert("status".into(), Value::from(status));
+        obj.insert("decided_at".into(), Value::from(ts));
+    }
+}
+
 /// Record a human decision on gate `id`. Order matters: validate the gate,
-/// verify the audit chain (never extend a broken one), append the audit entry,
+/// verify the audit chain (never extend a broken one), refuse (and self-heal)
+/// if the log already holds a decision for this gate, append the audit entry,
 /// and only then mark the gate resolved. The caller must serialise calls.
 /// `id` is only compared against ids inside `gates.json`.
 pub fn decide_gate(out_dir: &str, id: &str, approve: bool) -> Result<(), DecideError> {
@@ -132,13 +181,22 @@ pub fn decide_gate(out_dir: &str, id: &str, approve: bool) -> Result<(), DecideE
         return Err(DecideError::ChainBroken(msg));
     }
 
+    // A decision already in the audit log means a previous attempt crashed
+    // before gates.json was updated. Never record a second (possibly opposite)
+    // decision: heal gates.json from the log and report the gate as resolved.
+    if let Some((_, status, ts)) = recorded_decisions(out_dir)
+        .into_iter()
+        .find(|(g, _, _)| g == id)
+    {
+        mark_resolved(&mut gates[idx], status, ts);
+        write_gates_atomic(out_dir, &gates).map_err(DecideError::Io)?;
+        return Err(DecideError::Resolved);
+    }
+
     let (status, ts) = (if approve { "approved" } else { "denied" }, now_ts());
     append_decision(&audit, id, status, &ts).map_err(DecideError::Io)?;
 
-    if let Some(obj) = gates[idx].as_object_mut() {
-        obj.insert("status".into(), Value::from(status));
-        obj.insert("decided_at".into(), Value::from(ts));
-    }
+    mark_resolved(&mut gates[idx], status, ts);
     write_gates_atomic(out_dir, &gates).map_err(DecideError::Io)
 }
 
