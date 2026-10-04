@@ -1,14 +1,16 @@
 use axum::{
     extract::{Path, Request, State},
-    http::{header, HeaderMap, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 #[path = "../dashboard/mod.rs"]
 mod dashboard;
@@ -120,8 +122,30 @@ fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({ "ok": false, "error": msg })))
 }
 
+/// Where the built UI lives: `ASCENT_DIST` if set (and non-empty), else the
+/// crate's own `frontend/dist`, so the static files do not depend on the CWD.
+fn dist_dir_from(env: Option<String>) -> PathBuf {
+    match env {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/dist")),
+    }
+}
+
+/// Sent on EVERY response (API, static files, 403s, 404s). Forbids framing so
+/// Approve cannot be clickjacked, and pins scripts/connections to this origin.
+/// `'unsafe-inline'` in style-src only covers React `style={{...}}` attributes;
+/// the only third-party loads are the Google Fonts stylesheet and font files.
+const CSP: &str = "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
+
+const SECURITY_HEADERS: [(&str, &str); 4] = [
+    ("x-frame-options", "DENY"),
+    ("x-content-type-options", "nosniff"),
+    ("referrer-policy", "no-referrer"),
+    ("content-security-policy", CSP),
+];
+
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let app = Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
         .route("/api/engagement", get(engagement))
         .route("/api/findings", get(findings))
@@ -129,10 +153,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/report", get(report))
         .route("/api/gates", get(gates))
         .route("/api/gates/:id/:decision", post(decide))
-        .fallback_service(ServeDir::new("frontend/dist"))
+        .fallback_service(ServeDir::new(dist_dir_from(
+            std::env::var("ASCENT_DIST").ok(),
+        )))
         .with_state(Arc::new(state))
-        // Must stay the LAST call so no route escapes the guard.
-        .layer(middleware::from_fn(guard))
+        // The guard wraps every route and the static fallback, so no route
+        // escapes it.
+        .layer(middleware::from_fn(guard));
+    // Outermost: the security headers also land on the guard's own 403s.
+    SECURITY_HEADERS.iter().fold(app, |app, (name, value)| {
+        app.layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        ))
+    })
 }
 
 #[tokio::main]
@@ -597,5 +631,81 @@ mod tests {
     async fn post_without_origin_rejected() {
         let resp = send(post(None, Some("1"))).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ---- F1: anti-framing / security headers on every response ----
+
+    fn assert_security_headers(resp: &axum::response::Response) {
+        let h = resp.headers();
+        assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(h.get("referrer-policy").unwrap(), "no-referrer");
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"), "csp: {csp}");
+        assert!(csp.contains("script-src 'self'"), "csp: {csp}");
+        assert!(csp.contains("default-src 'self'"), "csp: {csp}");
+    }
+
+    #[tokio::test]
+    async fn security_headers_on_api() {
+        let resp = send(get(Some("127.0.0.1:8787"))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_security_headers(&resp);
+    }
+
+    #[tokio::test]
+    async fn security_headers_on_static_fallback() {
+        let req = Request::builder()
+            .uri("/")
+            .header("host", "127.0.0.1:8787")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(req).await;
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN);
+        assert_security_headers(&resp);
+    }
+
+    #[tokio::test]
+    async fn security_headers_on_static_404() {
+        let req = Request::builder()
+            .uri("/no-such-file.js")
+            .header("host", "127.0.0.1:8787")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_security_headers(&resp);
+    }
+
+    #[tokio::test]
+    async fn security_headers_on_guard_403() {
+        let resp = send(get(Some("evil.example:8787"))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_security_headers(&resp);
+    }
+
+    #[tokio::test]
+    async fn security_headers_on_post_403() {
+        let resp = send(post(Some("http://evil.example"), Some("1"))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_security_headers(&resp);
+    }
+
+    // ---- F9: dist dir does not depend on the CWD ----
+
+    #[test]
+    fn dist_dir_defaults_to_manifest_dir() {
+        let d = dist_dir_from(None);
+        assert!(d.is_absolute(), "{d:?}");
+        assert!(d.ends_with("frontend/dist"), "{d:?}");
+        assert!(d.starts_with(env!("CARGO_MANIFEST_DIR")), "{d:?}");
+    }
+
+    #[test]
+    fn dist_dir_honours_ascent_dist() {
+        let d = dist_dir_from(Some("C:/somewhere/dist".into()));
+        assert_eq!(d, std::path::PathBuf::from("C:/somewhere/dist"));
+        // an empty value is treated as unset
+        assert!(dist_dir_from(Some(String::new())).ends_with("frontend/dist"));
     }
 }

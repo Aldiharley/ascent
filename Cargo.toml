@@ -22,7 +22,7 @@ url = "2"
 crux = { path = "../crux", default-features = false }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
