@@ -60,7 +60,7 @@ impl TriageEngine for CruxTriager {
             .arg(dir.join("triage_report.md"))
             .status()?;
         if !status.success() {
-            return Err("crux triage failed".into());
+            return Err(format!("crux triage failed: {status}").into());
         }
         Ok(parse_crux_queue(&std::fs::read_to_string(&q_path)?)?)
     }
