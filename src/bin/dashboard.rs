@@ -173,18 +173,45 @@ pub fn router(state: AppState) -> Router {
     })
 }
 
+/// Loopback only: the dashboard is never exposed beyond this machine.
+const ADDR: &str = "127.0.0.1:8787";
+
+/// A human-readable reason the dashboard could not start listening.
+fn bind_error_message(addr: &str, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        format!(
+            "{addr} is already in use: another Ascent dashboard (or another program) is \
+             already running on this port.\n\
+             Open http://{addr} to use the running one, or stop it first (Ctrl+C in its \
+             window, or on Windows: Get-NetTCPConnection -LocalPort 8787 -State Listen | \
+             ForEach-Object {{ Stop-Process -Id $_.OwningProcess }})."
+        )
+    } else {
+        format!("could not listen on {addr}: {e}")
+    }
+}
+
 #[tokio::main]
-async fn main() {
-    let state = AppState::new(
-        std::env::var("ASCENT_OUT").unwrap_or_else(|_| "out".into()),
-        std::env::var("ASCENT_ENG").unwrap_or_else(|_| "samples/engagement.example.yaml".into()),
-    );
-    let app = router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8787")
-        .await
-        .expect("bind 127.0.0.1:8787");
-    println!("ascent dashboard on http://127.0.0.1:8787");
-    axum::serve(listener, app).await.expect("serve");
+async fn main() -> std::process::ExitCode {
+    let out_dir = std::env::var("ASCENT_OUT").unwrap_or_else(|_| "out".into());
+    let engagement =
+        std::env::var("ASCENT_ENG").unwrap_or_else(|_| "samples/engagement.example.yaml".into());
+    let app = router(AppState::new(out_dir.clone(), engagement.clone()));
+    let listener = match tokio::net::TcpListener::bind(ADDR).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: {}", bind_error_message(ADDR, &e));
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    println!("ascent dashboard on http://{ADDR}");
+    println!("  results:    {out_dir}  (set ASCENT_OUT to change)");
+    println!("  engagement: {engagement}  (set ASCENT_ENG to change)");
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("error: dashboard server stopped: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
 }
 
 #[cfg(test)]
@@ -196,6 +223,36 @@ mod tests {
 
     fn app() -> Router {
         router(AppState::new("out".into(), "e.yaml".into()))
+    }
+
+    #[test]
+    fn bind_error_explains_port_in_use() {
+        let e = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        let msg = bind_error_message(ADDR, &e);
+        assert!(msg.contains("127.0.0.1:8787 is already in use"), "{msg}");
+        assert!(msg.contains("another Ascent dashboard"), "{msg}");
+        assert!(msg.contains("Stop-Process"), "{msg}");
+    }
+
+    #[test]
+    fn bind_error_other_kinds_are_reported_plainly() {
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = bind_error_message(ADDR, &e);
+        assert!(
+            msg.starts_with("could not listen on 127.0.0.1:8787"),
+            "{msg}"
+        );
+        assert!(!msg.contains("already in use"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn second_bind_on_same_port_is_addr_in_use() {
+        // Guards the assumption bind_error_message relies on: a second listener on
+        // a taken loopback port fails with AddrInUse (on Windows and Unix alike).
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = first.local_addr().unwrap();
+        let err = tokio::net::TcpListener::bind(addr).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
     }
 
     async fn send(req: Request<Body>) -> axum::response::Response {
