@@ -6,7 +6,7 @@ use crate::stages::{
     recon::recon,
     scan::{ensure_nuclei_version, scan},
 };
-use crate::triage::TriageEngine;
+use crate::triage::{write_atomic, TriageEngine};
 use std::path::Path;
 
 pub struct Summary {
@@ -25,6 +25,9 @@ pub fn run_pipeline(
     dry_run: bool,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(out_dir)?;
+    // Reset the triage queue up front so a re-run that yields no findings (or
+    // fails before triage writes it) never shows the previous run's findings.
+    write_atomic(&Path::new(out_dir).join("queue.json"), b"[]\n")?;
     // In dry-run the runner returns empty output, which would always fail the version gate.
     if !dry_run {
         ensure_nuclei_version(runner)?;
@@ -175,6 +178,50 @@ mod tests {
         let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false).unwrap();
         assert!(s.findings >= 1);
         assert!(std::path::Path::new(&s.report_path).exists());
+    }
+
+    fn queue(dir: &str) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(std::path::Path::new(dir).join("queue.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn seed_stale_queue(dir: &str) {
+        std::fs::write(
+            std::path::Path::new(dir).join("queue.json"),
+            r#"[{"verdict":"TRUE_POSITIVE","finding":{"title":"stale from last run"}}]"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rerun_with_no_findings_resets_queue_json() {
+        let dir = unique_dir();
+        seed_stale_queue(&dir);
+        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true).unwrap();
+        assert_eq!(s.findings, 0);
+        assert_eq!(queue(&dir), json!([]));
+        assert!(!std::path::Path::new(&dir).join("queue.json.tmp").exists());
+    }
+
+    struct FailTri;
+    impl TriageEngine for FailTri {
+        fn triage(
+            &self,
+            _f: &[Finding],
+            _o: &str,
+        ) -> Result<Vec<TriageItem>, Box<dyn std::error::Error>> {
+            Err("triage failed".into())
+        }
+    }
+
+    #[test]
+    fn failed_triage_leaves_empty_queue_json() {
+        let dir = unique_dir();
+        seed_stale_queue(&dir);
+        assert!(run_pipeline(&engagement(), &FakeRun, &FailTri, &dir, false).is_err());
+        assert_eq!(queue(&dir), json!([]));
     }
 
     #[test]

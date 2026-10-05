@@ -1,0 +1,10 @@
+[
+  {
+    "id": "g1",
+    "title": "Confirm SSRF on /api/fetch",
+    "why": "Triage marked the SSRF finding TRUE_POSITIVE with high confidence; a detect-only template run against the lab target would confirm it before it goes in the report.",
+    "command": "nuclei -u http://localhost:3000/api/fetch -tags ssrf -severity medium,high -rate-limit 5",
+    "target": "http://localhost:3000/api/fetch",
+    "in_scope": true
+  }
+]

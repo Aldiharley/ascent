@@ -2,7 +2,12 @@
 name = "ascent"
 version = "0.1.0"
 edition = "2021"
+default-run = "ascent"
 license = "Apache-2.0"
+
+[[bin]]
+name = "dashboard"
+path = "src/bin/dashboard.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -12,6 +17,13 @@ clap = { version = "4", features = ["derive"] }
 ipnet = "2"
 url = "2"
 # Crux (the author's Apache-2.0 triage engine), linked as a library. Default
-# features off: drops its `anthropic` HTTPS client, so this binary carries no
-# network code at all and triage is the offline MockTriager.
+# features off: drops its `anthropic` HTTPS client, so the `ascent` CLI binary
+# links no network code and triage is the offline MockTriager. The separate
+# `dashboard` binary (axum/tokio below) serves loopback-only HTTP.
 crux = { path = "../crux", default-features = false }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
