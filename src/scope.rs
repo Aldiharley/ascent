@@ -23,6 +23,11 @@ pub struct Engagement {
     pub cidrs: Vec<String>,
     #[serde(default)]
     pub urls: Vec<String>,
+    /// Authorised source root for the SAST track (empty = no SAST).
+    /// Not read until the SAST stage lands.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub source: String,
     /// ISO-8601 with timezone. Stored but not enforced in the MVP.
     #[allow(dead_code)]
     pub starts: String,
@@ -230,9 +235,19 @@ mod tests {
             hosts: vec!["example.com".into()],
             cidrs: vec!["10.0.0.0/24".into()],
             urls: vec!["https://app.example.com/".into()],
+            source: String::new(),
             starts: "2026-01-01T00:00:00Z".into(),
             ends: "2030-01-01T00:00:00Z".into(),
         }
+    }
+    #[test]
+    fn engagement_parses_optional_source() {
+        let y = "name: t\nurls: ['http://localhost:3000/']\nsource: ./src\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\n";
+        let e: Engagement = serde_yaml_ng::from_str(y).unwrap();
+        assert_eq!(e.source, "./src");
+        let y2 = "name: t\nhosts: [localhost]\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\n";
+        let e2: Engagement = serde_yaml_ng::from_str(y2).unwrap();
+        assert_eq!(e2.source, "");
     }
     #[test]
     fn host_and_subdomain() {
@@ -261,6 +276,7 @@ mod tests {
                 "http://198.51.100.9:8080/".into(),
                 "https://App.Lab.Test/".into(),
             ],
+            source: String::new(),
             starts: "2026-01-01T00:00:00Z".into(),
             ends: "2030-01-01T00:00:00Z".into(),
         }
@@ -353,6 +369,7 @@ mod tests {
             hosts: vec!["".into(), " ".into(), "*".into(), ".".into()],
             cidrs: vec![],
             urls: vec!["".into(), "http://".into(), "garbage".into()],
+            source: String::new(),
             starts: "2026-01-01T00:00:00Z".into(),
             ends: "2030-01-01T00:00:00Z".into(),
         };

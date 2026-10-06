@@ -97,6 +97,7 @@ mod tests {
             hosts: vec!["example.com".into()],
             cidrs: vec![],
             urls: vec!["https://app.example.com".into()],
+            source: String::new(),
             starts: "x".into(),
             ends: "y".into(),
         }
