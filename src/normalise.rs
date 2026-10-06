@@ -60,6 +60,19 @@ fn cwe_first(v: &Value) -> String {
     raw.split(':').next().unwrap_or("").trim().to_string()
 }
 
+/// Every `CWE-<n>` token in a `cwe` metadata value (array of strings or a single string).
+fn cwe_all(v: &Value) -> Vec<String> {
+    let items: Vec<&str> = match v.as_array() {
+        Some(a) => a.iter().filter_map(|x| x.as_str()).collect(),
+        None => v.as_str().into_iter().collect(),
+    };
+    items
+        .iter()
+        .map(|s| s.split(':').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 pub fn normalise_opengrep(rows: &[Value]) -> Vec<Finding> {
     let mut out = Vec::new();
     for row in rows {
@@ -77,17 +90,39 @@ pub fn normalise_opengrep(rows: &[Value]) -> Vec<Finding> {
             let col = r["start"]["col"].as_i64().unwrap_or(0);
             let rid = r["check_id"].as_str().unwrap_or("opengrep").to_string();
             let cwe = cwe_first(&r["extra"]["metadata"]["cwe"]);
-            // Secret-class rules must not carry the matched source line (it may hold the secret).
+            // Secret-class rules must not carry the matched source line or a message that
+            // may interpolate the secret (e.g. a `$SECRET` metavariable).
             let rid_lc = rid.to_lowercase();
-            let secret_rule = cwe == "CWE-798"
-                || cwe == "CWE-259"
-                || ["secret", "password", "credential"]
-                    .iter()
-                    .any(|k| rid_lc.contains(k));
-            let evidence = if secret_rule {
-                String::new()
+            let secret_rule = cwe_all(&r["extra"]["metadata"]["cwe"])
+                .iter()
+                .any(|c| matches!(c.as_str(), "CWE-798" | "CWE-259" | "CWE-321" | "CWE-312"))
+                || [
+                    "secret",
+                    "password",
+                    "credential",
+                    "token",
+                    "api-key",
+                    "apikey",
+                    "private-key",
+                    "privatekey",
+                    "jwt",
+                ]
+                .iter()
+                .any(|k| rid_lc.contains(k));
+            let (evidence, message) = if secret_rule {
+                (
+                    String::new(),
+                    "Potential hardcoded secret detected (details redacted).".to_string(),
+                )
             } else {
-                r["extra"]["lines"].as_str().unwrap_or("").to_string()
+                (
+                    r["extra"]["lines"].as_str().unwrap_or("").to_string(),
+                    r["extra"]["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                )
             };
             out.push(Finding {
                 id: format!("opengrep:{rid}:{path}:{line}:{col}"),
@@ -95,11 +130,7 @@ pub fn normalise_opengrep(rows: &[Value]) -> Vec<Finding> {
                 rule_id: rid.clone(),
                 severity: sev_from_semgrep(r["extra"]["severity"].as_str().unwrap_or("INFO")),
                 title: rid,
-                message: r["extra"]["message"]
-                    .as_str()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string(),
+                message,
                 url: String::new(),
                 file: path.to_string(),
                 line,
@@ -242,6 +273,45 @@ mod sast_tests {
         // A non-secret rule keeps its evidence.
         let out = normalise_opengrep(&[mk("rust.lang.security.sqli", "CWE-89")]);
         assert_eq!(out[0].evidence, "pw = 'hunter2'");
+    }
+
+    #[test]
+    fn opengrep_secret_class_scans_all_cwes_and_more_keywords_and_blanks_message() {
+        let mk = |rid: &str, cwes: Value| {
+            json!({"results":[{
+                "check_id":rid,"path":"a.py","start":{"line":3,"col":5},
+                "extra":{"severity":"ERROR","message":"found key $SECRET=abc123",
+                         "metadata":{"cwe":cwes},"lines":"k = 'abc123'"}}]})
+        };
+        // Secret CWE appears second, not first.
+        let out = normalise_opengrep(&[mk("generic.rule", json!(["CWE-312", "CWE-798"]))]);
+        assert_eq!(out[0].evidence, "");
+        assert!(!out[0].message.contains("abc123"), "{}", out[0].message);
+        assert_eq!(
+            out[0].message,
+            "Potential hardcoded secret detected (details redacted)."
+        );
+        for cwe in ["CWE-321", "CWE-312", "CWE-259"] {
+            let out = normalise_opengrep(&[mk("generic.rule", json!([cwe]))]);
+            assert_eq!(out[0].evidence, "", "evidence kept for {cwe}");
+        }
+        // Extra rule-id keywords.
+        for rid in [
+            "x.hardcoded-token",
+            "x.JWT-none",
+            "x.api-key",
+            "x.apikey-leak",
+            "x.private-key",
+            "x.PrivateKey",
+        ] {
+            let out = normalise_opengrep(&[mk(rid, json!(["CWE-89"]))]);
+            assert_eq!(out[0].evidence, "", "evidence kept for {rid}");
+            assert!(!out[0].message.contains("abc123"), "message kept for {rid}");
+        }
+        // Non-secret rule keeps evidence and message.
+        let out = normalise_opengrep(&[mk("rust.lang.security.sqli", json!(["CWE-89"]))]);
+        assert_eq!(out[0].evidence, "k = 'abc123'");
+        assert_eq!(out[0].message, "found key $SECRET=abc123");
     }
 
     #[test]

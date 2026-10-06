@@ -31,15 +31,16 @@ pub fn sast(
         let args = vec![
             "--json".into(),
             "--quiet".into(),
+            "--metrics=off".into(),
             "--config".into(),
             "auto".into(),
             source_dir.into(),
         ];
-        findings.extend(normalise_opengrep(&runner.run_json(
-            "opengrep",
-            &args,
-            &[],
-        )?));
+        // A tool that spawns but then errors must not drop the other analysers' findings.
+        match runner.run_json("opengrep", &args, &[]) {
+            Ok(rows) => findings.extend(normalise_opengrep(&rows)),
+            Err(_) => eprintln!("sast: opengrep failed; continuing without its findings"),
+        }
     }
     if tool_available(runner, "gitleaks", "version") {
         let args = vec![
@@ -48,15 +49,14 @@ pub fn sast(
             "--report-format".into(),
             "json".into(),
             "--report-path".into(),
-            "/dev/stdout".into(),
+            "-".into(),
             "--source".into(),
             source_dir.into(),
         ];
-        findings.extend(normalise_gitleaks(&runner.run_json(
-            "gitleaks",
-            &args,
-            &[],
-        )?));
+        match runner.run_json("gitleaks", &args, &[]) {
+            Ok(rows) => findings.extend(normalise_gitleaks(&rows)),
+            Err(_) => eprintln!("sast: gitleaks failed; continuing without its findings"),
+        }
     }
     if tool_available(runner, "trivy", "--version") {
         let args = vec![
@@ -66,7 +66,10 @@ pub fn sast(
             "json".into(),
             source_dir.into(),
         ];
-        findings.extend(normalise_trivy(&runner.run_json("trivy", &args, &[])?));
+        match runner.run_json("trivy", &args, &[]) {
+            Ok(rows) => findings.extend(normalise_trivy(&rows)),
+            Err(_) => eprintln!("sast: trivy failed; continuing without its findings"),
+        }
     }
     Ok(findings)
 }
@@ -80,6 +83,7 @@ mod tests {
 
     struct Fake {
         present: Vec<&'static str>,
+        fail_json: Vec<&'static str>,
         calls: RefCell<Vec<(String, Vec<String>)>>,
     }
     impl Runner for Fake {
@@ -106,6 +110,9 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push((tool.to_string(), args.to_vec()));
+            if self.fail_json.contains(&tool) {
+                return Err("tool crashed".into());
+            }
             Ok(match tool {
                 "opengrep" => vec![
                     json!({"results":[{"check_id":"r","path":"a.rs","start":{"line":1},"extra":{"severity":"ERROR","message":"m","metadata":{"cwe":["CWE-89"]}}}]}),
@@ -125,6 +132,7 @@ mod tests {
     fn sast_runs_only_available_tools_and_merges() {
         let f = Fake {
             present: vec!["opengrep", "trivy"],
+            fail_json: vec![],
             calls: RefCell::new(vec![]),
         };
         let out = sast(&f, ".").unwrap();
@@ -143,9 +151,39 @@ mod tests {
     fn sast_with_no_tools_is_empty() {
         let f = Fake {
             present: vec![],
+            fail_json: vec![],
             calls: RefCell::new(vec![]),
         };
         assert!(sast(&f, ".").unwrap().is_empty());
+    }
+
+    #[test]
+    fn sast_survives_one_tool_erroring_and_keeps_the_others() {
+        let f = Fake {
+            present: vec!["opengrep", "gitleaks", "trivy"],
+            fail_json: vec!["opengrep"],
+            calls: RefCell::new(vec![]),
+        };
+        let out = sast(&f, ".").unwrap();
+        let tools: Vec<&str> = out.iter().map(|x| x.tool.as_str()).collect();
+        assert!(!tools.contains(&"opengrep"));
+        assert!(tools.contains(&"gitleaks") && tools.contains(&"trivy"));
+    }
+
+    #[test]
+    fn sast_uses_portable_flags_and_disables_metrics() {
+        let f = Fake {
+            present: vec!["opengrep", "gitleaks", "trivy"],
+            fail_json: vec![],
+            calls: RefCell::new(vec![]),
+        };
+        sast(&f, ".").unwrap();
+        let calls = f.calls.borrow();
+        let args_of = |t: &str| calls.iter().find(|(n, _)| n == t).unwrap().1.clone();
+        assert!(args_of("opengrep").contains(&"--metrics=off".to_string()));
+        let gl = args_of("gitleaks");
+        let i = gl.iter().position(|a| a == "--report-path").unwrap();
+        assert_eq!(gl[i + 1], "-");
     }
 
     #[test]
@@ -153,5 +191,20 @@ mod tests {
         let root = std::env::temp_dir();
         assert!(is_within(&root, &root));
         assert!(!is_within(&root.join("sub"), &root)); // parent is not within child
+    }
+
+    #[test]
+    fn is_within_rejects_dotdot_escape_and_missing_paths() {
+        let base = std::env::temp_dir().join(format!("ascent_iswithin_{}", std::process::id()));
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        // Inside, even via a `..` detour.
+        assert!(is_within(&root, &root.join("sub/..")));
+        // `..` climbs out of root to its (existing) parent: must be rejected.
+        assert!(!is_within(&root, &root.join("sub/../..")));
+        // Nonexistent candidate or root fails closed.
+        assert!(!is_within(&root, &root.join("does-not-exist")));
+        assert!(!is_within(&base.join("missing-root"), &root));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
