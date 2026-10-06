@@ -5,7 +5,6 @@ use std::path::Path;
 
 /// True iff `candidate` resolves to a path inside `root`. Both must exist;
 /// canonicalisation collapses `..` and resolves symlinks, so neither can escape.
-#[allow(dead_code)] // wired into the pipeline in Task 4
 pub fn is_within(root: &Path, candidate: &Path) -> bool {
     match (root.canonicalize(), candidate.canonicalize()) {
         (Ok(r), Ok(c)) => c.starts_with(&r),
@@ -14,14 +13,12 @@ pub fn is_within(root: &Path, candidate: &Path) -> bool {
 }
 
 /// A tool is "available" if its binary spawns (exit status is irrelevant).
-#[allow(dead_code)] // wired into the pipeline in Task 4
 pub fn tool_available(runner: &dyn Runner, tool: &str, version_arg: &str) -> bool {
     runner.run_text(tool, &[version_arg.into()], &[]).is_ok()
 }
 
 /// Runs each available analyser over `source_dir` (always with EMPTY network
 /// targets) and merges the normalised findings. Missing tools are skipped.
-#[allow(dead_code)] // wired into the pipeline in Task 4
 pub fn sast(
     runner: &dyn Runner,
     source_dir: &str,

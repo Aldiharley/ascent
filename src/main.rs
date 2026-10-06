@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let eng = load_engagement(&engagement)?;
             let runner = ToolRunner::new(ScopeGuard::new(&eng), dry_run);
-            let s = run_pipeline(&eng, &runner, &CruxTriager::default(), &out, dry_run)?;
+            let s = run_pipeline(&eng, &runner, &CruxTriager::default(), &out, dry_run, None)?;
             println!(
                 "urls={} findings={} triaged={}",
                 s.urls, s.findings, s.triaged

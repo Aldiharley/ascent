@@ -24,8 +24,6 @@ pub struct Engagement {
     #[serde(default)]
     pub urls: Vec<String>,
     /// Authorised source root for the SAST track (empty = no SAST).
-    /// Not read until the SAST stage lands.
-    #[allow(dead_code)]
     #[serde(default)]
     pub source: String,
     /// ISO-8601 with timezone. Stored but not enforced in the MVP.
