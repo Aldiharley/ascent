@@ -1,0 +1,16 @@
+# Lab engagement for a local OWASP Juice Shop on http://localhost:3000/.
+# AUTHORISED LAB TARGETS ONLY.
+#
+# `hosts` is deliberately empty. When a host is listed, the pipeline starts with
+# recon from that host and ignores `urls`, and recon probes only the default web
+# ports, so it would miss Juice Shop on :3000. With no hosts, the pipeline starts
+# from the URL below: katana crawl, then nuclei scan. Scope still covers
+# `localhost` (the URL's host) and 127.0.0.0/8.
+name: juice-shop-lab
+hosts: []
+cidrs:
+  - 127.0.0.0/8
+urls:
+  - http://localhost:3000/
+starts: "2026-01-01T00:00:00Z"
+ends: "2030-01-01T00:00:00Z"
