@@ -125,3 +125,13 @@ test("deciding a gate refreshes the audit feed", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
   expect(await screen.findByText(/gate g1 → approved/)).toBeInTheDocument();
 });
+
+test("a crash in the gates panel leaves the findings table working", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  // An object title is not a valid React child, so the Gates panel throws on render.
+  mockApi({ "/api/gates": () => json([{ ...gate, title: { not: "text" } }]) });
+  render(<App />);
+  expect(await screen.findByText("SSRF in fetch")).toBeInTheDocument();
+  expect(await screen.findByText("This view failed to render.")).toBeInTheDocument();
+  expect(await screen.findByText("Hash chain OK")).toBeInTheDocument();
+});
