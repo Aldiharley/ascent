@@ -34,6 +34,9 @@ enum Cmd {
         /// Plan only: spawn no tools and make no network requests.
         #[arg(long)]
         dry_run: bool,
+        /// Optional source directory for the white-box SAST track (overrides the engagement's `source`).
+        #[arg(long)]
+        source: Option<String>,
     },
 }
 
@@ -43,10 +46,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engagement,
             out,
             dry_run,
+            source,
         } => {
             let eng = load_engagement(&engagement)?;
             let runner = ToolRunner::new(ScopeGuard::new(&eng), dry_run);
-            let s = run_pipeline(&eng, &runner, &CruxTriager::default(), &out, dry_run, None)?;
+            let s = run_pipeline(
+                &eng,
+                &runner,
+                &CruxTriager::default(),
+                &out,
+                dry_run,
+                source.as_deref(),
+            )?;
             println!(
                 "urls={} findings={} triaged={}",
                 s.urls, s.findings, s.triaged
@@ -79,6 +90,21 @@ mod tests {
             "--dry-run"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn parses_source_flag() {
+        let c = Cli::try_parse_from([
+            "ascent",
+            "run",
+            "--engagement",
+            "e.yaml",
+            "--source",
+            "./src",
+        ])
+        .unwrap();
+        let super::Cmd::Run { source, .. } = c.cmd;
+        assert_eq!(source.as_deref(), Some("./src"));
     }
 
     #[test]
