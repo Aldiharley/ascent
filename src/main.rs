@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+mod gatesio;
 mod models;
 mod normalise;
 mod pipeline;
