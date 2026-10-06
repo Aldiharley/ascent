@@ -193,3 +193,11 @@ h1{font-size:0;margin:0}
 .chain-ok{color:#0b6f69;background:rgba(18,165,148,.14)}
 .chain-fail{color:#fff;background:var(--crit);font-size:13px;box-shadow:0 8px 22px -10px var(--crit)}
 .ev .tick.human{background:var(--violet)}
+
+/* --- shell cleanup: placeholders removed (search, avatar, settings) --- */
+/* visually hidden but exposed to assistive tech; independent of the mockup's h1{font-size:0} */
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);clip-path:inset(50%);white-space:nowrap;border:0}
+/* neutral status dot when no engagement is loaded */
+.dot.idle{background:var(--faint);box-shadow:0 0 0 4px rgba(21,35,59,.08)}
+/* the search box used to set the topbar height; keep a single tidy row without it */
+.topbar{min-height:64px}

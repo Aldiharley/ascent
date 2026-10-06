@@ -83,13 +83,16 @@ export interface ShellProps {
   status?: string;
 }
 
+const DEFAULT_STATUS = "no engagement loaded";
+
 export function Shell({
   children,
   aside,
   active = "overview",
   onNavigate,
-  status = "no engagement loaded",
+  status = DEFAULT_STATUS,
 }: ShellProps) {
+  const idle = status === DEFAULT_STATUS;
   return (
     <>
       <div className="field" aria-hidden="true">
@@ -118,28 +121,13 @@ export function Shell({
               </button>
             ))}
           </div>
-          <button type="button" className="nav-foot" aria-label="Settings" title="Settings">
-            <svg {...svgProps}>
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.3 1a7 7 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7 7 0 0 0-1.7 1l-2.3-1-2 3.5L4.1 11a7 7 0 0 0 0 2l-2 1.5 2 3.5 2.3-1a7 7 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7 7 0 0 0 1.7-1l2.3 1 2-3.5-2-1.5c.07-.33.1-.66.1-1z" />
-            </svg>
-          </button>
         </nav>
 
         <main className="main">
           <header className="topbar glass">
-            <div className="search">
-              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-3-3" />
-              </svg>
-              <input type="search" aria-label="Search" placeholder="Search findings, hosts, rules, CWE…" />
-            </div>
+            <h1 className="sr-only">Ascent Console</h1>
             <div className="eng">
-              <span className="dot" aria-hidden="true" /> {status}
-            </div>
-            <div className="avatar" aria-hidden="true">
-              DL
+              <span className={idle ? "dot idle" : "dot"} aria-hidden="true" /> {status}
             </div>
           </header>
           {children}
