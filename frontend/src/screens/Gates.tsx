@@ -163,12 +163,25 @@ export function Gates({ onDecided }: GatesProps = {}) {
             const working = busy.has(g.id);
             return (
               <div className="gcard" key={g.id}>
-                <div className="t">{g.title}</div>
+                <div className="t">
+                  {g.title}
+                  {g.detect_only === true && <span className="badge-detect">DETECT-ONLY</span>}
+                </div>
                 <div className="why">{g.why}</div>
                 <div className="why">
                   Target: <span className="loc">{g.target}</span>
                 </div>
                 <div className="cmd">{g.command}</div>
+                {typeof g.expected_evidence === "string" && g.expected_evidence !== "" && (
+                  <div className="why">
+                    <b>Expected evidence:</b> <span>{g.expected_evidence}</span>
+                  </div>
+                )}
+                {typeof g.why_it_might_fail === "string" && g.why_it_might_fail !== "" && (
+                  <div className="why">
+                    <b>Why it might fail:</b> <span>{g.why_it_might_fail}</span>
+                  </div>
+                )}
                 {inScope ? (
                   <div className="scope-ok">
                     <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">

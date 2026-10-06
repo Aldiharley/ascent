@@ -58,6 +58,10 @@ export interface Gate {
   command: string;
   target: string;
   in_scope: boolean;
+  // Proposer metadata (optional; absent on older gates). Render as text only.
+  detect_only?: boolean;
+  expected_evidence?: string;
+  why_it_might_fail?: string;
 }
 
 export type GateDecision = "approve" | "deny";
