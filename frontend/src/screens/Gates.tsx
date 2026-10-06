@@ -8,12 +8,17 @@ type State =
   | { status: "ready"; gates: Gate[] };
 
 interface ToastMsg {
-  kind: "ok" | "error";
+  kind: "ok" | "info" | "error";
   title: string;
   detail: string;
 }
 
+interface ToastItem extends ToastMsg {
+  key: number;
+}
+
 const TOAST_MS = 5000;
+const MAX_TOASTS = 4;
 
 export interface GatesProps {
   /** Called after a decision is recorded (or found already recorded), so a sibling audit view can refresh. */
@@ -23,26 +28,40 @@ export interface GatesProps {
 export function Gates({ onDecided }: GatesProps = {}) {
   const [state, setState] = useState<State>({ status: "loading" });
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
-  const [toast, setToast] = useState<ToastMsg | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const timers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const inFlight = useRef<Set<string>>(new Set());
+  const nextKey = useRef(0);
   const live = useRef(true);
 
-  useEffect(() => {
-    live.current = true;
+  function load() {
+    setState({ status: "loading" });
     getGates().then(
       (gates) => live.current && setState({ status: "ready", gates }),
       () => live.current && setState({ status: "error" }),
     );
+  }
+
+  useEffect(() => {
+    live.current = true;
+    load();
+    const pending = timers.current;
     return () => {
       live.current = false;
-      clearTimeout(timer.current);
+      pending.forEach(clearTimeout);
+      pending.clear();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function notify(msg: ToastMsg) {
-    clearTimeout(timer.current);
-    setToast(msg);
-    timer.current = setTimeout(() => setToast(null), TOAST_MS);
+    const key = nextKey.current++;
+    setToasts((prev) => [...prev, { ...msg, key }].slice(-MAX_TOASTS));
+    const t = setTimeout(() => {
+      timers.current.delete(t);
+      setToasts((prev) => prev.filter((x) => x.key !== key));
+    }, TOAST_MS);
+    timers.current.add(t);
   }
 
   function setBusyFor(id: string, on: boolean) {
@@ -61,7 +80,8 @@ export function Gates({ onDecided }: GatesProps = {}) {
   }
 
   async function decide(gate: Gate, decision: GateDecision) {
-    if (busy.has(gate.id)) return;
+    if (inFlight.current.has(gate.id) || busy.has(gate.id)) return;
+    inFlight.current.add(gate.id);
     setBusyFor(gate.id, true);
     const verb = decision === "approve" ? "Approved" : "Denied";
     try {
@@ -80,7 +100,7 @@ export function Gates({ onDecided }: GatesProps = {}) {
         removeGate(gate.id);
         onDecided?.();
         notify({
-          kind: "ok",
+          kind: "info",
           title: "Already decided",
           detail: `${gate.title} is no longer pending, so it was removed from the list.`,
         });
@@ -92,6 +112,7 @@ export function Gates({ onDecided }: GatesProps = {}) {
         });
       }
     } finally {
+      inFlight.current.delete(gate.id);
       if (live.current) setBusyFor(gate.id, false);
     }
   }
@@ -112,6 +133,9 @@ export function Gates({ onDecided }: GatesProps = {}) {
         <div className="phead">
           <span className="ptitle">Could not load approval gates</span>
           <span className="count">check that the Ascent backend is running</span>
+          <button type="button" className="deny" onClick={load}>
+            Retry
+          </button>
         </div>
       </section>
     );
@@ -172,20 +196,34 @@ export function Gates({ onDecided }: GatesProps = {}) {
         )}
       </section>
 
-      {toast ? (
-        <div
-          className={`toast glass gate-toast${toast.kind === "error" ? " toast-error" : ""}`}
-          role={toast.kind === "error" ? "alert" : "status"}
-        >
-          <div className="ic" aria-hidden="true">
-            {toast.kind === "error" ? "!" : "✓"}
-          </div>
-          <div className="m">
-            <b>{toast.title}</b>
-            <div>{toast.detail}</div>
-          </div>
+      <div className="toast-stack">
+        <div aria-live="polite" role="status" className="toast-region">
+          {toasts.filter((t) => t.kind !== "error").map((t) => (
+            <ToastView key={t.key} toast={t} />
+          ))}
         </div>
-      ) : null}
+        <div aria-live="assertive" role="alert" className="toast-region">
+          {toasts.filter((t) => t.kind === "error").map((t) => (
+            <ToastView key={t.key} toast={t} />
+          ))}
+        </div>
+      </div>
     </>
+  );
+}
+
+const TOAST_ICON: Record<ToastMsg["kind"], string> = { ok: "✓", info: "i", error: "!" };
+
+function ToastView({ toast }: { toast: ToastMsg }) {
+  return (
+    <div className={`toast glass gate-toast${toast.kind === "error" ? " toast-error" : ""}`}>
+      <div className="ic" aria-hidden="true">
+        {TOAST_ICON[toast.kind]}
+      </div>
+      <div className="m">
+        <b>{toast.title}</b>
+        <div>{toast.detail}</div>
+      </div>
+    </div>
   );
 }

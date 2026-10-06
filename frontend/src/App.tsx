@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getEngagement } from "./api";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Shell } from "./components/Shell";
 import type { NavId } from "./components/Shell";
 import { Audit } from "./screens/Audit";
@@ -40,25 +41,33 @@ export default function App() {
     case "findings":
       return (
         <Shell {...shell}>
-          <Findings />
+          <ErrorBoundary key="findings">
+            <Findings />
+          </ErrorBoundary>
         </Shell>
       );
     case "gates":
       return (
         <Shell {...shell}>
-          <Gates />
+          <ErrorBoundary key="gates">
+            <Gates />
+          </ErrorBoundary>
         </Shell>
       );
     case "report":
       return (
         <Shell {...shell}>
-          <Report />
+          <ErrorBoundary key="report">
+            <Report />
+          </ErrorBoundary>
         </Shell>
       );
     case "audit":
       return (
         <Shell {...shell}>
-          <Audit />
+          <ErrorBoundary key="audit">
+            <Audit />
+          </ErrorBoundary>
         </Shell>
       );
     default:
@@ -67,12 +76,18 @@ export default function App() {
           {...shell}
           aside={
             <>
-              <Gates onDecided={() => setAuditVersion((v) => v + 1)} />
-              <Audit key={auditVersion} />
+              <ErrorBoundary key="overview-gates">
+                <Gates onDecided={() => setAuditVersion((v) => v + 1)} />
+              </ErrorBoundary>
+              <ErrorBoundary key="overview-audit">
+                <Audit key={auditVersion} />
+              </ErrorBoundary>
             </>
           }
         >
-          <Findings />
+          <ErrorBoundary key="overview-findings">
+            <Findings />
+          </ErrorBoundary>
         </Shell>
       );
   }

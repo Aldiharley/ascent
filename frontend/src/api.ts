@@ -31,6 +31,10 @@ export interface TriageItem {
   duplicates?: string[];
 }
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object";
+}
+
 /** Same-origin relative path only: the Vite dev proxy / Rust backend serve it. */
 export async function getFindings(): Promise<TriageItem[]> {
   const res = await fetch("/api/findings");
@@ -41,7 +45,8 @@ export async function getFindings(): Promise<TriageItem[]> {
   if (!Array.isArray(body)) {
     throw new Error("GET /api/findings returned an unexpected payload");
   }
-  return body as TriageItem[];
+  // One malformed row must not crash rendering: keep only rows with an object `finding`.
+  return body.filter((it) => isObject(it) && isObject(it.finding)) as unknown as TriageItem[];
 }
 
 // A pending human-approval gate (GET /api/gates). Like findings, every string
@@ -76,7 +81,14 @@ export async function getGates(): Promise<Gate[]> {
   if (!Array.isArray(body)) {
     throw new Error("GET /api/gates returned an unexpected payload");
   }
-  return body as Gate[];
+  const seen = new Set<string>();
+  const gates: Gate[] = [];
+  for (const it of body) {
+    if (!isObject(it) || typeof it.id !== "string" || it.id === "" || seen.has(it.id)) continue;
+    seen.add(it.id);
+    gates.push(it as unknown as Gate);
+  }
+  return gates;
 }
 
 /**
@@ -149,7 +161,7 @@ export async function getAudit(): Promise<AuditLog> {
   if (!body || !Array.isArray(body.entries) || typeof body.chain_ok !== "boolean") {
     throw new Error("GET /api/audit returned an unexpected payload");
   }
-  return { entries: body.entries, chain_ok: body.chain_ok };
+  return { entries: body.entries.filter(isObject) as AuditEntry[], chain_ok: body.chain_ok };
 }
 
 // GET /api/engagement: the parsed engagement file, or null when none is loaded.

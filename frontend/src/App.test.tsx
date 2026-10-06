@@ -125,3 +125,27 @@ test("deciding a gate refreshes the audit feed", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
   expect(await screen.findByText(/gate g1 → approved/)).toBeInTheDocument();
 });
+
+test("a crash in the gates panel leaves the findings table working", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  // An object title is not a valid React child, so the Gates panel throws on render.
+  mockApi({ "/api/gates": () => json([{ ...gate, title: { not: "text" } }]) });
+  render(<App />);
+  expect(await screen.findByText("SSRF in fetch")).toBeInTheDocument();
+  expect(await screen.findByText("This view failed to render.")).toBeInTheDocument();
+  expect(await screen.findByText("Hash chain OK")).toBeInTheDocument();
+});
+
+test("a crashed screen does not leak its fallback into the next screen", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  // An object title is not a valid React child, so the Findings view throws on render.
+  mockApi({
+    "/api/findings": () => json([{ ...finding, finding: { ...finding.finding, title: { not: "text" } } }]),
+  });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Findings" }));
+  expect(await screen.findByText("This view failed to render.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Approval gates" }));
+  expect(await screen.findByText("Confirm SSRF")).toBeInTheDocument();
+  expect(screen.queryByText("This view failed to render.")).not.toBeInTheDocument();
+});
