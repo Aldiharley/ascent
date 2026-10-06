@@ -41,7 +41,6 @@ pub fn normalise_nuclei(rows: &[Value]) -> Vec<Finding> {
         .collect()
 }
 
-#[allow(dead_code)] // wired into the SAST stage in a later task
 fn sev_from_semgrep(s: &str) -> String {
     match s.to_uppercase().as_str() {
         "ERROR" => "HIGH",
@@ -51,7 +50,6 @@ fn sev_from_semgrep(s: &str) -> String {
     .to_string()
 }
 
-#[allow(dead_code)] // wired into the SAST stage in a later task
 fn cwe_first(v: &Value) -> String {
     // Accept ["CWE-89: ..."] or "CWE-89"; return just the "CWE-<n>" token.
     let raw = if let Some(a) = v.as_array() {
@@ -62,7 +60,6 @@ fn cwe_first(v: &Value) -> String {
     raw.split(':').next().unwrap_or("").trim().to_string()
 }
 
-#[allow(dead_code)] // wired into the SAST stage in a later task
 pub fn normalise_opengrep(rows: &[Value]) -> Vec<Finding> {
     let mut out = Vec::new();
     for row in rows {
@@ -77,9 +74,23 @@ pub fn normalise_opengrep(rows: &[Value]) -> Vec<Finding> {
                 continue;
             }
             let line = r["start"]["line"].as_i64().unwrap_or(0);
+            let col = r["start"]["col"].as_i64().unwrap_or(0);
             let rid = r["check_id"].as_str().unwrap_or("opengrep").to_string();
+            let cwe = cwe_first(&r["extra"]["metadata"]["cwe"]);
+            // Secret-class rules must not carry the matched source line (it may hold the secret).
+            let rid_lc = rid.to_lowercase();
+            let secret_rule = cwe == "CWE-798"
+                || cwe == "CWE-259"
+                || ["secret", "password", "credential"]
+                    .iter()
+                    .any(|k| rid_lc.contains(k));
+            let evidence = if secret_rule {
+                String::new()
+            } else {
+                r["extra"]["lines"].as_str().unwrap_or("").to_string()
+            };
             out.push(Finding {
-                id: format!("opengrep:{rid}:{path}:{line}"),
+                id: format!("opengrep:{rid}:{path}:{line}:{col}"),
                 tool: "opengrep".into(),
                 rule_id: rid.clone(),
                 severity: sev_from_semgrep(r["extra"]["severity"].as_str().unwrap_or("INFO")),
@@ -93,25 +104,25 @@ pub fn normalise_opengrep(rows: &[Value]) -> Vec<Finding> {
                 file: path.to_string(),
                 line,
                 category: "SAST".into(),
-                cwe: cwe_first(&r["extra"]["metadata"]["cwe"]),
-                evidence: r["extra"]["lines"].as_str().unwrap_or("").to_string(),
+                cwe,
+                evidence,
             });
         }
     }
     out
 }
 
-#[allow(dead_code)] // wired into the SAST stage in a later task
 pub fn normalise_gitleaks(rows: &[Value]) -> Vec<Finding> {
     rows.iter()
         .filter_map(|r| {
             let file = r["File"].as_str()?;
             let line = r["StartLine"].as_i64().unwrap_or(0);
+            let col = r["StartColumn"].as_i64().unwrap_or(0);
             let rid = r["RuleID"].as_str().unwrap_or("gitleaks").to_string();
             let desc = r["Description"].as_str().unwrap_or(&rid).to_string();
             // Deliberately store NO secret value (no `Secret`/`Match`) in any field.
             Some(Finding {
-                id: format!("gitleaks:{rid}:{file}:{line}"),
+                id: format!("gitleaks:{rid}:{file}:{line}:{col}"),
                 tool: "gitleaks".into(),
                 rule_id: rid,
                 severity: "HIGH".into(),
@@ -130,7 +141,6 @@ pub fn normalise_gitleaks(rows: &[Value]) -> Vec<Finding> {
         .collect()
 }
 
-#[allow(dead_code)] // wired into the SAST stage in a later task
 pub fn normalise_trivy(rows: &[Value]) -> Vec<Finding> {
     let mut out = Vec::new();
     for row in rows {
@@ -205,6 +215,55 @@ mod sast_tests {
         assert_eq!(out[0].line, 42);
         assert_eq!(out[0].cwe, "CWE-89");
         assert_eq!(out[0].rule_id, "rust.lang.security.sqli");
+    }
+
+    #[test]
+    fn opengrep_redacts_evidence_for_secret_rules_only() {
+        let mk = |rid: &str, cwe: &str| {
+            json!({"results":[{
+                "check_id":rid,"path":"a.py","start":{"line":3,"col":5},
+                "extra":{"severity":"ERROR","message":"m",
+                         "metadata":{"cwe":[cwe]},"lines":"pw = 'hunter2'"}}]})
+        };
+        // CWE-798 and CWE-259 are secret-class regardless of the rule id.
+        for cwe in ["CWE-798: Hard-coded Credentials", "CWE-259"] {
+            let out = normalise_opengrep(&[mk("generic.rule", cwe)]);
+            assert_eq!(out[0].evidence, "", "evidence kept for {cwe}");
+        }
+        // Rule id keywords (case-insensitive) are secret-class regardless of the CWE.
+        for rid in [
+            "x.Hardcoded-SECRET",
+            "x.password-in-code",
+            "x.Credential-leak",
+        ] {
+            let out = normalise_opengrep(&[mk(rid, "CWE-89")]);
+            assert_eq!(out[0].evidence, "", "evidence kept for {rid}");
+        }
+        // A non-secret rule keeps its evidence.
+        let out = normalise_opengrep(&[mk("rust.lang.security.sqli", "CWE-89")]);
+        assert_eq!(out[0].evidence, "pw = 'hunter2'");
+    }
+
+    #[test]
+    fn ids_include_column_so_same_line_findings_do_not_collide() {
+        let og = |col: i64| {
+            json!({"results":[{"check_id":"r","path":"a.rs","start":{"line":1,"col":col},
+                "extra":{"severity":"INFO","message":"m"}}]})
+        };
+        let a = normalise_opengrep(&[og(3)]);
+        let b = normalise_opengrep(&[og(40)]);
+        assert_ne!(a[0].id, b[0].id);
+        // Missing column falls back to 0.
+        let none = normalise_opengrep(&[json!({"results":[{"check_id":"r","path":"a.rs",
+            "start":{"line":1},"extra":{}}]})]);
+        assert!(none[0].id.ends_with(":1:0"), "{}", none[0].id);
+
+        let gl = |col: i64| json!({"File":"c.py","StartLine":2,"StartColumn":col,"RuleID":"aws","Description":"k"});
+        let a = normalise_gitleaks(&[gl(1)]);
+        let b = normalise_gitleaks(&[gl(30)]);
+        assert_ne!(a[0].id, b[0].id);
+        let none = normalise_gitleaks(&[json!({"File":"c.py","StartLine":2,"RuleID":"aws"})]);
+        assert!(none[0].id.ends_with(":2:0"), "{}", none[0].id);
     }
 
     #[test]
