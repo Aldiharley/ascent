@@ -41,7 +41,7 @@ export default function App() {
     case "findings":
       return (
         <Shell {...shell}>
-          <ErrorBoundary>
+          <ErrorBoundary key="findings">
             <Findings />
           </ErrorBoundary>
         </Shell>
@@ -49,7 +49,7 @@ export default function App() {
     case "gates":
       return (
         <Shell {...shell}>
-          <ErrorBoundary>
+          <ErrorBoundary key="gates">
             <Gates />
           </ErrorBoundary>
         </Shell>
@@ -57,7 +57,7 @@ export default function App() {
     case "report":
       return (
         <Shell {...shell}>
-          <ErrorBoundary>
+          <ErrorBoundary key="report">
             <Report />
           </ErrorBoundary>
         </Shell>
@@ -65,7 +65,7 @@ export default function App() {
     case "audit":
       return (
         <Shell {...shell}>
-          <ErrorBoundary>
+          <ErrorBoundary key="audit">
             <Audit />
           </ErrorBoundary>
         </Shell>
@@ -76,16 +76,16 @@ export default function App() {
           {...shell}
           aside={
             <>
-              <ErrorBoundary>
+              <ErrorBoundary key="overview-gates">
                 <Gates onDecided={() => setAuditVersion((v) => v + 1)} />
               </ErrorBoundary>
-              <ErrorBoundary>
+              <ErrorBoundary key="overview-audit">
                 <Audit key={auditVersion} />
               </ErrorBoundary>
             </>
           }
         >
-          <ErrorBoundary>
+          <ErrorBoundary key="overview-findings">
             <Findings />
           </ErrorBoundary>
         </Shell>
