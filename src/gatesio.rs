@@ -80,6 +80,19 @@ pub fn approved_decisions(out_dir: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Gate ids with an already-recorded `gate_execution` entry in the audit log,
+/// so a re-run of the executor can skip them instead of re-running (and
+/// re-auditing) a gate that already ran. A `Refused` outcome also writes a
+/// `gate_execution` entry, so a refused gate is skipped on a later call too.
+pub fn executed_gate_ids(out_dir: &str) -> std::collections::HashSet<String> {
+    let text = std::fs::read_to_string(Path::new(out_dir).join("audit.jsonl")).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .filter(|e| e["type"] == "gate_execution")
+        .filter_map(|e| e["gate_id"].as_str().map(String::from))
+        .collect()
+}
+
 /// Crux canonical hash of a gate as it was presented for decision: the gate
 /// object minus its resolution fields (`status`, `decided_at`). Recorded in the
 /// chained `gate_decision` entry, so an approval stays bound to the exact
