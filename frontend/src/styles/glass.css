@@ -201,3 +201,8 @@ h1{font-size:0;margin:0}
 .dot.idle{background:var(--faint);box-shadow:0 0 0 4px rgba(21,35,59,.08)}
 /* the search box used to set the topbar height; keep a single tidy row without it */
 .topbar{min-height:64px}
+/* gate toast stack: one fixed container, toasts flow inside it */
+.toast-stack{position:fixed;right:22px;bottom:22px;z-index:5;display:flex;flex-direction:column;gap:10px;align-items:flex-end;pointer-events:none}
+.toast-stack .toast-region{display:flex;flex-direction:column;gap:10px;align-items:flex-end}
+.toast-stack .toast.gate-toast{position:static;pointer-events:auto;display:flex}
+@media (max-width:640px){ .toast-stack{left:12px;right:12px;align-items:stretch} .toast-stack .toast-region{align-items:stretch} .toast-stack .toast.gate-toast{max-width:none} }
