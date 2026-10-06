@@ -346,3 +346,40 @@ test("onDecided is still called after approve and after a 409", async () => {
   fireEvent.click(screen.getByRole("button", { name: /approve/i }));
   await waitFor(() => expect(onDecided).toHaveBeenCalledTimes(2));
 });
+
+test("a detect-only gate shows the badge, expected evidence and failure note alongside Approve/Deny", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    json([gate({ detect_only: true, expected_evidence: "ev", why_it_might_fail: "wf" })]),
+  );
+  render(<Gates />);
+  expect(await screen.findByText("DETECT-ONLY")).toBeInTheDocument();
+  expect(screen.getByText("Expected evidence:")).toBeInTheDocument();
+  expect(screen.getByText("ev")).toBeInTheDocument();
+  expect(screen.getByText("Why it might fail:")).toBeInTheDocument();
+  expect(screen.getByText("wf")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /approve/i })).toBeEnabled();
+  expect(screen.getByRole("button", { name: /deny/i })).toBeEnabled();
+});
+
+test("a gate without detect-only metadata renders no badge and neither line", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate()]));
+  render(<Gates />);
+  await screen.findByText("Confirm SSRF");
+  expect(screen.queryByText("DETECT-ONLY")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Expected evidence/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Why it might fail/i)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /approve/i })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /deny/i })).toBeInTheDocument();
+});
+
+test("empty or non-true detect-only metadata renders nothing; HTML in it stays literal", async () => {
+  const html = "<img src=x onerror=alert(1)>";
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    json([gate({ detect_only: false, expected_evidence: "", why_it_might_fail: html })]),
+  );
+  const { container } = render(<Gates />);
+  expect(await screen.findByText(html)).toBeInTheDocument();
+  expect(container.querySelector("img")).toBeNull();
+  expect(screen.queryByText("DETECT-ONLY")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Expected evidence/i)).not.toBeInTheDocument();
+});

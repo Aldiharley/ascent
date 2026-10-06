@@ -206,3 +206,5 @@ h1{font-size:0;margin:0}
 .toast-stack .toast-region{display:flex;flex-direction:column;gap:10px;align-items:flex-end}
 .toast-stack .toast.gate-toast{position:static;pointer-events:auto;display:flex}
 @media (max-width:640px){ .toast-stack{left:12px;right:12px;align-items:stretch} .toast-stack .toast-region{align-items:stretch} .toast-stack .toast.gate-toast{max-width:none} }
+
+.badge-detect{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--accent);background:rgba(13,143,136,.12);border:1px solid rgba(13,143,136,.25);vertical-align:middle}

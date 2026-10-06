@@ -93,6 +93,36 @@ Safety properties:
 
 Dev loop: with the backend running, `cd frontend && npm run dev` serves the UI with hot reload and proxies `/api` to it.
 
+## Human-gated verification (Phase 5)
+
+After triage, Ascent can propose a safe, detect-only re-check for each confirmed-looking DAST finding. A human reviews and approves it, and only then does anything run.
+
+1. Propose. `--propose` runs after triage, re-reads `<out>/queue.json`, and for every `TRUE_POSITIVE` nuclei finding with confidence at or above `--min-confidence` (default `0.8`) writes an inert proposed gate into `<out>/gates.json`. The gate is a nuclei re-check: `nuclei -id <id> -u <url> -silent -jsonl`.
+
+   ```
+   ascent run --engagement samples/engagement.example.yaml --out out --propose [--min-confidence 0.8]
+   ```
+
+2. Review and decide. Start the dashboard (see above) and open the Approval gates screen. Each gate shows a DETECT-ONLY badge, the command, the target, the expected evidence, why it might fail, and whether the target is in scope. Click Approve or Deny. Approve records a hash-chained `gate_decision` bound to the gate's `gate_hash`. (Non-browser clients can `POST /api/gates/<id>/approve` with `Origin: http://127.0.0.1:8787` and `X-Ascent: 1`.)
+
+3. Verify. This runs only the approved gates:
+
+   ```
+   ascent verify --engagement samples/engagement.example.yaml --out out
+   ```
+
+   It prints `confirmed=N not_confirmed=N refused=N` and appends one `gate_execution` entry per gate to the audit log. Gates that already have an execution entry are skipped.
+
+Invariants:
+
+- Nothing runs without a recorded human approval.
+- An edited gate is refused. The `gate_hash` is recomputed at execution and must match the one the human approved; on a mismatch the gate is Refused without running.
+- Scope is re-checked at execution, against the `-u` target in the command that will actually run (which must equal the gate's `target`), not just at proposal time.
+- Only detect-only, allow-listed nuclei re-checks run. The command is executed as an argv list, never through a shell.
+- The hard exclusions are not built: no autonomous firing, C2, lateral movement, persistence, exfiltration, autonomous privilege escalation, or exploit-tier tools.
+
+Requirements: `ascent verify` needs nuclei installed and a reachable, in-scope target. `--propose` only produces gates after a real scan that found nuclei DAST findings; with no such findings, `gates.json` gets no new gates. With no approved gates, `verify` runs nothing and reports all zeros.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

@@ -14,9 +14,12 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 #[path = "../dashboard/mod.rs"]
 mod dashboard;
+#[path = "../gatesio.rs"]
+mod gatesio;
 
-use dashboard::gates::{decide_gate, read_pending_gates, DecideError};
+use dashboard::gates::{decide_gate, DecideError};
 use dashboard::read::{read_audit, read_engagement, read_findings, read_report};
+use gatesio::read_pending_gates;
 
 /// Only these `Host` values are served; anything else is a DNS-rebinding attempt.
 const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1:8787", "localhost:8787"];
@@ -613,7 +616,7 @@ mod tests {
             &dir.join("audit.jsonl"),
             id,
             decision,
-            &dashboard::gates::gate_hash(&gate(id)),
+            &gatesio::gate_hash(&gate(id)),
             "2026-10-04T00:00:00.000000+00:00",
         )
         .unwrap();

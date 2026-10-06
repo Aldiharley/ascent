@@ -1,6 +1,7 @@
 //! Human-approval gates: `<out_dir>/gates.json` holds the actions awaiting a
 //! human decision; each decision is recorded in Crux's hash-chained audit log
 //! *before* the gate is marked resolved. Nothing here runs a gate's command.
+use crate::gatesio::{all_gates, append_chained, first_decisions, gate_hash, is_pending};
 use serde_json::{Map, Value};
 use std::io::Write;
 use std::path::Path;
@@ -21,74 +22,14 @@ pub enum DecideError {
     Io(String),
 }
 
-fn all_gates(out_dir: &str) -> Vec<Value> {
-    std::fs::read_to_string(Path::new(out_dir).join("gates.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| match v {
-            Value::Array(items) => Some(items),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-fn is_pending(gate: &Value) -> bool {
-    gate.is_object() && gate.get("status").is_none()
-}
-
 /// First `gate_decision` recorded in the audit log for each gate, as
 /// `(gate_id, status, ts)`. The audit log is the source of truth for decisions:
 /// it is written before `gates.json`, so it can be ahead of it after a failure.
 fn recorded_decisions(out_dir: &str) -> Vec<(String, &'static str, String)> {
-    let text = std::fs::read_to_string(Path::new(out_dir).join("audit.jsonl")).unwrap_or_default();
-    let mut seen: Vec<(String, &'static str, String)> = Vec::new();
-    for entry in text
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
-    {
-        if entry["type"] != "gate_decision" {
-            continue;
-        }
-        let (Some(id), Some(ts)) = (entry["gate_id"].as_str(), entry["ts"].as_str()) else {
-            continue;
-        };
-        let status = match entry["decision"].as_str() {
-            Some("approved") => "approved",
-            Some("denied") => "denied",
-            _ => continue,
-        };
-        if !seen.iter().any(|(i, _, _)| i == id) {
-            seen.push((id.to_string(), status, ts.to_string()));
-        }
-    }
-    seen
-}
-
-/// Gates still awaiting a decision: no `status` field and no recorded
-/// `gate_decision` in the audit log. Missing or invalid file -> empty.
-pub fn read_pending_gates(out_dir: &str) -> Vec<Value> {
-    let decided = recorded_decisions(out_dir);
-    all_gates(out_dir)
+    first_decisions(out_dir)
         .into_iter()
-        .filter(is_pending)
-        .filter(|g| {
-            let id = g.get("id").and_then(Value::as_str);
-            !decided.iter().any(|(d, _, _)| Some(d.as_str()) == id)
-        })
+        .map(|(id, status, ts, _)| (id, status, ts))
         .collect()
-}
-
-/// Crux canonical hash of a gate as it was presented for decision: the gate
-/// object minus its resolution fields (`status`, `decided_at`). Recorded in the
-/// chained `gate_decision` entry, so an approval stays bound to the exact
-/// command/target that was approved even though `gates.json` is not chained.
-pub fn gate_hash(gate: &Value) -> String {
-    let mut g = gate.clone();
-    if let Some(obj) = g.as_object_mut() {
-        obj.remove("status");
-        obj.remove("decided_at");
-    }
-    crux::canon::hash_value(&g)
 }
 
 fn now_ts() -> String {
@@ -108,53 +49,16 @@ pub fn append_decision(
     gate_hash: &str,
     ts: &str,
 ) -> Result<(), String> {
-    let text = match std::fs::read_to_string(audit) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("cannot read audit log: {e}")),
-    };
-    let prev = text
-        .lines()
-        .map(str::trim)
-        .rfind(|l| !l.is_empty())
-        .map(|l| {
-            serde_json::from_str::<Value>(l)
-                .ok()
-                .and_then(|v| v["entry_hash"].as_str().map(String::from))
-                .ok_or_else(|| "last audit entry has no entry_hash".to_string())
-        })
-        .transpose()?
-        .unwrap_or_else(|| crux::audit::GENESIS.to_string());
-
     let mut body = Map::new();
     body.insert("ts".into(), Value::from(ts));
     body.insert("type".into(), Value::from("gate_decision"));
     body.insert("gate_id".into(), Value::from(gate_id));
     body.insert("decision".into(), Value::from(decision));
     body.insert("gate_hash".into(), Value::from(gate_hash));
-    body.insert("prev_hash".into(), Value::from(prev));
-    let entry_hash = Value::from(crux::canon::hash_value(&Value::Object(body.clone())));
-
-    let mut ordered: Vec<(&str, &Value)> = body.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    ordered.push(("entry_hash", &entry_hash));
-    let line = crux::canon::to_json_ordered(&ordered);
-
-    // A valid chain whose last line lacks a newline must not be glued onto.
-    let sep = if text.is_empty() || text.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    let mut fh = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(audit)
-        .map_err(|e| format!("cannot open audit log: {e}"))?;
-    // One write call for the whole line, so it cannot be split across writes.
-    fh.write_all(format!("{sep}{line}\n").as_bytes())
-        .map_err(|e| format!("cannot write audit log: {e}"))?;
-    fh.sync_all()
-        .map_err(|e| format!("cannot flush audit log: {e}"))
+    let audit = audit
+        .to_str()
+        .ok_or_else(|| "audit path is not valid UTF-8".to_string())?;
+    append_chained(audit, body).map_err(|e| e.to_string())
 }
 
 /// Replace `gates.json` atomically (temp file in the same dir, then rename).
@@ -229,6 +133,7 @@ pub fn decide_gate(out_dir: &str, id: &str, approve: bool) -> Result<(), DecideE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gatesio::read_pending_gates;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
