@@ -20,6 +20,23 @@ Projects/
 
 Then run `cargo test` in `Ascent/`.
 
+## SAST track
+
+Besides the black-box (DAST) track, Ascent can run a white-box source-analysis (SAST/SCA/secrets) track over a source directory. It invokes [opengrep](https://github.com/opengrep/opengrep), [gitleaks](https://github.com/gitleaks/gitleaks) and [trivy](https://github.com/aquasecurity/trivy) as subprocesses; like the DAST tools, they are invoked, never vendored. Install whichever you want on your `PATH`. Tools that are not installed are skipped, and the run still completes (with fewer or no SAST findings).
+
+Point the track at a source root either way:
+
+- add `source: <dir>` to the engagement YAML, or
+- pass `--source <dir>` (overrides the engagement's `source`; it must stay inside the engagement's authorised source root).
+
+```
+cargo run -- run --engagement samples/engagement.example.yaml --out out --source path/to/repo
+```
+
+SAST findings join the DAST queue and flow through the same triage, `report.md` and audit log. With no hosts or urls in scope, the DAST track is skipped and only the SAST track runs. Findings from gitleaks are redacted: the secret value is never stored.
+
+**Your source never leaves the machine**, and no analyser is ever pointed at a network target (SAST runs locally over files). But note the analyser *subprocesses* make their own outbound calls that Ascent does not gate: opengrep's `--config auto` fetches rules from the opengrep registry (telemetry is disabled with `--metrics=off`), and `trivy fs` updates its vulnerability database from a registry. Neither sends your source or engagement targets anywhere. For an air-gapped or fully governed run, use a pinned local opengrep ruleset and `trivy --skip-db-update --offline-scan` (a planned follow-up; see `docs/followups-sast.md`).
+
 ## Dashboard
 
 A local web dashboard shows the triaged findings, the pending human-approval gates, the report and the hash-chained audit log.

@@ -94,6 +94,7 @@ mod tests {
             hosts: vec!["example.com".into()],
             cidrs: vec![],
             urls: vec![],
+            source: String::new(),
             starts: "2026-01-01T00:00:00Z".into(),
             ends: "2026-12-31T00:00:00Z".into(),
         };

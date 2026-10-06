@@ -1,0 +1,30 @@
+{
+  "version": "1.0.0",
+  "results": [
+    {
+      "check_id": "python.lang.security.audit.formatted-sql-query",
+      "path": "app/db.py",
+      "start": { "line": 42, "col": 5 },
+      "end": { "line": 42, "col": 60 },
+      "extra": {
+        "severity": "ERROR",
+        "message": "Detected possible formatted SQL query. Use parameterized queries instead.",
+        "metadata": { "cwe": ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"] },
+        "lines": "cursor.execute(\"SELECT * FROM users WHERE id = \" + user_id)"
+      }
+    },
+    {
+      "check_id": "python.lang.security.audit.insecure-hash",
+      "path": "app/auth.py",
+      "start": { "line": 17, "col": 12 },
+      "end": { "line": 17, "col": 40 },
+      "extra": {
+        "severity": "WARNING",
+        "message": "Use of weak hash function MD5.",
+        "metadata": { "cwe": ["CWE-327: Use of a Broken or Risky Cryptographic Algorithm"] },
+        "lines": "hashlib.md5(password.encode())"
+      }
+    }
+  ],
+  "errors": []
+}
