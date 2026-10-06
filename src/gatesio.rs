@@ -192,6 +192,43 @@ mod tests {
     }
 
     #[test]
+    fn gate_hash_golden_vector() {
+        let g = json!({
+            "id": "verify:CVE-2021-1234:http://localhost:3000/x",
+            "tool": "nuclei",
+            "args": ["-id", "CVE-2021-1234", "-u", "http://localhost:3000/x", "-silent", "-jsonl"],
+            "command": "nuclei -id CVE-2021-1234 -u http://localhost:3000/x -silent -jsonl",
+            "target": "http://localhost:3000/x",
+            "in_scope": true,
+            "detect_only": true
+        });
+        assert_eq!(
+            gate_hash(&g),
+            "2bb40b558b92deba6a2f014ccc94e1090e7019cddf10c9519e5be06b664cbb8a"
+        );
+    }
+
+    #[test]
+    fn approved_decisions_skips_approved_entry_without_hash() {
+        let d = tmp();
+        let aps = d.join("audit.jsonl");
+        let aps = aps.to_str().unwrap();
+        // approved but no gate_hash recorded
+        let mut nohash = body("gate_decision", "g1", None);
+        nohash.insert("decision".into(), json!("approved"));
+        append_chained(aps, nohash).unwrap();
+        append_chained(
+            aps,
+            body("gate_decision", "g2", Some(("approved", "hash2"))),
+        )
+        .unwrap();
+        assert_eq!(
+            approved_decisions(d.to_str().unwrap()),
+            vec![("g2".to_string(), "hash2".to_string())]
+        );
+    }
+
+    #[test]
     fn append_chained_is_crux_verifiable_and_links() {
         let d = tmp();
         let ap = d.join("audit.jsonl");
