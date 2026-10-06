@@ -25,10 +25,15 @@ pub fn sast(
 ) -> Result<Vec<Finding>, Box<dyn std::error::Error>> {
     let mut findings = Vec::new();
     if tool_available(runner, "opengrep", "--version") {
+        // opengrep is semgrep-derived but drops `--metrics` (it sends no telemetry by
+        // default). `--config auto` needs `--experimental`; `--disable-version-check`
+        // stops the version phone-home. Verified against opengrep 1.30.
         let args = vec![
+            "scan".into(),
+            "--experimental".into(),
+            "--disable-version-check".into(),
             "--json".into(),
             "--quiet".into(),
-            "--metrics=off".into(),
             "--config".into(),
             "auto".into(),
             source_dir.into(),
@@ -168,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn sast_uses_portable_flags_and_disables_metrics() {
+    fn sast_uses_portable_flags() {
         let f = Fake {
             present: vec!["opengrep", "gitleaks", "trivy"],
             fail_json: vec![],
@@ -177,7 +182,14 @@ mod tests {
         sast(&f, ".").unwrap();
         let calls = f.calls.borrow();
         let args_of = |t: &str| calls.iter().find(|(n, _)| n == t).unwrap().1.clone();
-        assert!(args_of("opengrep").contains(&"--metrics=off".to_string()));
+        // opengrep: the `scan` subcommand, `--experimental` (required for `--config auto`),
+        // and the version-check phone-home disabled. No invalid `--metrics` flag.
+        let og = args_of("opengrep");
+        assert_eq!(og.first().map(String::as_str), Some("scan"));
+        assert!(og.contains(&"--experimental".to_string()));
+        assert!(og.contains(&"--disable-version-check".to_string()));
+        assert!(!og.iter().any(|a| a.starts_with("--metrics")));
+        // gitleaks: report to stdout via `-` (portable).
         let gl = args_of("gitleaks");
         let i = gl.iter().position(|a| a == "--report-path").unwrap();
         assert_eq!(gl[i + 1], "-");
