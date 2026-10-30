@@ -142,97 +142,93 @@ pub fn scrub_rows(rows: Vec<Value>, secret: Option<&str>) -> Vec<Value> {
 struct Category {
     id: &'static str,
     name: &'static str,
+    /// nuclei tags that test it; empty = Ascent never tests it (`note` says why).
     tags: &'static [&'static str],
-    min: Option<DastProfile>,   // None = never tested
-    note: Option<&'static str>, // limited-coverage note
+    /// The active profile's `-dast` pass fuzzes parameters for it.
+    fuzzed: bool,
+    /// Why coverage is limited even when every tag ran (or, with no tags, why never).
+    note: Option<&'static str>,
 }
 
+const fn def(
+    id: &'static str,
+    name: &'static str,
+    tags: &'static [&'static str],
+    fuzzed: bool,
+    note: Option<&'static str>,
+) -> Category {
+    Category { id, name, tags, fuzzed, note }
+}
+
+const IDOR_NOTE: &str = "few idor templates, mostly CVE- or product-specific; generic IDOR needs app logic and a second user";
+const SSRF_NOTE: &str = "blind/out-of-band SSRF not tested (interactsh disabled)";
+const RATE_LIMIT_NOTE: &str = "needs load generation; Ascent never floods a target";
+
 const CATEGORIES: &[Category] = &[
-    Category {
-        id: "sqli",
-        name: "SQL injection",
-        tags: &["sqli"],
-        min: Some(DastProfile::Standard),
-        note: None,
-    },
-    Category {
-        id: "xss",
-        name: "Cross-site scripting",
-        tags: &["xss"],
-        min: Some(DastProfile::Standard),
-        note: None,
-    },
-    Category {
-        id: "auth-bypass",
-        name: "Authentication bypass",
-        tags: &["auth-bypass", "jwt"],
-        min: Some(DastProfile::Standard),
-        note: None,
-    },
-    Category {
-        id: "authz",
-        name: "Authorization flaws (IDOR)",
-        tags: &["idor"],
-        min: Some(DastProfile::Standard),
-        note: Some("12 generic templates; most IDOR needs app-specific logic and a second user"),
-    },
-    Category {
-        id: "cors",
-        name: "CORS misconfiguration",
-        tags: &["cors"],
-        min: Some(DastProfile::Passive),
-        note: None,
-    },
-    Category {
-        id: "headers",
-        name: "Security headers",
-        tags: &["headers"],
-        min: Some(DastProfile::Passive),
-        note: None,
-    },
-    Category {
-        id: "session",
-        name: "Session management",
-        tags: &["session", "cookie", "csrf"],
-        min: Some(DastProfile::Passive),
-        note: None,
-    },
-    Category {
-        id: "ssrf",
-        name: "Server-side request forgery",
-        tags: &["ssrf"],
-        min: Some(DastProfile::Standard),
-        note: Some("blind/out-of-band SSRF not tested (interactsh disabled)"),
-    },
-    Category {
-        id: "lfi",
-        name: "Path traversal / file inclusion",
-        tags: &["lfi"],
-        min: Some(DastProfile::Standard),
-        note: None,
-    },
-    Category {
-        id: "redirect",
-        name: "Open redirect",
-        tags: &["redirect"],
-        min: Some(DastProfile::Standard),
-        note: None,
-    },
-    Category {
-        id: "known-vulns",
-        name: "Known CVEs, exposures, misconfiguration",
-        tags: &["cve", "exposure", "misconfig", "tech"],
-        min: Some(DastProfile::Passive),
-        note: None,
-    },
-    Category {
-        id: "rate-limit",
-        name: "API rate limiting",
-        tags: &[],
-        min: None,
-        note: None,
-    },
+    def("sqli", "SQL injection", &["sqli"], true, None),
+    def("xss", "Cross-site scripting", &["xss"], true, None),
+    def("auth-bypass", "Authentication bypass", &["auth-bypass", "jwt"], false, None),
+    def("authz", "Authorization flaws (IDOR)", &["idor"], false, Some(IDOR_NOTE)),
+    def("cors", "CORS misconfiguration", &["cors"], false, None),
+    def("headers", "Security headers", &["headers"], false, None),
+    def("session", "Session management", &["session", "cookie", "csrf"], false, None),
+    def("ssrf", "Server-side request forgery", &["ssrf"], true, Some(SSRF_NOTE)),
+    def("lfi", "Path traversal / file inclusion", &["lfi"], true, None),
+    def("redirect", "Open redirect", &["redirect"], true, None),
+    def(
+        "known-vulns",
+        "Known CVEs, exposures, misconfiguration",
+        &["cve", "exposure", "misconfig", "tech"],
+        false,
+        None,
+    ),
+    def("rate-limit", "API rate limiting", &[], false, Some(RATE_LIMIT_NOTE)),
 ];
+
+/// The tags the profile's passes run and whether it runs the `-dast` fuzzing pass,
+/// read from [`nuclei_passes`] so the coverage can never disagree with what ran.
+fn tags_run(profile: DastProfile) -> (BTreeSet<String>, bool) {
+    let mut tags = BTreeSet::new();
+    let mut fuzz = false;
+    for pass in nuclei_passes(profile) {
+        fuzz |= pass.iter().any(|a| a == "-dast");
+        if let Some(i) = pass.iter().position(|a| a == "-tags") {
+            if let Some(list) = pass.get(i + 1) {
+                tags.extend(list.split(',').map(|t| t.trim().to_string()));
+            }
+        }
+    }
+    (tags, fuzz)
+}
+
+/// The lowest profile that runs `tag`, if any.
+fn profile_running(tag: &str) -> Option<DastProfile> {
+    [DastProfile::Passive, DastProfile::Standard, DastProfile::Active]
+        .into_iter()
+        .find(|p| tags_run(*p).0.contains(tag))
+}
+
+/// "csrf runs in the standard profile" (grouped by profile).
+fn missing_reason(missing: &[&str]) -> String {
+    let mut by: Vec<(Option<DastProfile>, Vec<&str>)> = Vec::new();
+    for t in missing {
+        let p = profile_running(t);
+        match by.iter_mut().find(|(q, _)| *q == p) {
+            Some((_, v)) => v.push(t),
+            None => by.push((p, vec![t])),
+        }
+    }
+    by.iter()
+        .map(|(p, v)| {
+            let verb = if v.len() == 1 { "runs" } else { "run" };
+            match p {
+                Some(p) => format!("{} {verb} in the {} profile", v.join(", "), p.as_str()),
+                None => format!("{} {verb} in no profile", v.join(", ")),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
 
 fn row_tags(r: &Value) -> Vec<String> {
     match &r["info"]["tags"] {
@@ -266,27 +262,38 @@ pub fn coverage(
         "no in-scope URL was reachable"
     };
     let tagsets: Vec<Vec<String>> = rows.iter().map(row_tags).collect();
+    let (ran, fuzz) = tags_run(profile);
     let cats: Vec<Value> = CATEGORIES
         .iter()
         .map(|c| {
-            let (status, reason) = match c.min {
-                None => (
-                    "not_tested",
-                    "needs load generation; Ascent never floods a target".to_string(),
-                ),
-                Some(_) if scanned == 0 => ("not_tested", zero_reason.to_string()),
-                Some(min) if min > profile => {
-                    ("not_tested", format!("enable the {} profile", min.as_str()))
+            // Per tag: all ran -> tested, some -> limited, none -> not_tested.
+            let (tags_ran, tags_missing): (Vec<&str>, Vec<&str>) = if scanned == 0 {
+                (vec![], c.tags.to_vec())
+            } else {
+                c.tags.iter().partition(|t| ran.contains(**t))
+            };
+            let (status, reason) = if c.tags.is_empty() {
+                ("not_tested", c.note.unwrap_or("").to_string())
+            } else if scanned == 0 {
+                ("not_tested", zero_reason.to_string())
+            } else if tags_ran.is_empty() {
+                let p = tags_missing.iter().filter_map(|t| profile_running(t)).min();
+                let reason = match p {
+                    Some(p) => format!("enable the {} profile", p.as_str()),
+                    None => missing_reason(&tags_missing),
+                };
+                ("not_tested", reason)
+            } else {
+                let mut notes: Vec<String> = Vec::new();
+                if !tags_missing.is_empty() {
+                    notes.push(missing_reason(&tags_missing));
                 }
-                Some(_) => match c.note {
-                    Some(n) => ("limited", n.to_string()),
-                    None if profile == DastProfile::Active
-                        && matches!(c.id, "sqli" | "xss" | "lfi" | "ssrf" | "redirect") =>
-                    {
-                        ("tested", "templates plus parameter fuzzing".to_string())
-                    }
-                    None => ("tested", String::new()),
-                },
+                if fuzz && c.fuzzed {
+                    notes.push("templates plus parameter fuzzing".into());
+                }
+                notes.extend(c.note.map(String::from));
+                let limited = !tags_missing.is_empty() || c.note.is_some();
+                (if limited { "limited" } else { "tested" }, notes.join("; "))
             };
             let findings = if status == "not_tested" {
                 0
@@ -296,7 +303,8 @@ pub fn coverage(
                     .filter(|ts| ts.iter().any(|t| c.tags.contains(&t.as_str())))
                     .count()
             };
-            json!({"id": c.id, "name": c.name, "tags": c.tags, "status": status, "reason": reason, "findings": findings})
+            json!({"id": c.id, "name": c.name, "tags": c.tags, "status": status, "reason": reason,
+                "findings": findings, "tags_run": tags_ran, "tags_missing": tags_missing})
         })
         .collect();
     json!({"profile": profile.as_str(), "authenticated": authenticated, "scanned": scanned, "categories": cats})
@@ -320,20 +328,29 @@ fn dedupe_rows(rows: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
+/// The report section, as a list: the dashboard's markdown renderer has no GFM tables.
 pub fn coverage_markdown(cov: &Value) -> String {
     let mut out = format!(
-        "\n## DAST coverage\n\nProfile: `{}` · authenticated: {}\n\n| Category | Status | Findings | Notes |\n|---|---|---|---|\n",
+        "\n## DAST coverage\n\nProfile: `{}` · authenticated: {} · URLs scanned: {}\n\n",
         cov["profile"].as_str().unwrap_or(""),
         if cov["authenticated"] == true { "yes" } else { "no" },
+        cov["scanned"],
     );
     for c in cov["categories"].as_array().into_iter().flatten() {
-        out.push_str(&format!(
-            "| {} | {} | {} | {} |\n",
-            c["name"].as_str().unwrap_or(""),
-            c["status"].as_str().unwrap_or("").replace('_', " "),
-            c["findings"],
-            c["reason"].as_str().unwrap_or(""),
-        ));
+        let name = c["name"].as_str().unwrap_or("");
+        let status = c["status"].as_str().unwrap_or("").replace('_', " ");
+        let reason = c["reason"].as_str().unwrap_or("");
+        if status == "not tested" {
+            out.push_str(&format!("- **{name}** — not tested: {reason}\n"));
+            continue;
+        }
+        let n = c["findings"].as_u64().unwrap_or(0);
+        let noun = if n == 1 { "finding" } else { "findings" };
+        out.push_str(&format!("- **{name}** — {status} · {n} {noun}"));
+        if !reason.is_empty() {
+            out.push_str(&format!(": {reason}"));
+        }
+        out.push('\n');
     }
     out
 }
@@ -785,7 +802,60 @@ mod tests {
                 "{id}"
             );
         }
+        assert_eq!(cat(&a, "ssrf")["status"], "limited");
+        assert_eq!(
+            cat(&a, "ssrf")["reason"],
+            "templates plus parameter fuzzing; blind/out-of-band SSRF not tested (interactsh disabled)"
+        );
         assert_eq!(a["profile"], "active");
+    }
+
+    fn strs(v: &Value) -> Vec<&str> {
+        v.as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn coverage_is_per_tag_from_the_profile_passes() {
+        let p = coverage(DastProfile::Passive, false, 1, false, &[]);
+        // passive runs session and cookie but not csrf
+        let s = cat(&p, "session");
+        assert_eq!(s["status"], "limited");
+        assert_eq!(s["reason"], "csrf runs in the standard profile");
+        assert_eq!(strs(&s["tags_run"]), ["session", "cookie"]);
+        assert_eq!(strs(&s["tags_missing"]), ["csrf"]);
+        // passive runs tech/misconfig/exposure but not cve
+        let k = cat(&p, "known-vulns");
+        assert_eq!(k["status"], "limited");
+        assert_eq!(k["reason"], "cve runs in the standard profile");
+        // nothing of sqli runs in passive
+        assert_eq!(cat(&p, "sqli")["status"], "not_tested");
+        assert_eq!(strs(&cat(&p, "sqli")["tags_run"]), Vec::<&str>::new());
+        assert_eq!(strs(&cat(&p, "sqli")["tags_missing"]), ["sqli"]);
+        assert_eq!(cat(&p, "cors")["status"], "tested");
+        assert_eq!(cat(&p, "cors")["reason"], "");
+
+        let st = coverage(DastProfile::Standard, false, 1, false, &[]);
+        assert_eq!(cat(&st, "session")["status"], "tested");
+        assert_eq!(strs(&cat(&st, "session")["tags_missing"]), Vec::<&str>::new());
+        assert_eq!(cat(&st, "known-vulns")["status"], "tested");
+        assert_eq!(
+            cat(&st, "authz")["reason"],
+            "few idor templates, mostly CVE- or product-specific; generic IDOR needs app logic and a second user"
+        );
+        // every category tag is run by some profile (no orphan tags in the table)
+        let all = coverage(DastProfile::Active, false, 1, false, &[]);
+        for c in all["categories"].as_array().unwrap() {
+            assert!(c["tags_missing"].as_array().unwrap().is_empty(), "{c}");
+        }
+    }
+
+    #[test]
+    fn no_hard_coded_template_counts_in_coverage_notes() {
+        let c = coverage(DastProfile::Active, false, 1, false, &[]);
+        for cat in c["categories"].as_array().unwrap() {
+            let r = cat["reason"].as_str().unwrap();
+            assert!(!r.chars().any(|ch| ch.is_ascii_digit()), "{r}");
+        }
     }
 
     #[test]
@@ -815,19 +885,23 @@ mod tests {
     }
 
     #[test]
-    fn coverage_markdown_has_a_row_per_category() {
-        let cov = coverage(DastProfile::Passive, false, 1, false, &[]);
+    fn coverage_markdown_is_a_list_item_per_category_not_a_table() {
+        let rows = vec![json!({"info":{"tags":["cors"]}}), json!({"info":{"tags":["cors"]}})];
+        let cov = coverage(DastProfile::Passive, false, 1, false, &rows);
         let md = coverage_markdown(&cov);
         assert!(md.contains("## DAST coverage"));
+        assert!(!md.contains('|'), "the dashboard renders no GFM tables: {md}");
+        assert!(md.contains("- **SQL injection** — not tested: enable the standard profile"), "{md}");
+        assert!(md.contains("- **CORS misconfiguration** — tested · 2 findings"), "{md}");
+        assert!(md.contains("- **Security headers** — tested · 0 findings"), "{md}");
         assert!(
-            md.contains("| SQL injection | not tested | 0 | enable the standard profile |"),
+            md.contains("- **Session management** — limited · 0 findings: csrf runs in the standard profile"),
             "{md}"
         );
-        let rows = md
-            .lines()
-            .filter(|l| l.starts_with("| ") && !l.starts_with("| Category"))
-            .count();
-        assert_eq!(rows, cov["categories"].as_array().unwrap().len());
+        let items = md.lines().filter(|l| l.starts_with("- **")).count();
+        assert_eq!(items, cov["categories"].as_array().unwrap().len());
+        let one = coverage(DastProfile::Passive, false, 1, false, &rows[..1]);
+        assert!(coverage_markdown(&one).contains("- **CORS misconfiguration** — tested · 1 finding\n"));
     }
 
     #[test]
