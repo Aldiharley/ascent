@@ -11,14 +11,33 @@ fn s<'a>(f: &'a Value, k: &str) -> &'a str {
     f[k].as_str().unwrap_or("")
 }
 
+/// CWEs whose evidence is itself a credential: fingerprint these like secrets
+/// (rule + path + occurrence) so no derivative of the credential is stored.
+const CREDENTIAL_CWES: [&str; 3] = ["CWE-798", "CWE-259", "CWE-321"];
+
 /// `"secret" | "sca" | "dast" | "sast"`.
 pub fn kind(f: &Value) -> &'static str {
+    let cwe = s(f, "cwe").split(':').next().unwrap_or("").trim().to_ascii_uppercase();
     match s(f, "tool") {
         "gitleaks" => "secret",
         "trivy" => "sca",
         _ if !s(f, "url").is_empty() => "dast",
+        _ if CREDENTIAL_CWES.contains(&cwe.as_str()) => "secret",
         _ => "sast",
     }
+}
+
+/// Package name for an SCA finding: the `pkg=` token Ascent's trivy normaliser
+/// writes into the evidence, else the id with its `trivy:<rule>:<target>:`
+/// prefix stripped, else the whole id. Never the raw target path.
+fn sca_package(f: &Value) -> String {
+    let ev = f["code"].as_str().or(f["evidence"].as_str()).unwrap_or("");
+    if let Some(p) = ev.split_whitespace().find_map(|t| t.strip_prefix("pkg=")) {
+        return p.to_string();
+    }
+    let id = s(f, "id");
+    let prefix = format!("trivy:{}:{}:", s(f, "rule_id"), s(f, "file"));
+    id.strip_prefix(&prefix).unwrap_or(id).to_string()
 }
 
 fn strip_dot(mut p: &str) -> &str {
@@ -87,8 +106,8 @@ fn inputs(f: &Value, root: Option<&str>) -> Vec<String> {
     let path = normalise_path(s(f, "file"), root);
     match kind(f) {
         "secret" => vec![rule, path],
-        // The trivy id is `trivy:<vuln>:<target>:<pkg>`: version-free by construction.
-        "sca" => vec![rule, path, s(f, "id").to_string()],
+        // Keyed on the package name, never the raw trivy id (it embeds the unnormalised target).
+        "sca" => vec![rule, path, sca_package(f)],
         "dast" => vec![rule, normalise_url(s(f, "url"))],
         _ => {
             let code = f["code"].as_str().or(f["evidence"].as_str()).unwrap_or("");
@@ -157,10 +176,31 @@ mod tests {
         assert_eq!(one(s(2, "")), one(s(9, "AKIAEXAMPLE")));
     }
     #[test]
-    fn sca_ignores_installed_version() {
-        let s = |ev: &str| json!({"id":"trivy:CVE-1:package-lock.json:axios","tool":"trivy",
-            "rule_id":"CVE-1","file":"package-lock.json","line":0,"url":"","code":ev});
-        assert_eq!(one(s("pkg=axios installed=0.21.1")), one(s("pkg=axios installed=0.21.2")));
+    fn sca_is_stable_across_separators_versions_and_roots() {
+        let s = |file: &str, ver: &str| json!({"id": format!("trivy:CVE-1:{file}:axios"),
+            "tool":"trivy","rule_id":"CVE-1","file":file,"line":0,"url":"",
+            "code": format!("pkg=axios installed={ver} fixed=0.21.2 purl=pkg:npm/axios@{ver}")});
+        assert_eq!(one(s("src\\package-lock.json", "0.21.1")), one(s("src/package-lock.json", "0.21.2")));
+        assert_eq!(
+            fingerprints(&[s("./app/package-lock.json", "0.21.1")], Some("./app")),
+            fingerprints(&[s("package-lock.json", "0.21.1")], None)
+        );
+        let other = json!({"id":"trivy:CVE-1:package-lock.json:lodash","tool":"trivy","rule_id":"CVE-1",
+            "file":"package-lock.json","line":0,"url":"","code":"pkg=lodash installed=1 fixed=2 purl="});
+        assert_ne!(one(s("package-lock.json", "0.21.1")), one(other));
+    }
+    #[test]
+    fn sca_without_evidence_falls_back_to_the_id_package() {
+        let s = |file: &str| json!({"id": format!("trivy:CVE-1:{file}:axios"),"tool":"trivy",
+            "rule_id":"CVE-1","file":file,"line":0,"url":""});
+        assert_eq!(one(s("a\\package-lock.json")), one(s("a/package-lock.json")));
+    }
+    #[test]
+    fn sast_credential_findings_are_keyed_like_secrets() {
+        let f = |code: &str, line: i64| json!({"id":"o","tool":"opengrep","rule_id":"generic.hardcoded.cred",
+            "file":"d.py","line":line,"url":"","cwe":"CWE-798","code":code});
+        assert_eq!(kind(&f("k = 'aa11'", 1)), "secret");
+        assert_eq!(one(f("k = 'aa11'", 1)), one(f("k = 'bb22'", 9)));
     }
     #[test]
     fn dast_ignores_query_values_ids_and_host_case() {
@@ -199,5 +239,6 @@ mod tests {
         assert_eq!(kind(&json!({"tool":"trivy"})), "sca");
         assert_eq!(kind(&json!({"tool":"nuclei","url":"https://x/"})), "dast");
         assert_eq!(kind(&json!({"tool":"opengrep","url":""})), "sast");
+        assert_eq!(kind(&json!({"tool":"opengrep","url":"","cwe":"CWE-798: Use of Hard-coded Credentials"})), "secret");
     }
 }
