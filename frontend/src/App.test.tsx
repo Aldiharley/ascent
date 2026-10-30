@@ -109,6 +109,36 @@ test("topbar falls back to a neutral status when the engagement fetch fails", as
   await waitFor(() => expect(screen.getByText(/no engagement loaded/)).toBeInTheDocument());
 });
 
+test("a failed engagement refetch keeps the last known name", async () => {
+  let calls = 0;
+  mockApi({
+    "/api/engagement": () => (++calls === 1 ? json({ name: "ascent-local-lab" }) : json({ error: "x" }, 500)),
+    "/api/engagements": () =>
+      json({
+        ok: true,
+        name: "Acme",
+        path: "engagements/acme.yaml",
+        scope: { hosts: ["example.com"], cidrs: [], urls: [] },
+        source: "",
+        dast: { profile: "standard", auth_header: "" },
+        run_command: "ascent run --engagement engagements/acme.yaml --out out",
+      }),
+  });
+  render(<App />);
+  expect(await screen.findByText(/engagement: ascent-local-lab/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "New scan" }));
+  fireEvent.change(screen.getByLabelText("Engagement name"), { target: { value: "Acme" } });
+  fireEvent.change(screen.getByLabelText("Targets"), { target: { value: "example.com" } });
+  fireEvent.click(screen.getByRole("button", { name: /create scan/i }));
+  expect(await screen.findByText(/Scan defined: Acme/)).toBeInTheDocument();
+
+  // The creation bumped the engagement key; its refetch failed (second call).
+  await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+  expect(screen.getByText(/engagement: ascent-local-lab/)).toBeInTheDocument();
+  expect(screen.queryByText(/no engagement loaded/)).not.toBeInTheDocument();
+});
+
 test("deciding a gate refreshes the audit feed", async () => {
   let decided = false;
   mockApi({

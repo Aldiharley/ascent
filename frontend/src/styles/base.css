@@ -51,9 +51,5 @@ td,th,.n,.count{font-variant-numeric:tabular-nums}
 }
 .skip:focus,.skip:focus-visible{transform:translateY(0)}
 
-@media (prefers-reduced-motion:reduce){
-  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;
-    transition-duration:.001ms!important;scroll-behavior:auto!important}
-  .mascot--float{animation:none}
-  .skeleton{background:var(--surface-sunken)}
-}
+/* The prefers-reduced-motion override lives at the very end of screens.css, the last sheet that
+   defines animations, so no later rule can undo it. */

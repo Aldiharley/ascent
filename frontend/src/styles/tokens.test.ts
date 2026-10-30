@@ -18,6 +18,8 @@ const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "");
 
 const tokensCss = stripComments(load("tokens.css"));
 const componentsCss = stripComments(load("components.css"));
+const baseCss = stripComments(load("base.css"));
+const shellCss = stripComments(load("shell.css"));
 const screensCss = stripComments(load("screens.css"));
 
 /** Declarations of the rule whose selector list is exactly `selector`. */
@@ -155,9 +157,9 @@ describe("non-text contrast (spec 5.2): every pair clears 3:1", () => {
 });
 
 test("the tokens still match the ratios the spec measured (guards silent palette drift)", () => {
-  // Rows whose spec figure used a slightly different surface (e.g. the LOW chip) are not pinned
-  // exactly; every other row must match to within 0.1.
-  const loose = new Set(["LOW chip", "Needs human chip", "True positive chip"]);
+  // Only the LOW chip's spec figure used a slightly different surface, so it is the one row not
+  // pinned; every other row must match to within 0.1.
+  const loose = new Set(["LOW chip"]);
   for (const r of [...TEXT, ...NON_TEXT]) {
     if (loose.has(r[3])) continue;
     const [f, b] = pair(r);
@@ -176,6 +178,49 @@ test("out-of-scope warning text meets WCAG AA contrast on the white gate card", 
   const color = rule(componentsCss, ".scope-bad").color;
   expect(color).toBeTruthy();
   expect(contrast(resolve(color), "#ffffff")).toBeGreaterThanOrEqual(4.5);
+});
+
+/** Alpha-blend `#rrggbb` `top` at `alpha` over opaque `base`. */
+function blend(top: string, alpha: number, base: string): string {
+  const t = parseInt(top.slice(1), 16);
+  const b = parseInt(base.slice(1), 16);
+  const out = [16, 8, 0].map((sh) => {
+    const c = Math.round(((t >> sh) & 255) * alpha + ((b >> sh) & 255) * (1 - alpha));
+    return c.toString(16).padStart(2, "0");
+  });
+  return `#${out.join("")}`;
+}
+
+test("the sidebar engagement chip text clears AA over the whole blended sidebar gradient", () => {
+  const chip = rule(shellCss, ".sb-chip");
+  const m = chip.background.match(/^rgba\(\s*255\s*,\s*255\s*,\s*255\s*,\s*(\.?\d*\.?\d+)\s*\)$/);
+  expect(m, `chip background "${chip.background}" is white at some alpha`).not.toBeNull();
+  const alpha = Number(m![1]);
+  const ink = resolve(chip.color);
+  // --surface-dark runs from --slate-700 (top, lightest) to --slate-800 (bottom, darkest); the
+  // chip is translucent white over whichever point of that gradient it sits on.
+  for (const stop of ["--slate-700", "--slate-800"]) {
+    const surface = blend("#ffffff", alpha, resolve(stop));
+    expect(contrast(ink, surface), `chip text ${ink} over ${surface} (${stop})`).toBeGreaterThanOrEqual(4.5);
+  }
+  // the gradient the chip sits on is still the one this test assumes
+  expect(tokens["--surface-dark"]).toContain("var(--slate-700)");
+  expect(tokens["--surface-dark"]).toContain("var(--slate-800)");
+});
+
+test("the prefers-reduced-motion override is a single block, last in the last-loaded sheet", () => {
+  const blocks = (css: string) => css.match(/@media \(prefers-reduced-motion:\s*reduce\)/g) ?? [];
+  expect(blocks(screensCss)).toHaveLength(1);
+  for (const [name, css] of [["base", baseCss], ["components", componentsCss], ["shell", shellCss]] as const) {
+    expect(blocks(css), `${name}.css must not carry its own copy`).toHaveLength(0);
+  }
+  // nothing but that block follows the first reduced-motion at-rule in screens.css
+  const tail = screensCss.slice(screensCss.search(/@media \(prefers-reduced-motion/));
+  expect(tail.match(/@media/g)).toHaveLength(1);
+});
+
+test("the report section-index title uses --ink on the bare canvas", () => {
+  expect(rule(screensCss, ".report-index .idx-title").color).toBe("var(--ink)");
 });
 
 test("the audit feed caps: page feed is viewport-based, compact feed is uncapped", () => {

@@ -77,6 +77,39 @@ describe("useResource", () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
+  test("a consumer served from the cache keeps its data if the entry is later evicted", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => json({ name: "v0" }));
+    const first = renderHook(() => useResource("engagement", 0));
+    await waitFor(() => expect(first.result.current.status).toBe("ready"));
+    first.unmount();
+
+    // Mounts on the cached v0: ready on first render, no request of its own.
+    const mounted = renderHook(() => useResource("engagement", 0));
+    expect(mounted.result.current).toEqual({ status: "ready", data: { name: "v0" } });
+
+    // Evict the entry (cache reset), then force a re-render of the mounted consumer.
+    __resetResourceCache();
+    mounted.rerender();
+    expect(mounted.result.current).toEqual({ status: "ready", data: { name: "v0" } });
+  });
+
+  test("a newer-version fetch that evicts v0 does not regress a mounted v0 consumer", async () => {
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json({ name: "v0" }))
+      .mockResolvedValueOnce(json({ error: "x" }, 500));
+    const seed = renderHook(() => useResource("engagement", 0));
+    await waitFor(() => expect(seed.result.current.status).toBe("ready"));
+    seed.unmount();
+
+    const old = renderHook(() => useResource("engagement", 0)); // from the cache
+    const newer = renderHook(() => useResource("engagement", 1)); // evicts v0, then fails
+    await waitFor(() => expect(newer.result.current.status).toBe("error"));
+    old.rerender();
+    expect(old.result.current).toEqual({ status: "ready", data: { name: "v0" } });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
   test("a failed request reports error with a retry that refetches", async () => {
     const spy = vi
       .spyOn(globalThis, "fetch")

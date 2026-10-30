@@ -167,7 +167,7 @@
 .report-layout{display:grid;grid-template-columns:minmax(0,820px) 220px;gap:var(--s-6);align-items:start}
 @media (max-width:1279px){.report-layout{grid-template-columns:minmax(0,1fr)}.report-index{display:none}}
 .report-index{position:sticky;top:16px;font-size:13.5px}
-.report-index .idx-title{font:var(--t-micro);text-transform:uppercase;letter-spacing:var(--tracking-caps);color:var(--ink-2);margin-bottom:var(--s-2)}
+.report-index .idx-title{font:var(--t-micro);text-transform:uppercase;letter-spacing:var(--tracking-caps);color:var(--ink);margin-bottom:var(--s-2)}
 .report-index a{display:block;padding:4px 0 4px 12px;color:var(--ink);text-decoration:none;
   border-left:3px solid transparent;font-size:13.5px}
 .report-index a[aria-current="true"]{border-left-color:var(--teal-500)}
@@ -202,3 +202,12 @@
 .audit-node svg{width:16px;height:16px;stroke:currentColor;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}
 .audit-meta{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;font:var(--t-mono-sm);color:var(--ink-3)}
 .audit-hash{padding:1px 8px;border-radius:var(--r-xs);background:var(--surface-sunken);font:var(--t-mono-sm)}
+
+/* Reduced motion (spec 1.9). Deliberately the last rule set loaded: components.css and screens.css
+   define the animations and transitions this must override. Keep it a single block, at the end. */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;
+    transition-duration:.001ms!important;scroll-behavior:auto!important}
+  .mascot--float{animation:none}
+  .skeleton{background:var(--surface-sunken)}
+}

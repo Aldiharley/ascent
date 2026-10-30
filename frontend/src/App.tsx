@@ -19,16 +19,17 @@ const INITIAL_VERSIONS = Object.fromEntries(RESOURCE_KEYS.map((k) => [k, 0])) as
 
 /** Topbar status text; anything but a named engagement is the neutral fallback.
  *  Refetches whenever `version` changes (e.g. after a new scan is created). While a refetch is in
- *  flight the last known text stays, so the chip does not flicker. */
+ *  flight, or if it fails, the last known text stays, so the chip neither flickers nor loses a
+ *  name it already showed. */
 function useEngagementStatus(version: number): string {
   const res = useResource("engagement", version);
   const last = useRef(NO_ENGAGEMENT);
   if (res.status === "ready") {
     const name = typeof res.data?.name === "string" ? res.data.name.trim() : "";
     last.current = name ? `engagement: ${name}` : NO_ENGAGEMENT;
-  } else if (res.status === "error") {
-    last.current = NO_ENGAGEMENT;
   }
+  // On an error the last known text stays; before any name was loaded it is still the neutral
+  // fallback, so a failing first fetch reads "no engagement loaded".
   return last.current;
 }
 

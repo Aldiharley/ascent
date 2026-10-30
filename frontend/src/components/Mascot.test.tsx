@@ -32,6 +32,11 @@ test("an unknown pose falls back to rest, so a class never comes from data", () 
   expect(el.className).toBe("mascot mascot--rest");
 });
 
+test("inherited object keys are not poses: 'constructor' falls back to rest", () => {
+  const { container } = render(<Mascot pose={"constructor" as never} size={10} />);
+  expect((container.firstElementChild as HTMLElement).className).toBe("mascot mascot--rest");
+});
+
 test("carries no text for assistive tech", () => {
   const { container } = render(<Mascot pose="rest" size={96} />);
   expect(container).toHaveTextContent("");

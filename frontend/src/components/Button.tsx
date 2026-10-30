@@ -25,7 +25,7 @@ export function buttonClass(
   variant: ButtonVariant = "secondary",
   opts: { size?: "md" | "sm"; block?: boolean; className?: string } = {},
 ): string {
-  const v = VARIANTS[variant] ?? VARIANTS.secondary;
+  const v = Object.hasOwn(VARIANTS, variant) ? VARIANTS[variant] : VARIANTS.secondary;
   const parts = variant === "text" ? [v] : ["btn", v];
   if (opts.size === "sm") parts.push("btn-sm");
   if (opts.block) parts.push("btn-block");

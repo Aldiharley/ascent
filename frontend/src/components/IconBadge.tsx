@@ -25,8 +25,8 @@ export function IconBadge({
   size?: BadgeSize;
   children: ReactNode;
 }) {
-  const t = TONES[tone] ?? TONES.teal;
-  const s = SIZES[size] ?? "";
+  const t = Object.hasOwn(TONES, tone) ? TONES[tone] : TONES.teal;
+  const s = Object.hasOwn(SIZES, size) ? SIZES[size] : "";
   return (
     <span className={`ibadge ${t}${s}`} aria-hidden="true">
       {children}

@@ -22,7 +22,7 @@ export function Mascot({
   size: number;
   float?: boolean;
 }) {
-  const cls = POSES[pose] ?? POSES.rest;
+  const cls = Object.hasOwn(POSES, pose) ? POSES[pose] : POSES.rest;
   return (
     <span
       className={`mascot ${cls}${float ? " mascot--float" : ""}`}

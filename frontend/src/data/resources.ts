@@ -123,6 +123,9 @@ export function useResource<K extends ResourceKey>(
   // Prefer the shared cache (ready on the very first render of a remount), else this hook's own
   // settled result (the only place a failure is visible, since failures are evicted).
   const cached = cache.get(id)?.settled as Settled<ResourceMap[K]> | undefined;
+  // Keep what the cache served in local state too: the cache may evict this entry later (a newer
+  // version of the key, a reset), and a mounted consumer must not fall back to `loading` then.
+  if (cached && (local?.id !== id || local.result !== cached)) setLocal({ id, result: cached });
   const result = cached ?? (local?.id === id ? local.result : undefined);
   if (!result) return { status: "loading" };
   return result.ok ? { status: "ready", data: result.data } : { status: "error", retry };

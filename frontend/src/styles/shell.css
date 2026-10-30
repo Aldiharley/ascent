@@ -28,7 +28,7 @@
 .sb-word{font:800 22px/1.2 var(--font-display);color:var(--ink-on-dark);margin:0}
 .sb-chip{
   display:inline-flex;align-items:center;gap:var(--s-2);max-width:100%;padding:6px 12px;
-  border-radius:var(--r-pill);background:rgba(255,255,255,.08);font:var(--t-small);color:var(--ink-on-dark-2);
+  border-radius:var(--r-pill);background:rgba(255,255,255,.08);font:var(--t-small);color:var(--ink-on-dark-3);
 }
 .sb-chip-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .sb-chip .dot{width:8px;height:8px}
