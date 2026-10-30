@@ -17,10 +17,8 @@ The policy gate (`--policy`, `ascent gate`), native SARIF 2.1.0 output and the e
 
 ## Issues found in review
 
-- **Policy CWE ids are not canonicalised.** `CWE-089` passes validation but never matches a finding tagged `CWE-89`. Canonicalise (strip leading zeros, normalise case and prefix) on both sides.
 - **A policy with no `fail_on` severity or CWE can never fail.** Consider warning (or refusing) at load time so an empty `fail_on` is not mistaken for a working gate.
 - **`normalise_url` keeps unparseable or relative URLs verbatim.** Two spellings of the same unparseable URL fingerprint differently. Decide whether to reject, resolve against a base, or accept this and document it.
-- **httpx tool identity.** Add a dedicated tool-identity check for httpx. On Windows a pip-installed Python `httpx` can shadow ProjectDiscovery httpx on `PATH`, and the wrong binary would run (or fail confusingly).
 
 ## Non-goals
 

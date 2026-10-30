@@ -22,7 +22,7 @@ Then run `cargo test` in `Ascent/`.
 
 ## SAST track
 
-Besides the black-box (DAST) track, Ascent can run a white-box source-analysis (SAST/SCA/secrets) track over a source directory. It invokes [opengrep](https://github.com/opengrep/opengrep), [gitleaks](https://github.com/gitleaks/gitleaks) and [trivy](https://github.com/aquasecurity/trivy) as subprocesses; like the DAST tools, they are invoked, never vendored. Install whichever you want on your `PATH`. Tools that are not installed are skipped, and the run still completes (with fewer or no SAST findings).
+Besides the black-box (DAST) track, Ascent can run a white-box source-analysis (SAST/SCA/secrets) track over a source directory. It invokes [opengrep](https://github.com/opengrep/opengrep), [gitleaks](https://github.com/gitleaks/gitleaks) and [trivy](https://github.com/aquasecurity/trivy) as subprocesses; like the DAST tools, they are invoked, never vendored. Install whichever you want on your `PATH`. Tools that are not installed are skipped, and the run still completes (with fewer or no SAST findings). With a policy, though, a missing analyser for one of the policy's `fail_on.categories` (opengrep → SAST, gitleaks → SECRETS, trivy → SCA) makes the gate INCOMPLETE (exit 3): an unscanned category never passes.
 
 Point the track at a source root either way:
 
@@ -132,19 +132,31 @@ existing output directory. Every run also writes native SARIF 2.1.0
 regenerate with `ascent sarif`). See `samples/ascent-policy.example.yaml` and
 `docs/ci/github-actions.yml`.
 
+```
+ascent run --engagement engagement.yaml --source . --out out --policy ascent-policy.yaml --fail-on-warn
+ascent gate --policy ascent-policy.yaml --out out --fail-on-warn
+ascent sarif --out out --source-root path/to/repo
+```
+
+nuclei (and the ProjectDiscovery recon tools) are only required when the
+engagement has DAST scope (`hosts` or `urls`); a source-only engagement needs
+just the SAST analysers. A missing analyser for a policy category makes the
+gate INCOMPLETE.
+
 | Exit | Meaning |
 |---|---|
 | 0 | PASS, or CONDITIONAL (warnings only) — or no policy given |
 | 1 | FAIL (or CONDITIONAL with `--fail-on-warn`) |
-| 2 | Usage or configuration error (bad engagement, malformed policy) |
-| 3 | INCOMPLETE: a scanner or stage failed, or it was a dry run — never a pass |
-| 4 | The audit hash chain failed verification |
+| 2 | Usage or configuration error (bad engagement, malformed policy, bad `--source`) |
+| 3 | INCOMPLETE: a scanner or stage failed, a policy category's analyser is not installed, or it was a dry run — never a pass |
+| 4 | The audit hash chain failed verification (`ascent run` then refuses to start) |
 
 The verdict is written to `out/gate.json` and chained into `audit.jsonl`
 (`gate_evaluation`). A finding Crux triages as LIKELY_FALSE_POSITIVE is demoted
 to a warning, never silently passed. Findings carry a stable `ascent/v1`
-fingerprint (no line numbers; secrets keyed on rule + path only — Ascent never
-stores a secret or a hash of one). Runtime errors now exit 3 (previously 1), so
+fingerprint (no line numbers; secrets keyed on rule + path only). Credential-class
+findings (gitleaks, CWE-798/259/321) carry no secret value or derivative; other
+SAST evidence stays local in `queue.json`/`report.md`. Runtime errors now exit 3 (previously 1), so
 1 always means "policy failed".
 
 ## License

@@ -609,6 +609,43 @@ mod tests {
         assert_eq!(res["partialFingerprints"]["ascentFindingHash/v1"], r.failed[0].fingerprint.as_str());
     }
 
+    /// opengrep is installed but crashes; the other analysers work.
+    struct CrashingOpengrepRun;
+    impl Runner for CrashingOpengrepRun {
+        fn run_json(
+            &self,
+            tool: &str,
+            a: &[String],
+            t: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            match tool {
+                "opengrep" => Err("opengrep crashed".into()),
+                _ => FakeRun.run_json(tool, a, t),
+            }
+        }
+        fn run_text(
+            &self,
+            tool: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            FakeRun.run_text(tool, a, g)
+        }
+    }
+
+    #[test]
+    fn failing_sast_tool_makes_the_run_incomplete_and_is_recorded() {
+        let dir = std::path::PathBuf::from(unique_dir());
+        let eng = sast_engagement(&dir);
+        let d = dir.to_str().unwrap();
+        let s = run_pipeline(&eng, &CrashingOpengrepRun, &FakeTri, d, false, None).unwrap();
+        assert!(!s.complete);
+        assert_eq!(s.failed_tools, vec!["opengrep".to_string()]);
+        let st = crate::runstatus::read_run_status(d).unwrap();
+        assert!(!st.complete && !st.dry_run);
+        assert_eq!(st.failed_tools, vec!["opengrep".to_string()]);
+    }
+
     #[test]
     fn pipeline_merges_sast_and_dast_findings() {
         let dir = std::path::PathBuf::from(unique_dir());
