@@ -154,11 +154,14 @@ pub fn evaluate(items: &[Value], policy: &Policy, status: Option<&RunStatus>, fa
     counts.failed = failed.len();
     counts.warned = warned.len();
     // A policy category whose analyser was not installed was never scanned. A DAST
-    // track that scanned nothing tested nothing, whatever `complete` claims (defence
-    // in depth against a stale or hand-edited run.json).
+    // track that scanned nothing tested nothing, and one whose scanner sent a request
+    // outside scope breached it, whatever `complete` claims (defence in depth against
+    // a stale or hand-edited run.json).
     let complete = status.is_some_and(|st| {
         st.complete
-            && !st.dast.as_ref().is_some_and(|d| d.scanned == 0)
+            && !st.dast.as_ref().is_some_and(|d| {
+                d.scanned == 0 || d.off_scope_request_count > 0 || !d.out_of_scope_requests.is_empty()
+            })
             && !st.skipped_tools.iter().any(|t| {
                 tool_category(t).is_some_and(|c| policy.fail_on.categories.iter().any(|x| x == c))
             })
@@ -340,6 +343,23 @@ mod tests {
         let r = evaluate(&[], &policy(), Some(&st), false);
         assert_eq!((r.decision, r.exit_code, r.complete), (Decision::Incomplete, 3, false));
         st.dast = Some(crate::stages::dast::DastSummary { scanned: 1, ..Default::default() });
+        assert_eq!(evaluate(&[], &policy(), Some(&st), false).decision, Decision::Pass);
+    }
+    #[test]
+    fn dast_that_sent_requests_outside_scope_is_never_complete() {
+        // a hand-edited run.json claiming complete cannot PASS past an off-scope request
+        use crate::stages::dast::DastSummary;
+        let mut st = done();
+        st.dast = Some(DastSummary { scanned: 1, off_scope_request_count: 1, ..Default::default() });
+        let r = evaluate(&[], &policy(), Some(&st), false);
+        assert_eq!((r.decision, r.exit_code, r.complete), (Decision::Incomplete, 3, false));
+        st.dast = Some(DastSummary {
+            scanned: 1,
+            out_of_scope_requests: vec!["checkip.amazonaws.com".into()],
+            ..Default::default()
+        });
+        assert_eq!(evaluate(&[], &policy(), Some(&st), false).decision, Decision::Incomplete);
+        st.dast = Some(DastSummary { scanned: 1, ..Default::default() });
         assert_eq!(evaluate(&[], &policy(), Some(&st), false).decision, Decision::Pass);
     }
     #[test]

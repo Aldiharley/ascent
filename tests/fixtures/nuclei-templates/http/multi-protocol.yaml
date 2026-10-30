@@ -1,0 +1,18 @@
+# Test fixture (not a real template): nuclei types a template by its FIRST
+# protocol, so this lists under `-pt http`, but its javascript section dials a
+# host:port the trace log cannot attribute.
+id: ascent-fixture-multi-protocol
+info:
+  name: fixture multi protocol
+  severity: info
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+
+javascript:
+  - code: |
+      let c = net.Open(thost + ":" + tport);
+    args:
+      thost: "{{Host}}"
+      tport: "8443"

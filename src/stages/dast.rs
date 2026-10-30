@@ -76,6 +76,7 @@ pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
 }
 
 const LISTING_NOT_RECOGNISED: &str = "nuclei template listing not recognised";
+const TEMPLATE_UNREADABLE: &str = "nuclei listed a template that cannot be read";
 
 /// nuclei variables that resolve to the scanned target. `{{Host}}`/`{{Hostname}}` are
 /// a bare host (`host`, `host:port`); `{{BaseURL}}`/`{{RootURL}}` carry their own scheme.
@@ -144,6 +145,24 @@ pub fn sends_off_target(template: &str) -> bool {
         .any(|v| !host_value_on_target(v))
 }
 
+/// Top-level template sections that are not http. nuclei types a template by its
+/// FIRST protocol, so `-pt http` still lists a template that starts with `http:` and
+/// then dials something in a `javascript:`/`network:`/`ssl:`/... section; `flow:`
+/// orchestrates several protocols. Neither `@Host` nor the trace log's `address`
+/// (derived from the input) shows where those sections connect.
+const NON_HTTP_SECTIONS: [&str; 11] = [
+    "javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file", "flow",
+];
+
+/// True when a template has a top-level (column-0) non-http protocol section.
+pub fn has_non_http_protocol(template: &str) -> bool {
+    template.lines().any(|line| {
+        NON_HTTP_SECTIONS
+            .iter()
+            .any(|k| line.strip_prefix(k).is_some_and(|rest| rest.starts_with(':')))
+    })
+}
+
 /// A listed template path resolved under the listing's directory (nuclei prints
 /// paths relative to it, with `\` on Windows).
 fn resolve_listed(dir: &Path, rel: &str) -> PathBuf {
@@ -161,12 +180,14 @@ fn resolve_listed(dir: &Path, rel: &str) -> PathBuf {
 /// listed is an error, so a scan never runs unfiltered.
 pub fn parse_template_listing(out: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut lines = out.lines().map(str::trim);
+    const MARK: &str = " nuclei templates for ";
     let banner = lines
         .by_ref()
-        .find(|l| l.starts_with("Listing available") && l.contains(" nuclei templates for "))
+        .find(|l| l.starts_with("Listing available") && l.contains(MARK))
         .ok_or(LISTING_NOT_RECOGNISED)?;
-    let dir = banner.rsplit(" for ").next().unwrap_or("").trim();
-    if dir.is_empty() || std::fs::read_dir(dir).is_err() {
+    // Everything after the marker is DIR, even when DIR itself contains " for ".
+    let dir = banner.split_once(MARK).map_or("", |(_, d)| d.trim());
+    if !Path::new(dir).is_absolute() || std::fs::read_dir(dir).is_err() {
         return Err(LISTING_NOT_RECOGNISED.into());
     }
     let dir = Path::new(dir);
@@ -183,9 +204,11 @@ pub fn parse_template_listing(out: &str) -> Result<Vec<PathBuf>, Box<dyn std::er
     Ok(paths)
 }
 
-/// The installed http templates that send a request off the target (see
-/// [`sends_off_target`]). Lists the templates once (no targets, no network); a
-/// listed template that cannot be read is treated as off-target.
+/// The installed http templates Ascent never runs: those that send a request off
+/// the target ([`sends_off_target`]) and those with a non-http protocol section
+/// ([`has_non_http_protocol`]). Lists the templates once (no targets, no network).
+/// A listed template that cannot be read is an error: Ascent cannot tell what it
+/// sends, nor be sure the path it would exclude is the one nuclei loads.
 fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let args: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]
         .iter()
@@ -195,11 +218,9 @@ fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std
     let listed = parse_template_listing(&out)?;
     let mut off: BTreeSet<PathBuf> = BTreeSet::new();
     for p in listed {
-        let excluded = match std::fs::read(&p) {
-            Ok(bytes) => sends_off_target(&String::from_utf8_lossy(&bytes)),
-            Err(_) => true,
-        };
-        if excluded {
+        let bytes = std::fs::read(&p).map_err(|_| TEMPLATE_UNREADABLE)?;
+        let text = String::from_utf8_lossy(&bytes);
+        if sends_off_target(&text) || has_non_http_protocol(&text) {
             off.insert(p);
         }
     }
@@ -221,16 +242,16 @@ pub struct FailingHost {
     pub sent: usize,
 }
 
-/// The host of a trace-log `address` (`host:port`, `[v6]:port`, a bare host or IPv6),
-/// lower-cased.
+/// The host of a trace-log `address`, lower-cased. nuclei writes
+/// `Hostname() + ":" + port`, so an IPv6 host comes UNBRACKETED (`::1:3000`): the
+/// port is always what follows the LAST `:`. A bracketed `[v6]:port` (or `[v6]`)
+/// gives its inner host; an address with no `:` is the host itself.
 fn address_host(address: &str) -> String {
     let a = address.trim();
     let host = if let Some(rest) = a.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")
-    } else if a.matches(':').count() == 1 {
-        a.split(':').next().unwrap_or("")
     } else {
-        a
+        a.rsplit_once(':').map_or(a, |(h, _)| h)
     };
     host.to_ascii_lowercase()
 }
@@ -249,7 +270,9 @@ struct TraceAudit {
 
 impl TraceAudit {
     /// Streams one trace log (it can be tens of MB) and returns how many request lines
-    /// it held. A line that is not a JSON object with an `address` is skipped.
+    /// it held. A request line is a JSON object with an `address`, `template` or
+    /// `type` key; one without a string `address` is recorded as `(no address)`
+    /// (off scope), never skipped. Any other line is skipped.
     fn read(&mut self, path: &Path, guard: &ScopeGuard, secret: Option<&str>) -> std::io::Result<usize> {
         use std::io::BufRead;
         let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
@@ -263,14 +286,27 @@ impl TraceAudit {
             let Ok(Value::Object(o)) = serde_json::from_slice::<Value>(&buf) else {
                 continue;
             };
-            let Some(address) = o.get("address").and_then(Value::as_str) else {
-                continue;
-            };
-            n += 1;
             let error = o.get("error").and_then(Value::as_str).unwrap_or("");
-            self.record(address, error, guard, secret);
+            match o.get("address").and_then(Value::as_str) {
+                Some(address) => self.record(address, error, guard, secret),
+                None if ["address", "template", "type"].iter().any(|k| o.contains_key(*k)) => {
+                    self.record_no_address(error)
+                }
+                None => continue,
+            }
+            n += 1;
         }
         Ok(n)
+    }
+
+    /// A request line with no usable destination: never assumed to be in scope.
+    fn record_no_address(&mut self, error: &str) {
+        self.sent += 1;
+        if !(error.is_empty() || error == "none") {
+            self.errors += 1;
+        }
+        self.off_scope_count += 1;
+        self.off_scope.insert("(no address)".into());
     }
 
     fn record(&mut self, address: &str, error: &str, guard: &ScopeGuard, secret: Option<&str>) {
@@ -584,6 +620,9 @@ fn dedupe_rows(rows: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
+const EXCLUDED_WHY: &str =
+    "Ascent cannot scope-check (an @Host naming another host, or a non-http or flow section)";
+
 /// The report section, as a list: the dashboard's markdown renderer has no GFM tables.
 pub fn coverage_markdown(cov: &Value) -> String {
     let mut out = format!(
@@ -611,8 +650,8 @@ pub fn coverage_markdown(cov: &Value) -> String {
     let mut notes: Vec<String> = Vec::new();
     match cov["templates_excluded"].as_u64().unwrap_or(0) {
         0 => {}
-        1 => notes.push("1 template excluded: it sends requests to hosts outside the target".into()),
-        n => notes.push(format!("{n} templates excluded: they send requests to hosts outside the target")),
+        1 => notes.push(format!("1 template excluded: it may send requests {EXCLUDED_WHY}")),
+        n => notes.push(format!("{n} templates excluded: they may send requests {EXCLUDED_WHY}")),
     }
     let plural = |n: u64| if n == 1 { "request" } else { "requests" };
     if cov["scanned"].as_u64().unwrap_or(0) > 0 {
@@ -1701,10 +1740,51 @@ mod tests {
             &listing(&dir, &[]),
             // banner naming a directory that cannot be read
             &listing(&dir.join("no-such-dir"), &["http/a.yaml"]),
+            // a relative DIR (this one exists relative to the test's working dir)
+            &listing(Path::new("tests/fixtures/nuclei-templates"), &["http/benign.yaml"]),
         ] {
             let e = parse_template_listing(bad).unwrap_err();
             assert_eq!(e.to_string(), "nuclei template listing not recognised", "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_template_dir_containing_for_is_read_whole() {
+        let scratch = TempDir::create().unwrap();
+        let dir = scratch.path().join("templates for team");
+        std::fs::create_dir_all(dir.join("http")).unwrap();
+        std::fs::write(dir.join("http").join("a.yaml"), "id: a\n").unwrap();
+        let got = parse_template_listing(&listing(&dir, &["http/a.yaml"])).unwrap();
+        assert_eq!(got, vec![dir.join("http").join("a.yaml")]);
+    }
+
+    #[test]
+    fn non_http_protocol_sections_are_classified() {
+        for key in [
+            "javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file", "flow",
+        ] {
+            let t = format!("id: x\nhttp:\n  - method: GET\n    path: ['{{{{BaseURL}}}}']\n\n{key}:\n  - x: 1\n");
+            assert!(has_non_http_protocol(&t), "{key}");
+            // CRLF too
+            assert!(has_non_http_protocol(&t.replace('\n', "\r\n")), "{key} crlf");
+            // only a top-level (column-0) key counts, never an indented one or a value
+            let nested = format!("id: x\nhttp:\n  - method: GET\n    {key}: 1\n    path: ['{key}: x']\n");
+            assert!(!has_non_http_protocol(&nested), "{key} nested");
+        }
+        assert!(!has_non_http_protocol("id: x\ninfo:\n  name: n\nhttp:\n  - method: GET\n"));
+        assert!(!has_non_http_protocol("id: x\nrequests:\n  - method: GET\n"));
+        // a key that only starts with a protocol name is not that protocol
+        assert!(!has_non_http_protocol("id: x\ncodename: y\nhttp:\n  - method: GET\n"));
+    }
+
+    #[test]
+    fn an_unreadable_listed_template_fails_closed() {
+        let dir = fixture_templates();
+        let mut f = Fake::new();
+        f.listing = listing(&dir, &["http/benign.yaml", "http/missing.yaml"]);
+        let e = run_dast(&eng(), &f, None, true).err().expect("must fail closed");
+        assert_eq!(e.to_string(), "nuclei listed a template that cannot be read");
+        assert_eq!(f.count("nuclei"), 0, "never scan unfiltered");
     }
 
     #[test]
@@ -1718,8 +1798,8 @@ mod tests {
                 "http\\cves\\off-target.yaml",
                 "http/on-target.yaml",
                 "http/off-localhost.yaml",
-                // listed but unreadable: excluded (fail closed)
-                "http/missing.yaml",
+                // http first, then a javascript section: typed http, still excluded
+                "http/multi-protocol.yaml",
             ],
         );
         let mut e = eng();
@@ -1735,7 +1815,7 @@ mod tests {
         let want: BTreeSet<PathBuf> = [
             dir.join("http").join("cves").join("off-target.yaml"),
             dir.join("http").join("off-localhost.yaml"),
-            dir.join("http").join("missing.yaml"),
+            dir.join("http").join("multi-protocol.yaml"),
         ]
         .into_iter()
         .collect();
@@ -1755,7 +1835,13 @@ mod tests {
         assert_eq!(out.summary.templates_excluded, 3);
         assert_eq!(out.coverage["templates_excluded"], 3);
         let md = coverage_markdown(&out.coverage);
-        assert!(md.contains("3 templates excluded: they send requests to hosts outside the target"), "{md}");
+        assert!(
+            md.contains(
+                "3 templates excluded: they may send requests Ascent cannot scope-check \
+                 (an @Host naming another host, or a non-http or flow section)"
+            ),
+            "{md}"
+        );
     }
 
     #[test]
@@ -1786,10 +1872,26 @@ mod tests {
     fn real_nuclei_listing_excludes_exactly_the_off_target_templates() {
         let r = crate::runner::ToolRunner::new(ScopeGuard::new(&Engagement::default()), false);
         let off = off_target_templates(&r).unwrap();
-        eprintln!("{} off-target templates:", off.len());
+        // Why each one is excluded (a template can match several reasons).
+        let (mut host, mut section, mut flow_only) = (0, 0, 0);
         for p in &off {
-            eprintln!("  {}", p.display());
+            let t = std::fs::read_to_string(p).unwrap_or_default();
+            let non_flow = NON_HTTP_SECTIONS
+                .iter()
+                .filter(|k| **k != "flow")
+                .any(|k| t.lines().any(|l| l.strip_prefix(k).is_some_and(|r| r.starts_with(':'))));
+            if sends_off_target(&t) {
+                host += 1;
+            } else if non_flow {
+                section += 1;
+            } else {
+                flow_only += 1;
+            }
         }
+        eprintln!(
+            "{} excluded templates: {host} @Host off-target, {section} with a non-http section, {flow_only} http-only flow",
+            off.len()
+        );
         let tl: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"].iter().map(|s| s.to_string()).collect();
         let before = parse_template_listing(&r.run_text("nuclei", &tl, &[]).unwrap()).unwrap();
         let dir = TempDir::create().unwrap();
@@ -1821,10 +1923,44 @@ mod tests {
         assert_eq!(address_host("127.0.0.1:3000"), "127.0.0.1");
         assert_eq!(address_host("[::1]:3000"), "::1");
         assert_eq!(address_host("[::1]"), "::1");
-        assert_eq!(address_host("::1"), "::1");
+        // nuclei logs Hostname() + ":" + port, so an IPv6 address comes UNBRACKETED
+        assert_eq!(address_host("::1:3000"), "::1");
+        assert_eq!(address_host("2001:db8::5:443"), "2001:db8::5");
         assert_eq!(address_host("example.com"), "example.com");
+        assert_eq!(address_host("Example.COM:443"), "example.com");
         assert_eq!(address_host(" Example.COM:443 "), "example.com");
         assert_eq!(address_host(""), "");
+    }
+
+    #[test]
+    fn an_unbracketed_ipv6_trace_address_is_checked_by_its_host() {
+        let mut e = eng();
+        e.cidrs.push("::1/128".into());
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line("::1:3000", "none")]);
+        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        assert!(out.summary.out_of_scope_requests.is_empty(), "{:?}", out.summary.out_of_scope_requests);
+        // ...and the port is never read as part of the address: ::1:3000 is not ::0.1.48.0
+        let mut e = eng();
+        e.cidrs.push("::1:3000/128".into());
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line("::1:3000", "none")]);
+        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        assert_eq!(out.summary.out_of_scope_requests, vec!["::1"]);
+    }
+
+    #[test]
+    fn a_request_line_without_an_address_is_never_skipped() {
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![
+            trace_line("localhost:3000", "none"),
+            json!({"template": "http/x.yaml", "type": "http", "input": "x", "error": "none"}).to_string(),
+            json!({"type": "http", "address": 3000}).to_string(),
+        ]);
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(out.summary.out_of_scope_requests, vec!["(no address)"]);
+        assert_eq!(out.summary.off_scope_request_count, 2);
+        assert_eq!(out.summary.requests_sent, 3);
     }
 
     #[test]
@@ -1859,7 +1995,7 @@ mod tests {
             trace_line("localhost:3000", "none"),
             trace_line("checkip.amazonaws.com:443", "none"),
             trace_line("checkip.amazonaws.com:3000", "no address found for host"),
-            trace_line("[::1]:80", "none"),
+            trace_line("::1:80", "none"),
             "not json".into(),
             "{\"truncated\":".into(),
             trace_line("127.0.0.1:3000", "context deadline exceeded"),
