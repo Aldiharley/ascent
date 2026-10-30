@@ -66,7 +66,14 @@
 .sb-card-title{font:700 15px/1.3 var(--font-ui);color:var(--ink-on-dark);margin:0}
 .sb-card-line{font:var(--t-small);color:var(--ink-on-dark-3);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb-card-strong{font:600 14px/1.4 var(--font-ui);color:var(--ink-on-dark)}
+.sb-card-note{font:var(--t-small);color:var(--ink-on-dark-3)}
+.sb-card-note code{color:var(--ink-on-dark);font-size:12px}
 .sb-card .btn{height:36px}
+/* round button shown only on the icon rail (1024-1279px); see the media query below */
+.sb-card-rail{
+  display:none;place-items:center;width:56px;height:56px;padding:0;border:0;border-radius:50%;
+  background:none;cursor:pointer;
+}
 
 /* ---------- top bar (2.3) ---------- */
 .topbar{display:flex;align-items:center;gap:var(--s-4);min-height:var(--topbar-h);padding:0 4px}
@@ -85,6 +92,8 @@
   background:var(--surface-sunken);color:var(--ink-2);font:600 12px/1 var(--font-mono);
 }
 .search:focus-within kbd,.search.has-value kbd{display:none}
+/* live region for the hint; the hint itself is positioned against .search */
+.search-live{position:absolute;inset:0;pointer-events:none}
 .search-hint{
   position:absolute;top:calc(100% + 8px);left:8px;z-index:10;padding:8px 12px;border-radius:var(--r-sm);
   background:var(--surface-raised);color:var(--ink-2);font:var(--t-micro);font-weight:500;box-shadow:var(--shadow-toast);
@@ -116,11 +125,12 @@
     font:600 13px/1.3 var(--font-ui);box-shadow:var(--shadow-float);
   }
   .nav-badge{position:absolute;top:8px;right:10px;min-width:0;width:10px;height:10px;padding:0;margin:0;font-size:0}
-  /* policy mini-card: a 56px round clay badge only (its text stays in the DOM, visually hidden) */
+  /* policy mini-card: one 56px round clay-badge button replaces the card (the full card content is
+     removed from layout and the accessibility tree, so there is exactly one control) */
   .sb-card{width:56px;height:56px;padding:0;border-radius:50%;background:none;box-shadow:none;margin:0 auto}
-  .sb-card > :not(.ibadge){position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
-    clip:rect(0,0,0,0);clip-path:inset(50%);white-space:nowrap;border:0}
-  .sb-card .ibadge{width:56px;height:56px;border-radius:50%}
+  .sb-card > :not(.sb-card-rail){display:none}
+  .sb-card-rail{display:grid}
+  .sb-card-rail .ibadge{border-radius:50%}
   .search{width:280px}
 }
 

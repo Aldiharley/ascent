@@ -67,6 +67,15 @@ export const IconSearchLines = glyph(
   </>,
 );
 
+/** Plain magnifier (the top-bar search field). */
+export const IconSearch = glyph(
+  "IconSearch",
+  <>
+    <circle cx="10.5" cy="10.5" r="7" />
+    <path d="m21 21-5.1-5.1" />
+  </>,
+);
+
 /** Shield with a tick (Approval gates, policy gate). */
 export const IconShieldCheck = glyph(
   "IconShieldCheck",

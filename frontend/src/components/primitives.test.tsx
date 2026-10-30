@@ -83,7 +83,7 @@ test("every spec glyph is exported and is an aria-hidden 24px-viewBox stroke svg
     "IconGrid", "IconTarget", "IconSearchLines", "IconShieldCheck", "IconDocument", "IconChain",
     "IconRadar", "IconCrosshairCheck", "IconHand", "IconFunnelSlash", "IconRefresh", "IconBell",
     "IconLock", "IconInfo", "IconAlertTriangle", "IconAlertCircle", "IconTick", "IconX",
-    "IconPlayCircle", "IconClipboard", "IconCopy", "IconChevronDown",
+    "IconPlayCircle", "IconClipboard", "IconCopy", "IconChevronDown", "IconSearch",
   ] as const;
   for (const n of names) {
     const Glyph = icons[n];

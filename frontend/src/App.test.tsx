@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import App from "./App";
 
@@ -155,6 +155,135 @@ test("deciding a gate refreshes the audit feed", async () => {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
   expect(await screen.findByText(/gate g1 → approved/)).toBeInTheDocument();
+});
+
+const failGate = {
+  policy: { name: "ci", hash: "abcdef0123456789" },
+  decision: "FAIL",
+  exit_code: 1,
+  complete: true,
+  counts: { evaluated: 1, failed: 1, warned: 0, demoted_fp: 0 },
+  failed: [],
+  warned: [],
+};
+
+function h1Name() {
+  return screen.getByRole("heading", { level: 1 }).textContent;
+}
+
+function calls(spy: ReturnType<typeof mockApi>, path: string) {
+  return spy.mock.calls.filter((c) => String(c[0]) === path).length;
+}
+
+test("the page title follows the screen", async () => {
+  mockApi();
+  render(<App />);
+  expect(h1Name()).toBe("Ascent Console: Overview");
+  fireEvent.click(screen.getByRole("button", { name: "Audit" }));
+  expect(h1Name()).toBe("Ascent Console: Audit log");
+  await screen.findByText("Hash chain OK");
+});
+
+test("search Enter on another screen opens Findings and keeps the query", async () => {
+  mockApi();
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Audit" }));
+  await screen.findByText("Hash chain OK");
+  const box = screen.getByRole("searchbox", { name: "Search findings" });
+  fireEvent.change(box, { target: { value: "ssrf" } });
+  // Typing alone does not leave the Audit screen.
+  expect(h1Name()).toBe("Ascent Console: Audit log");
+  fireEvent.submit(screen.getByRole("search"));
+  expect(await screen.findByText("SSRF in fetch")).toBeInTheDocument();
+  expect(h1Name()).toBe("Ascent Console: Findings");
+  expect(screen.getByRole("button", { name: "Findings" })).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("searchbox", { name: "Search findings" })).toHaveValue("ssrf");
+});
+
+test("the bell shows the pending count and opens Approval gates", async () => {
+  mockApi();
+  render(<App />);
+  const bell = await screen.findByRole("button", { name: "Pending approvals: 1" });
+  expect(within(screen.getByRole("button", { name: "Approval gates" })).getByText("1")).toBeInTheDocument();
+  fireEvent.click(bell);
+  expect(await screen.findByText("Confirm SSRF")).toBeInTheDocument();
+  expect(h1Name()).toBe("Ascent Console: Approval gates");
+  expect(screen.getByRole("button", { name: "Approval gates" })).toHaveAttribute("aria-current", "page");
+  expect(screen.queryByText("SSRF in fetch")).not.toBeInTheDocument();
+});
+
+test("deciding a gate on the Approval gates screen updates the bell", async () => {
+  let decided = false;
+  mockApi({
+    "/api/gates": () => json(decided ? [] : [gate]),
+    "/api/gates/g1/approve": () => {
+      decided = true;
+      return json({ ok: true });
+    },
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Pending approvals: 1" }));
+  fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+  expect(await screen.findByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
+});
+
+test("Refresh data refetches what the shell and the visible screen read", async () => {
+  const spy = mockApi();
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  await screen.findByRole("button", { name: "Pending approvals: 1" });
+  await waitFor(() => expect(calls(spy, "/api/engagement")).toBe(1));
+  const before = {
+    engagement: calls(spy, "/api/engagement"),
+    gates: calls(spy, "/api/gates"),
+    gate: calls(spy, "/api/gate"),
+    findings: calls(spy, "/api/findings"),
+    audit: calls(spy, "/api/audit"),
+  };
+  fireEvent.click(screen.getByRole("button", { name: "Refresh data" }));
+  await waitFor(() => {
+    expect(calls(spy, "/api/engagement")).toBe(before.engagement + 1);
+    expect(calls(spy, "/api/gates")).toBeGreaterThan(before.gates);
+    expect(calls(spy, "/api/gate")).toBeGreaterThan(before.gate);
+    expect(calls(spy, "/api/findings")).toBe(before.findings + 1);
+    expect(calls(spy, "/api/audit")).toBe(before.audit + 1);
+  });
+  expect(await screen.findByText("SSRF in fetch")).toBeInTheDocument();
+  // Busy ends once everything has landed.
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh data" })).not.toHaveAttribute("aria-busy"));
+});
+
+test("the sidebar policy card shows the read-only verdict from /api/gate", async () => {
+  mockApi({ "/api/gate": () => json(failGate) });
+  render(<App />);
+  const nav = screen.getByRole("navigation", { name: "Primary" });
+  expect(await within(nav).findByText("exit 1 · ci")).toBeInTheDocument();
+  expect(within(nav).getByText("FAIL")).toHaveClass("vpill");
+});
+
+test("the sidebar policy card says so when no policy has been evaluated", async () => {
+  mockApi({ "/api/gate": () => json(null) });
+  render(<App />);
+  const nav = screen.getByRole("navigation", { name: "Primary" });
+  expect(await within(nav).findByText("No verdict yet")).toBeInTheDocument();
+});
+
+test("the sidebar policy card is omitted when /api/gate fails to load", async () => {
+  mockApi({ "/api/gate": () => json({ error: "x" }, 500) });
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  await screen.findByText("Could not load the policy gate");
+  const nav = screen.getByRole("navigation", { name: "Primary" });
+  expect(within(nav).queryByText("Policy gate")).not.toBeInTheDocument();
+});
+
+test("View verdict returns to Overview and focuses the policy card heading", async () => {
+  mockApi({ "/api/gate": () => json(failGate) });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Audit" }));
+  fireEvent.click(await screen.findByRole("button", { name: "View verdict" }));
+  expect(h1Name()).toBe("Ascent Console: Overview");
+  await waitFor(() => expect(document.getElementById("policy-gate-title")).toHaveFocus());
 });
 
 test("a crash in the gates panel leaves the findings table working", async () => {

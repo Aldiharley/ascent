@@ -49,7 +49,9 @@ export function PolicyGate() {
     return (
       <section className="panel glass policy">
         <div className="phead">
-          <span className="ptitle">Policy gate</span>
+          <span className="ptitle" id="policy-gate-title" tabIndex={-1}>
+            Policy gate
+          </span>
           <span className="verdict-pill v-none">NOT EVALUATED</span>
         </div>
         <div className="policy-body">
@@ -65,7 +67,9 @@ export function PolicyGate() {
   return (
     <section className={`panel glass policy policy-${g.decision.toLowerCase()}`}>
       <div className="phead">
-        <span className="ptitle">Policy gate</span>
+        <span className="ptitle" id="policy-gate-title" tabIndex={-1}>
+          Policy gate
+        </span>
         <span className={`verdict-pill v-${g.decision.toLowerCase()}`}>{g.decision}</span>
         <span className="count">exit {g.exit_code}</span>
         <span className="policy-meta">
