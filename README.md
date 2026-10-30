@@ -1,6 +1,72 @@
 # Ascent
 
-Ascent is an open-source, scope-enforced, human-in-the-loop AppSec pipeline, written in Rust.
+Ascent is an open-source (Apache-2.0), scope-enforced, human-in-the-loop AppSec pipeline written in Rust. It drives external open-source scanners as subprocesses (opengrep, gitleaks and trivy for source code; nuclei with httpx and katana for running web targets), triages the findings with the offline [Crux](https://github.com/Aldiharley/crux) engine, and produces a ranked report, a hash-chained audit log and native SARIF 2.1.0. A YAML policy turns the result into a CI-friendly verdict. Every network target passes a fail-closed scope guard, and nothing is ever exploited automatically: a human approves each detect-only verification step in a local dashboard.
+
+![Ascent dashboard overview: policy gate verdict, KPI tiles, triaged findings, a pending approval gate and the hash-chained audit log](docs/images/dashboard-overview.png)
+
+*The Overview screen over a demo lab dataset: the policy gate verdict (FAIL, exit code 1) with the top failing findings, the findings table, a pending detect-only approval gate, and the audit log with its "Hash chain OK" check.*
+
+Use Ascent only against systems you own or have explicit written permission to test.
+
+## How it works
+
+1. **Scope.** An engagement file lists the hosts, CIDRs and URLs you are authorised to test (and optionally a source directory). Every target is checked against it before any network request; an ambiguous or out-of-scope target is refused.
+2. **Scan.** Ascent invokes the external scanners as subprocesses: opengrep (SAST), gitleaks (secrets) and trivy (SCA) over source, and nuclei (with httpx/katana) over in-scope web targets.
+3. **Triage.** The offline Crux engine labels each finding TRUE_POSITIVE, NEEDS HUMAN or LIKELY NOISE, with a confidence.
+4. **Policy gate.** A YAML policy yields PASS, CONDITIONAL, FAIL or INCOMPLETE, with an exit code for CI. A crashed or missing scanner never passes.
+5. **Human-approved verification.** For confirmed-looking DAST findings Ascent can propose a detect-only re-check. It runs only after a person approves it in the dashboard.
+6. **Report, SARIF and audit log.** The run writes `report.md`, `ascent.sarif` / `ascent-dast.sarif`, and `audit.jsonl`, a hash-chained log in which any tampering is detectable.
+
+## Quick start
+
+Prerequisites: a Rust toolchain, Node.js and npm. Crux is a path dependency, so check it out next to Ascent (see [Building](#building)).
+
+1. **Build.**
+
+   ```
+   cargo build
+   cd frontend && npm ci && npm run build && cd ..
+   ```
+
+2. **Start the dashboard** from the repo root, and open <http://127.0.0.1:8787>:
+
+   ```
+   cargo run --bin dashboard
+   ```
+
+   It is fine for it to be empty before the first run. It reads results from `out/` (`ASCENT_OUT` changes that).
+
+3. **Define a scan.** Open New Scan, enter the targets you are authorised to test (for example `localhost`, `127.0.0.0/8` and `http://localhost:3000/`) and optionally a source directory for SAST. Ascent validates them and writes an engagement scope file under `engagements/`. This screen only defines scope; it never launches a scan. It shows the exact command to run:
+
+   | Scope defined, with the command to copy | Ambiguous targets refused, nothing written |
+   |---|---|
+   | ![New Scan screen with a scope entered and the Scan defined card showing the ascent run command](docs/images/dashboard-new-scan.png) | ![New Scan screen refusing evil.example/path and "exa mple.com" because they are not valid, unambiguous entries](docs/images/dashboard-new-scan-rejected.png) |
+
+4. **Run it from the terminal**, with the policy gate. The engagement path is the one the New Scan screen printed (`ascent run` is the installed CLI; from a checkout use `cargo run -- run`, or install it with `cargo install --path .`):
+
+   ```
+   cargo run -- run --engagement engagements/<name>.yaml --out out --policy samples/ascent-policy.example.yaml
+   ```
+
+   The process exit code follows the verdict (see [Policy gate and CI](#policy-gate-and-ci)).
+
+5. **Review in the dashboard.** Refresh <http://127.0.0.1:8787> to see the policy verdict, the triaged findings, the report and the audit log.
+
+Scanners are external and optional per track. Ascent does not bundle them; install the ones you want on your `PATH`.
+
+- **SAST track** (source directory): [opengrep](https://github.com/opengrep/opengrep), [gitleaks](https://github.com/gitleaks/gitleaks) and [trivy](https://github.com/aquasecurity/trivy). A scanner that is not installed is skipped, but a policy that needs its category then ends INCOMPLETE (exit 3).
+- **DAST track** (hosts or URLs): [nuclei](https://github.com/projectdiscovery/nuclei) plus ProjectDiscovery [httpx](https://github.com/projectdiscovery/httpx) (and subfinder/katana for recon). On Windows, a pip-installed Python `httpx` can shadow ProjectDiscovery httpx on `PATH`; make sure the ProjectDiscovery binary is the one found first.
+
+To try it without a lab target, use the sample engagement directly: `cargo run -- run --engagement samples/engagement.example.yaml --out out --policy samples/ascent-policy.example.yaml`. It targets the local machine only.
+
+## Safety model
+
+- **Authorised targets only.** Scope is declared up front in the engagement file and every network target is checked against it, fail closed.
+- **Nothing exploits automatically.** The only thing Ascent ever runs against a target after triage is an allow-listed, detect-only `nuclei -id <id> -u <url> -silent -jsonl` re-check, and only after a recorded human approval.
+- **Approval is recorded, tamper-evident and bound to the gate.** Each decision is chained into `audit.jsonl` together with the hash of the gate as approved; an edited gate is refused at execution. A failed chain check makes the CLI exit 4 and the dashboard stop accepting decisions.
+- **The dashboard is local and read-mostly.** It binds to loopback only, shows findings, the policy verdict, the report and the audit log, and records approve/deny decisions. It never launches a scan.
+
+Details for each of these are in the sections below.
 
 ## Invoke, don't vendor
 
@@ -39,7 +105,11 @@ SAST findings join the DAST queue and flow through the same triage, `report.md` 
 
 ## Dashboard
 
-A local web dashboard shows the triaged findings, the pending human-approval gates, the report and the hash-chained audit log.
+A local web dashboard (axum backend, React UI) shows the triaged findings, the pending human-approval gates, the report and the hash-chained audit log, and has a New Scan screen that validates targets and writes an engagement scope file.
+
+![Ascent report screen: the ranked markdown report rendered in the dashboard](docs/images/dashboard-report.png)
+
+*The Report screen renders the ranked `report.md` from the out dir.*
 
 1. Produce an out dir with the pipeline:
 
@@ -69,7 +139,7 @@ A local web dashboard shows the triaged findings, the pending human-approval gat
    ASCENT_OUT=out cargo run --bin dashboard
    ```
 
-   `ASCENT_ENG` points at the engagement file shown in the topbar (default `samples/engagement.example.yaml`). `ASCENT_DIST` points at the built UI (default: `frontend/dist` inside the crate, so it works from any working directory).
+   `ASCENT_ENG` points at the engagement file shown in the topbar (default `samples/engagement.example.yaml`; New Scan repoints it at the file it writes). `ASCENT_DIST` points at the built UI (default: `frontend/dist` inside the crate, so it works from any working directory).
 
 5. Open <http://127.0.0.1:8787>.
 
@@ -88,6 +158,7 @@ Safety properties:
   ```
 
 - Approve is refused (HTTP 422) unless the gate's `in_scope` is `true`; Deny is always allowed. Each decision records `gate_hash`, the hash of the gate as approved, inside the chained entry.
+- The New Scan screen only validates targets and writes an engagement file under `engagements/`. It never starts a run, and it refuses ambiguous or malformed targets without writing anything.
 
 > **Warning:** don't decide gates while an `ascent run` is writing to the same out dir. The audit log is hash-chained and a concurrent append would break the chain; the dashboard then refuses further decisions (it fails closed).
 
@@ -96,6 +167,10 @@ Dev loop: with the backend running, `cd frontend && npm run dev` serves the UI w
 ## Human-gated verification (Phase 5)
 
 After triage, Ascent can propose a safe, detect-only re-check for each confirmed-looking DAST finding. A human reviews and approves it, and only then does anything run.
+
+![Approval gates screen: a DETECT-ONLY gate showing the exact allow-listed nuclei command, expected evidence, why it might fail, the in-scope marker and Approve and Deny buttons](docs/images/dashboard-approval-gate.png)
+
+*A gate shows the exact command, the expected evidence and why it might fail. Approving records consent; it does not run the command.*
 
 1. Propose. `--propose` runs after triage, re-reads `<out>/queue.json`, and for every `TRUE_POSITIVE` nuclei finding with confidence at or above `--min-confidence` (default `0.8`) writes an inert proposed gate into `<out>/gates.json`. The gate is a nuclei re-check: `nuclei -id <id> -u <url> -silent -jsonl`.
 
