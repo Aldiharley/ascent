@@ -1,3 +1,4 @@
+use crate::gate::fingerprint::relative_to;
 use crate::report::to_markdown;
 use crate::runner::Runner;
 use crate::runstatus::{now_ts, write_run_status, RunStatus};
@@ -134,7 +135,12 @@ pub fn run_pipeline(
     let mut skipped_tools = Vec::new();
     if let Some(src) = eff_source.as_deref() {
         if !dry_run {
-            let o = sast(runner, src)?;
+            let mut o = sast(runner, src)?;
+            // The analysers report absolute paths under `src`: make every finding
+            // source-relative once, here, so the gate and SARIF fingerprint the same path.
+            for f in &mut o.findings {
+                f.file = relative_to(&f.file, src);
+            }
             findings.extend(o.findings);
             failed_tools = o.failed_tools;
             skipped_tools = o.skipped_tools;
@@ -478,6 +484,72 @@ mod tests {
             starts: "x".into(),
             ends: "y".into(),
         }
+    }
+
+    /// opengrep reports an absolute path under the source root it was given (as the
+    /// real tool does, with the platform's separators); other tools absent.
+    struct AbsSastRun;
+    impl Runner for AbsSastRun {
+        fn run_json(
+            &self,
+            tool: &str,
+            a: &[String],
+            t: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            if tool == "opengrep" {
+                let root = a.last().unwrap();
+                let path = std::path::Path::new(root).join("sub").join("a.rs");
+                return Ok(vec![json!({"results":[{"check_id":"r","path":path.to_string_lossy(),
+                    "start":{"line":1},"extra":{"severity":"ERROR","message":"m","lines":"q(x)"}}]})]);
+            }
+            SastRun.run_json(tool, a, t)
+        }
+        fn run_text(
+            &self,
+            tool: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            SastRun.run_text(tool, a, g)
+        }
+    }
+
+    /// Records the queue entries it produced.
+    #[derive(Default)]
+    struct RecTri(std::cell::RefCell<Vec<Value>>);
+    impl TriageEngine for RecTri {
+        fn triage(
+            &self,
+            f: &[Finding],
+            o: &str,
+        ) -> Result<Vec<TriageItem>, Box<dyn std::error::Error>> {
+            let items = FakeTri.triage(f, o)?;
+            *self.0.borrow_mut() = crate::sarif::item_values(&items);
+            Ok(items)
+        }
+    }
+
+    #[test]
+    fn sast_paths_are_source_relative_and_gate_matches_sarif_fingerprints() {
+        let dir = std::path::PathBuf::from(unique_dir());
+        let eng = sast_engagement(&dir);
+        let tri = RecTri::default();
+        run_pipeline(&eng, &AbsSastRun, &tri, dir.to_str().unwrap(), false, None).unwrap();
+        let items = tri.0.borrow().clone();
+        let sast_item = items.iter().find(|it| it["finding"]["tool"] == "opengrep").unwrap();
+        assert_eq!(sast_item["finding"]["file"], "sub/a.rs");
+        // The gate fingerprint must equal the SARIF partialFingerprints value.
+        let policy = crate::gate::policy::parse_policy(
+            "version: 1\nfail_on:\n  severity: [CRITICAL, HIGH, MEDIUM, LOW, INFO]\n  categories: [SAST]\n",
+        )
+        .unwrap();
+        let st = crate::runstatus::read_run_status(dir.to_str().unwrap()).unwrap();
+        let r = crate::gate::evaluate::evaluate(&items, &policy, Some(&st), false);
+        assert_eq!(r.failed.len(), 1);
+        let sarif: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("ascent.sarif")).unwrap()).unwrap();
+        let res = &sarif["runs"][0]["results"][0];
+        assert_eq!(res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "sub/a.rs");
+        assert_eq!(res["partialFingerprints"]["ascentFindingHash/v1"], r.failed[0].fingerprint.as_str());
     }
 
     #[test]

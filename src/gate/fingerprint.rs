@@ -47,20 +47,38 @@ fn strip_dot(mut p: &str) -> &str {
     p
 }
 
+/// Forward slashes, no Windows verbatim `//?/` prefix (from `\\?\`), no leading `./`.
+fn clean_path(p: &str) -> String {
+    let p = p.replace('\\', "/");
+    let p = p.strip_prefix("//?/").unwrap_or(&p);
+    strip_dot(p).to_string()
+}
+
+/// `file` relative to `root`, forward slashes. The root prefix is compared
+/// case-insensitively on Windows and case-sensitively elsewhere; a path not
+/// under `root` is returned cleaned but otherwise unchanged.
+pub fn relative_to(file: &str, root: &str) -> String {
+    let p = clean_path(file);
+    let r = clean_path(root);
+    let r = r.trim_end_matches('/');
+    if r.is_empty() || r == "." || p.len() <= r.len() || p.as_bytes()[r.len()] != b'/' || !p.is_char_boundary(r.len()) {
+        return p;
+    }
+    let (head, rest) = p.split_at(r.len());
+    let same = if cfg!(windows) { head.eq_ignore_ascii_case(r) } else { head == r };
+    if same {
+        rest[1..].to_string()
+    } else {
+        p
+    }
+}
+
 /// Forward slashes, no leading `./`, and the source root prefix removed.
 pub fn normalise_path(p: &str, root: Option<&str>) -> String {
-    let p = p.replace('\\', "/");
-    let p = strip_dot(&p);
-    if let Some(r) = root {
-        let r = r.replace('\\', "/");
-        let r = strip_dot(r.trim_end_matches('/'));
-        if !r.is_empty() && r != "." {
-            if let Some(rest) = p.strip_prefix(&format!("{r}/")) {
-                return rest.to_string();
-            }
-        }
+    match root {
+        Some(r) => relative_to(p, r),
+        None => clean_path(p),
     }
-    p.to_string()
 }
 
 fn is_uuid(seg: &str) -> bool {
@@ -225,6 +243,35 @@ mod tests {
         assert_eq!(normalise_path("src/a.py", Some("src/")), "a.py");
         assert_eq!(normalise_path("./lib/b.rs", None), "lib/b.rs");
         assert_eq!(one(sast("r", "src\\a.py", 1, "x")), one(sast("r", "src/a.py", 1, "x")));
+    }
+    #[test]
+    fn relative_to_strips_a_posix_root() {
+        assert_eq!(relative_to("/home/x/src/a.py", "/home/x/src"), "a.py");
+        assert_eq!(relative_to("/home/x/src/lib/b.rs", "/home/x/src/"), "lib/b.rs");
+    }
+    #[test]
+    fn relative_to_strips_a_windows_verbatim_root() {
+        assert_eq!(relative_to("\\\\?\\M:\\proj\\src\\a.py", "M:/proj/src"), "a.py");
+        assert_eq!(relative_to("M:\\proj\\src\\a.py", "\\\\?\\M:\\proj\\src"), "a.py");
+    }
+    #[test]
+    fn relative_to_leaves_paths_outside_the_root_normalised_but_unchanged() {
+        assert_eq!(relative_to("/elsewhere/a.py", "/home/x/src"), "/elsewhere/a.py");
+        assert_eq!(relative_to("/home/x/srcfoo/a.py", "/home/x/src"), "/home/x/srcfoo/a.py");
+        assert_eq!(relative_to(".\\lib\\b.rs", "/home/x/src"), "lib/b.rs");
+    }
+    #[test]
+    fn relative_to_root_case_is_folded_only_on_windows() {
+        let got = relative_to("M:/Proj/Src/a.py", "m:/proj/src");
+        if cfg!(windows) {
+            assert_eq!(got, "a.py");
+        } else {
+            assert_eq!(got, "M:/Proj/Src/a.py");
+        }
+    }
+    #[test]
+    fn normalise_path_uses_relative_to() {
+        assert_eq!(normalise_path("\\\\?\\M:\\proj\\src\\a.py", Some("M:/proj/src")), "a.py");
     }
     #[test]
     fn url_normalisation() {
