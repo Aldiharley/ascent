@@ -15,9 +15,16 @@ The DAST profiles, authenticated scanning (one static header) and the coverage m
 
 1. **Scripted or form login and OAuth.** Authentication today is one static request header whose value comes from an environment variable, which covers bearer tokens and session cookies. Form-login automation, OAuth flows and token refresh are not supported.
 2. **OpenAPI / GraphQL import.** The surface comes from the declared hosts and URLs plus a katana crawl. Importing an API description would let API endpoints that are not linked from a page be tested.
-3. **Headless JS crawl.** katana runs without a headless browser, so routes that exist only in client-side JavaScript are mostly missed.
+3. **Headless JS crawl.** katana runs without a headless browser. `-jc` extracts endpoints that appear literally in JavaScript files, but routes built at runtime in the browser are still missed.
 4. **Verification allow-list cannot re-check fuzz findings.** The human-gated re-test is limited to `nuclei -id <id> -u <url> -silent -jsonl`. The command has no `-dast` flag and no way to carry fuzzing parameters, so findings from the `active` profile's `-dast` fuzzing pass cannot be re-checked through the current gate. Widening the allow-list is a deliberate safety decision and has not been made.
 5. **Auth header value is visible in argv.** The value is passed to nuclei and katana as a `-H` argument, so other local users can read it from the process list while a scan runs. It is scrubbed from every output Ascent writes. A fix needs a way to hand the header to the scanners that keeps the value out of argv.
+
+Deferred from the DAST final fix wave (2026-10-31):
+
+6. **Per-host network errors from nuclei.** nuclei exits 0 when a host is unreachable (`no address found for host`), so a host that fails mid-scan looks like "no findings". The httpx probe catches dead declared URLs up front, but a host that dies during the scan is not detected. Fix: run nuclei with `-elog <file>` and treat `kind: network-permanent-error` entries per host as an incomplete scan.
+7. **Hop-by-hop / reserved auth header names.** `dast.auth.header` accepts any valid header token, including `Host`, `Connection`, `Transfer-Encoding` or `Content-Length`, which would change request routing or framing rather than authenticate. Add a deny-list and reject them at load (exit 2).
+8. **Secret scrub covers exact forms only.** The auth value is replaced in raw and JSON-escaped form. A scanner that echoes it URL-encoded, base64-encoded, truncated or case-changed would slip through. Consider scrubbing the common encodings too.
+9. **`propose` uses `matched-at` as the re-check `-u`.** For templates whose path is relative to `{{BaseURL}}`, re-running against the matched URL can request a doubled path and report NOT_CONFIRMED for a real hit. Store the scanned input URL with the finding and re-check against that.
 
 ## Verify early
 

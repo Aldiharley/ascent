@@ -36,7 +36,7 @@ Prerequisites: a Rust toolchain, Node.js and npm. Crux is a path dependency, so 
 
    It is fine for it to be empty before the first run. It reads results from `out/` (`ASCENT_OUT` changes that).
 
-3. **Define a scan.** Open New Scan, enter the targets you are authorised to test (for example `localhost`, `127.0.0.0/8` and `http://localhost:3000/`) and optionally a source directory for SAST. Pick a DAST profile (passive, standard or active; the default is standard, and `active` adds parameter fuzzing, so use it only on targets you may actively test). For an authenticated scan you can also give an auth header name and the name of the environment variable that holds its value (never the value itself); see [DAST track](#dast-track). Ascent validates the input and writes an engagement scope file under `engagements/`. This screen only defines scope and settings; it never launches a scan. It shows the exact command to run:
+3. **Define a scan.** Open New Scan, enter the targets you are authorised to test (for example `127.0.0.0/8` and `http://127.0.0.1:3000/` for a lab such as OWASP Juice Shop running locally; use `127.0.0.1` rather than `localhost`, which ProjectDiscovery tools may not resolve) and optionally a source directory for SAST. Pick a DAST profile (passive, standard or active; the default is standard, and `active` adds parameter fuzzing, so use it only on targets you may actively test). For an authenticated scan you can also give an auth header name and the name of the environment variable that holds its value (never the value itself); see [DAST track](#dast-track). Ascent validates the input and writes an engagement scope file under `engagements/`. This screen only defines scope and settings; it never launches a scan. It shows the exact command to run:
 
    | Scope defined, with the command to copy | Ambiguous targets refused, nothing written |
    |---|---|
@@ -48,16 +48,16 @@ Prerequisites: a Rust toolchain, Node.js and npm. Crux is a path dependency, so 
    cargo run -- run --engagement engagements/<name>.yaml --out out --policy samples/ascent-policy.example.yaml
    ```
 
-   The process exit code follows the verdict (see [Policy gate and CI](#policy-gate-and-ci)). With DAST scope the run also prints a `dast:` line (profile, authenticated or not, and how many URLs were seeded, crawled, dropped as out of scope and scanned) and the path of `dast-coverage.json`.
+   The process exit code follows the verdict (see [Policy gate and CI](#policy-gate-and-ci)). With DAST scope the run also prints a `dast:` line (profile, authenticated or not, and how many URLs were seeded, crawled, dropped as out of scope, scanned and unreachable) and the path of `dast-coverage.json`. The lab must be running: if a declared URL does not answer, or nothing could be scanned, the run is INCOMPLETE (exit 3) and says why.
 
 5. **Review in the dashboard.** Refresh <http://127.0.0.1:8787> to see the policy verdict, the triaged findings, the report and the audit log.
 
-Scanners are external and optional per track. Ascent does not bundle them; install the ones you want on your `PATH`.
+Scanners are external. Ascent does not bundle them; install them on your `PATH`.
 
 - **SAST track** (source directory): [opengrep](https://github.com/opengrep/opengrep), [gitleaks](https://github.com/gitleaks/gitleaks) and [trivy](https://github.com/aquasecurity/trivy). A scanner that is not installed is skipped, but a policy that needs its category then ends INCOMPLETE (exit 3).
-- **DAST track** (hosts or URLs): [nuclei](https://github.com/projectdiscovery/nuclei) plus ProjectDiscovery [httpx](https://github.com/projectdiscovery/httpx) (and subfinder/katana for recon). On Windows, a pip-installed Python `httpx` can shadow ProjectDiscovery httpx on `PATH`; make sure the ProjectDiscovery binary is the one found first.
+- **DAST track** (hosts or URLs): [nuclei](https://github.com/projectdiscovery/nuclei), ProjectDiscovery [httpx](https://github.com/projectdiscovery/httpx) and [katana](https://github.com/projectdiscovery/katana) are required, plus [subfinder](https://github.com/projectdiscovery/subfinder) when a host is a dotted DNS name. A missing one fails the run with exit 3. On Windows, a pip-installed Python `httpx` can shadow ProjectDiscovery httpx on `PATH`; make sure the ProjectDiscovery binary is the one found first.
 
-To try it without a lab target, use the sample engagement directly: `cargo run -- run --engagement samples/engagement.example.yaml --out out --policy samples/ascent-policy.example.yaml`. It targets the local machine only.
+To try it, start a local lab first (for example OWASP Juice Shop published on `127.0.0.1:3000`), then run the sample engagement: `cargo run -- run --engagement samples/engagement.example.yaml --out out --policy samples/ascent-policy.example.yaml`. It targets `http://127.0.0.1:3000/` on the local machine only; with no lab running the run is INCOMPLETE (exit 3), because nothing could be tested.
 
 ## Safety model
 
@@ -110,9 +110,11 @@ The DAST track tests running web targets with [nuclei](https://github.com/projec
 ### How the surface is built
 
 - **The whole declared scope is used.** The seed is every host (through recon) plus every URL in the engagement, de-duplicated. Hosts and URLs are no longer alternatives: a URL is scanned even when hosts are also listed.
-- **Recon per host.** Each host is probed with httpx on the default web ports. subfinder runs only for real DNS names (a name with at least one dot that is not an IP literal); `localhost`, other single-label names and IP addresses are probed directly.
-- **Crawl.** katana crawls the seed with `-fs fqdn`, so it stays on the exact hostnames it was given. katana's own default is the whole root domain, which Ascent does not use.
-- **Scope filter.** Seeds and crawl results that the scope guard does not accept are dropped, counted and never sent to a scanner. A crawl that finds links to GitHub or a CDN no longer aborts the run. The counts are printed and stored in `run.json` under `dast`: `seeded`, `crawled`, `out_of_scope_dropped` and `scanned`.
+- **Liveness probe per URL.** Every declared URL is probed with ProjectDiscovery httpx (`-silent -json -rl 50`, no auth header, no redirect following). Only URLs that answer are crawled. A declared URL that does not answer makes the run INCOMPLETE (see [Policy gate and CI](#policy-gate-and-ci)): declared scope that was not tested never passes.
+- **Recon per host.** Each host is probed with httpx on the default web ports. subfinder runs only for real DNS names (a name with at least one dot that is not an IP literal); `localhost`, other single-label names and IP addresses are probed directly. subfinder queries public passive sources (certificate transparency logs, DNS datasets and similar) about the domain, so the domain name leaves the machine even though no request goes to those names. Every name it returns is scope-checked before httpx probes it; an off-scope or invalid name (such as `_dmarc.example.com`) is dropped and counted.
+- **Crawl.** katana crawls the live seeds with `-fs fqdn`, so it stays on the exact hostnames it was given (katana's own default is the whole root domain, which Ascent does not use). It also runs with `-jc` (parse endpoints out of JavaScript files, which a single-page app needs), `-rl 50` and `-dr` (no redirect following).
+- **Scope filter.** Seeds and crawl results that the scope guard does not accept are dropped, counted and never sent to a scanner. A crawl that finds links to GitHub or a CDN no longer aborts the run. The counts are printed and stored in `run.json` under `dast`: `seeded` (live seeds), `crawled` (new endpoints katana found), `out_of_scope_dropped`, `scanned`, and `reachable`, `unreachable` and `unreachable_urls` for the declared URLs.
+- **Use `127.0.0.1`, not `localhost`.** ProjectDiscovery tools may fail to resolve `localhost` even where curl and browsers can, and nuclei then reports nothing. The probe catches this: the run is INCOMPLETE with a hint to use `127.0.0.1`.
 
 ### Profiles
 
@@ -129,7 +131,9 @@ dast:
 | `standard` (default) | the passive tags plus `cve, sqli, xss, auth-bypass, jwt, idor, csrf, redirect, ssrf, lfi` | `fuzz` | none |
 | `active` | same as standard | `fuzz` in the first pass | a second `nuclei -dast` pass (parameter-fuzzing templates) over the same surface |
 
-Every pass of every profile uses `-rate-limit 50` (50 requests per second), `-concurrency 10` and `-timeout 10`, and always excludes the tags `dos`, `brute-force` and `default-login`. These exclusions are fixed in code and cannot be changed from the engagement file. `active` sends fuzzing payloads at every parameter it finds, so use it only on targets you are allowed to test actively. Findings from both `active` passes are merged and de-duplicated by template id and matched URL.
+Every pass of every profile uses `-rate-limit 50` (50 requests per second), `-concurrency 10`, `-timeout 10`, `-ni` (no interactsh, so no out-of-band traffic to a third-party OAST server), `-duc` (no update check) and `-dr` (no redirect following, so a redirect cannot take nuclei off scope), and always excludes the tags `dos`, `brute-force` and `default-login`. These exclusions are fixed in code, and the engagement file cannot change them. A nuclei configuration file of your own (for example `~/.config/nuclei/config.yaml`) is still read by nuclei and could re-include excluded tags, so keep it free of tag settings. The scope-checked URL list reaches nuclei as a temporary file (`-l`), which is deleted afterwards.
+
+`active` sends fuzzing payloads at every parameter it finds, so use it only on targets you are allowed to test actively. Findings from both `active` passes are merged and de-duplicated by template id, matcher name, matched URL and fuzzed parameter, so a template with several matchers yields one finding per matcher. Findings from the fuzzing pass are recorded as tool `nuclei-dast`. They are reported and gated like any other finding, but they are never proposed for detect-only verification, because a single-template re-run cannot reproduce a fuzzed request. When both passes find the same hit, the template-pass copy is kept, so it stays verifiable.
 
 ### Authenticated scanning
 
@@ -147,34 +151,43 @@ export ASCENT_DAST_AUTH="Bearer <token>"
 ascent run --engagement engagements/<name>.yaml --out out
 ```
 
+In PowerShell, set the variable with:
+
+```
+$env:ASCENT_DAST_AUTH = "Bearer <token>"
+```
+
 - The header is sent by both nuclei and katana, so the crawl is authenticated too.
 - The engagement file holds only the header name and the variable name. The value is never written to `run.json`, `queue.json`, `report.md`, `gate.json`, the SARIF files, `dast-coverage.json` or `audit.jsonl`. It is replaced with `***` in the raw scanner results and in DAST error text before anything is written.
-- It fails closed. If auth is configured and the variable is unset, empty or contains a line break, the run exits 2 before any scan starts, rather than silently scanning unauthenticated.
+- It fails closed. If auth is configured and the variable is unset, empty or contains a line break or any other control character except TAB, the run exits 2 before any scan starts, rather than silently scanning unauthenticated. The value is read only when the engagement has DAST scope; a source-only run ignores `dast.auth`.
+- The httpx liveness probe sends no auth header: it only checks that a declared URL answers.
 - **Caveat:** the value is passed to nuclei and katana as a command-line argument, so other users on the same machine can read it from the process list while a scan runs. Use a short-lived token, and do not run an authenticated scan on a shared host.
 - Form-login automation, OAuth flows and token refresh are not supported (see `docs/followups-policy-gate.md`).
 
 ### Coverage matrix
 
-A scan that finds nothing is only reassuring if you know what it tested. Every run with DAST scope writes `out/dast-coverage.json` and appends a "DAST coverage" table to `report.md`, which the dashboard's Report screen shows. For each category it states whether it was `tested`, `limited` or `not_tested`, why, and how many raw nuclei results carried one of its tags (counted before triage). If no in-scope URL was actually scanned, every category is `not_tested`, whatever the profile says. A category that needs a higher profile than the one chosen is `not_tested` with the reason "enable the standard profile" (or `active`).
+A scan that finds nothing is only reassuring if you know what it tested. Every run with DAST scope writes `out/dast-coverage.json` and appends a "DAST coverage" list to `report.md`, which the dashboard's Report screen shows. For each category it states whether it was `tested`, `limited` or `not_tested`, why, and how many raw nuclei results carried one of its tags (counted before triage).
+
+Coverage is decided per nuclei tag, from the tags the chosen profile's passes actually ran: a category whose tags all ran is `tested`; one where only some ran is `limited`, and the reason names the missing tags and the profile that adds them (for example "csrf runs in the standard profile"); one where none ran is `not_tested` with the reason "enable the standard profile". Each category also lists `tags_run` and `tags_missing`. A category can be `limited` for another reason even when all its tags ran (IDOR, and SSRF because out-of-band checks are disabled). If no in-scope URL was actually scanned, every category is `not_tested` ("no in-scope URL was reachable"), whatever the profile says; a dry run reports `scanned: 0` with "dry run: nothing was sent".
 
 ### Mapping to a commercial DAST checklist
 
-The checklist below is the one commercial DAST products such as Veracode DAST are usually compared on. Ascent is a black-box template scanner, not a full application-aware scanner, and the table says where that matters.
+The checklist below follows a typical DAST checklist, e.g. the one SecAI lists for Veracode. Ascent is a black-box template scanner, not a full application-aware scanner, and the table says where that matters.
 
 | Checklist item | Ascent | Notes |
 |---|---|---|
 | SQL injection | `standard` | nuclei `sqli` templates; `active` adds parameter fuzzing. |
 | Cross-site scripting | `standard` | nuclei `xss` templates; `active` adds parameter fuzzing. |
 | Authentication bypass | `standard` | `auth-bypass` and `jwt` templates. |
-| Authorization flaws (IDOR) | `limited` | Only the generic `idor` templates (12 on nuclei 3.11.1). Most access-control bugs need app-specific logic and two users, which Ascent does not model. |
+| Authorization flaws (IDOR) | `limited` | Only the `idor` templates, which are few and mostly CVE- or product-specific. Generic IDOR needs app-specific logic and a second user, which Ascent does not model. |
 | CORS misconfiguration | `passive` and up | `cors` templates. |
 | Security headers | `passive` and up | `headers` templates. |
-| Session management | `passive` and up | `session` and `cookie` templates; `csrf` from `standard`. The template sets are small (8 `session`/`cookie` and 5 `csrf` on nuclei 3.11.1). |
+| Session management | `limited` in `passive`, `standard` and up | `session` and `cookie` templates; `csrf` from `standard`. The template sets are small. |
 | Rate limiting | not tested, by design | It needs load generation, and Ascent never floods a target. Reported as `not_tested` in every profile. |
-| SSRF, path traversal, open redirect | `standard` | `ssrf`, `lfi` and `redirect` templates (`active` adds fuzzing). Not part of the usual checklist, covered anyway. |
-| Known CVEs, exposures, misconfiguration | `passive` and up | `tech`, `misconfig`, `exposure`; `cve` from `standard`. |
+| SSRF, path traversal, open redirect | `standard` | `ssrf`, `lfi` and `redirect` templates (`active` adds fuzzing). SSRF is `limited`: with interactsh disabled (`-ni`), blind/out-of-band SSRF is not tested. Not part of the usual checklist, covered anyway. |
+| Known CVEs, exposures, misconfiguration | `limited` in `passive`, `standard` and up | `tech`, `misconfig`, `exposure`; `cve` from `standard`. |
 | Authenticated scanning | static header | One header from an environment variable. No scripted login. |
-| "Validate exploitability" | human-gated, detect-only re-test | After triage, `--propose` writes a re-check gate that a person approves before anything runs (see [Human-gated verification](#human-gated-verification-phase-5)). It is a detect-only `nuclei -id <id> -u <url>` re-run, not an exploit. Findings from the `active` fuzzing pass cannot be re-checked by this gate. |
+| "Validate exploitability" | human-gated, detect-only re-test | After triage, `--propose` writes a re-check gate that a person approves before anything runs (see [Human-gated verification](#human-gated-verification-phase-5)). It is a detect-only `nuclei -id <id> -u <url>` re-run, not an exploit. Findings from the `active` fuzzing pass (tool `nuclei-dast`) are never proposed, because this gate cannot re-check them. |
 
 Coverage depends on the installed nuclei templates, so the counts differ by version and between machines. Run `nuclei -tl -tags <tag>` to see what is installed locally.
 
@@ -288,17 +301,26 @@ ascent gate --policy ascent-policy.yaml --out out --fail-on-warn
 ascent sarif --out out --source-root path/to/repo
 ```
 
-nuclei (and the ProjectDiscovery recon tools) are only required when the
-engagement has DAST scope (`hosts` or `urls`); a source-only engagement needs
-just the SAST analysers. A missing analyser for a policy category makes the
-gate INCOMPLETE.
+nuclei, ProjectDiscovery httpx and katana (plus subfinder for dotted host
+names) are required when the engagement has DAST scope (`hosts` or `urls`); a
+missing one fails the run with exit 3. A source-only engagement needs just the
+SAST analysers. A missing analyser for a policy category makes the gate
+INCOMPLETE.
+
+Declared DAST scope that was not tested never passes. A real (non-dry) run with
+DAST scope is INCOMPLETE when no in-scope URL was scanned, or when any URL listed
+under `urls` did not answer the httpx probe. The reasons are printed on stderr
+after `run INCOMPLETE` and stored as `incomplete_reasons` in `run.json` and
+`gate.json`, for example `DAST: declared URL(s) unreachable: http://127.0.0.1:9/`.
+The gate also treats a `run.json` whose DAST summary scanned nothing as
+incomplete, whatever its `complete` field says.
 
 | Exit | Meaning |
 |---|---|
 | 0 | PASS, or CONDITIONAL (warnings only) — or no policy given |
 | 1 | FAIL (or CONDITIONAL with `--fail-on-warn`) |
 | 2 | Usage or configuration error (bad engagement, malformed policy, bad `--source`) |
-| 3 | INCOMPLETE: a scanner or stage failed, a policy category's analyser is not installed, or it was a dry run — never a pass |
+| 3 | INCOMPLETE: a scanner or stage failed, a required scanner is missing, a policy category's analyser is not installed, the DAST track scanned no URL, a declared DAST URL did not answer, or it was a dry run — never a pass |
 | 4 | The audit hash chain failed verification (`ascent run` then refuses to start) |
 
 The verdict is written to `out/gate.json` and chained into `audit.jsonl`
