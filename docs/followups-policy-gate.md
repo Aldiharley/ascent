@@ -19,6 +19,8 @@ The policy gate (`--policy`, `ascent gate`), native SARIF 2.1.0 output and the e
 
 - **A policy with no `fail_on` severity or CWE can never fail.** Consider warning (or refusing) at load time so an empty `fail_on` is not mistaken for a working gate.
 - **`normalise_url` keeps unparseable or relative URLs verbatim.** Two spellings of the same unparseable URL fingerprint differently. Decide whether to reject, resolve against a base, or accept this and document it.
+- **Finding `id`s still embed the absolute source path.** The SAST normalisers build `id` (e.g. `opengrep:<rule>:<abs path>:<line>`) before the pipeline makes `file` source-relative, so queue.json and the audit log's triage entries show local paths such as the user's home directory. Fingerprints are unaffected (they use `file`). Found in live validation on 2026-10-30. Fix: build ids from the relativised path, or relativise before normalising.
+- **Smaller items from the per-task reviews:** sort-independent `cwe_first` (a rule tagged `[CWE-20, CWE-89]` only matches its first CWE); one shared "credential finding" predicate for the opengrep normaliser and `fingerprint::kind` (CWE-312 / keyword rules currently fingerprint on line number); the dashboard `getGate` should type-check each entry field and key list items by index; DAST `locus` and SARIF URIs keep query values (consider stripping them as the fingerprint does).
 
 ## Non-goals
 
