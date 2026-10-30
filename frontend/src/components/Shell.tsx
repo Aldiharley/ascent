@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type NavId = "overview" | "findings" | "gates" | "report" | "audit";
+export type NavId = "overview" | "newscan" | "findings" | "gates" | "report" | "audit";
 
 interface NavItem {
   id: NavId;
@@ -27,6 +27,17 @@ const NAV: NavItem[] = [
         <rect x="14" y="3" width="7" height="7" rx="2" />
         <rect x="3" y="14" width="7" height="7" rx="2" />
         <rect x="14" y="14" width="7" height="7" rx="2" />
+      </svg>
+    ),
+  },
+  {
+    id: "newscan",
+    label: "New scan",
+    icon: (
+      <svg {...svgProps}>
+        <circle cx="12" cy="12" r="8" />
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+        <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
       </svg>
     ),
   },

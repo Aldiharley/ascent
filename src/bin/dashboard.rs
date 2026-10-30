@@ -16,10 +16,17 @@ use tower_http::set_header::SetResponseHeaderLayer;
 mod dashboard;
 #[path = "../gatesio.rs"]
 mod gatesio;
+// Scope parsing is shared with the `ascent` binary. Only `classify_target` and a
+// few helpers are used here, so the rest is dead code in this binary; allow it.
+#[path = "../scope.rs"]
+#[allow(dead_code)]
+mod scope;
 
 use dashboard::gates::{decide_gate, DecideError};
+use dashboard::newscan;
 use dashboard::read::{read_audit, read_engagement, read_findings, read_report};
 use gatesio::read_pending_gates;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Only these `Host` values are served; anything else is a DNS-rebinding attempt.
 const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1:8787", "localhost:8787"];
@@ -28,7 +35,11 @@ const ALLOWED_ORIGINS: [&str; 2] = ["http://127.0.0.1:8787", "http://localhost:8
 
 pub struct AppState {
     pub out_dir: String,
-    pub engagement: String,
+    /// Path to the engagement YAML the console currently reflects. Creating a new
+    /// scan repoints this, so the topbar shows the newly created engagement.
+    pub engagement: Mutex<String>,
+    /// Directory the New Scan screen writes new engagement files into.
+    pub engagements_dir: String,
     /// Held across a whole gate decision (audit append + gates.json rewrite) so
     /// concurrent decisions cannot interleave. Never held across an `.await`.
     decision_lock: Mutex<()>,
@@ -38,9 +49,23 @@ impl AppState {
     pub fn new(out_dir: String, engagement: String) -> Self {
         AppState {
             out_dir,
-            engagement,
+            engagement: Mutex::new(engagement),
+            engagements_dir: "engagements".into(),
             decision_lock: Mutex::new(()),
         }
+    }
+
+    /// Override where New Scan writes engagement files (used by tests).
+    pub fn with_engagements_dir(mut self, dir: String) -> Self {
+        self.engagements_dir = dir;
+        self
+    }
+
+    fn engagement_path(&self) -> String {
+        self.engagement
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|e| e.into_inner().clone())
     }
 }
 
@@ -69,7 +94,102 @@ async fn guard(req: Request, next: Next) -> Result<Response, StatusCode> {
 }
 
 async fn engagement(State(s): State<Shared>) -> Json<Value> {
-    Json(read_engagement(&s.engagement))
+    Json(read_engagement(&s.engagement_path()))
+}
+
+/// Create an engagement from the New Scan form. This validates every target
+/// against the scope parser and WRITES a scope file; it never starts a scan.
+/// The pipeline run is a separate, explicit step, and exploitation stays gated.
+async fn create_engagement(
+    State(s): State<Shared>,
+    Json(req): Json<newscan::NewScanRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use newscan::PrepareError as E;
+    // starts = now, ends = now + ~1 year. Stored but not enforced in the MVP.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let starts = crux::audit::format_ts(now.as_secs(), now.subsec_micros());
+    let ends = crux::audit::format_ts(now.as_secs() + 365 * 24 * 60 * 60, now.subsec_micros());
+
+    let prepared = match newscan::prepare(&req, &starts, &ends, &|p| {
+        std::path::Path::new(p).is_dir()
+    }) {
+        Ok(p) => p,
+        Err(E::EmptyName) => return Err(err(StatusCode::BAD_REQUEST, "engagement name is required")),
+        Err(E::UnusableName) => {
+            return Err(err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "name must contain letters or digits",
+            ))
+        }
+        Err(E::NoTargets) => {
+            return Err(err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "add at least one valid target (hostname, IP, CIDR or URL)",
+            ))
+        }
+        Err(E::SourceNotFound(p)) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "ok": false, "error": format!("source path not found: {p}"), "field": "source" })),
+            ))
+        }
+        Err(E::RejectedTargets(bad)) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "ok": false,
+                    "error": "these targets are not valid, unambiguous in-scope entries",
+                    "rejected": bad,
+                })),
+            ))
+        }
+        Err(E::Internal(m)) => return Err(err(StatusCode::INTERNAL_SERVER_ERROR, &m)),
+    };
+
+    let dir = std::path::Path::new(&s.engagements_dir);
+    let path = dir.join(format!("{}.yaml", prepared.slug));
+    if path.exists() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            &format!("an engagement named '{}' already exists", prepared.slug),
+        ));
+    }
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("could not create engagements directory: {e}"),
+        ));
+    }
+    if let Err(e) = std::fs::write(&path, &prepared.yaml) {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("could not write engagement file: {e}"),
+        ));
+    }
+
+    // Repoint the console at the newly created engagement (native path on disk).
+    let native = path.to_string_lossy().to_string();
+    if let Ok(mut g) = s.engagement.lock() {
+        *g = native.clone();
+    }
+    // Display + command use forward slashes so the command is copy-paste clean.
+    let shown = native.replace('\\', "/");
+    let run_command = format!("ascent run --engagement {shown} --out {}", s.out_dir);
+
+    Ok(Json(json!({
+        "ok": true,
+        "name": prepared.name,
+        "path": shown,
+        "scope": {
+            "hosts": prepared.hosts,
+            "cidrs": prepared.cidrs,
+            "urls": prepared.urls,
+        },
+        "source": prepared.source,
+        "run_command": run_command,
+    })))
 }
 
 async fn findings(State(s): State<Shared>) -> Json<Vec<Value>> {
@@ -155,6 +275,7 @@ pub fn router(state: AppState) -> Router {
     let app = Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
         .route("/api/engagement", get(engagement))
+        .route("/api/engagements", post(create_engagement))
         .route("/api/findings", get(findings))
         .route("/api/audit", get(audit))
         .route("/api/report", get(report))
@@ -209,7 +330,7 @@ async fn main() -> std::process::ExitCode {
     };
     println!("ascent dashboard on http://{ADDR}");
     println!("  results:    {out_dir}  (set ASCENT_OUT to change)");
-    println!("  engagement: {engagement}  (set ASCENT_ENG to change)");
+    println!("  engagement: {engagement}  (set ASCENT_ENG to change; New Scan repoints it)");
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("error: dashboard server stopped: {e}");
         return std::process::ExitCode::FAILURE;
@@ -828,5 +949,167 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(audit_lines(&dir)[0]["decision"], "denied");
+    }
+
+    // ---- New Scan: POST /api/engagements ----
+
+    /// App whose New Scan writes into `<dir>/engagements` and whose console
+    /// engagement starts at a (non-existent) `eng.yaml` in `dir`.
+    fn app_newscan(dir: &Path) -> Router {
+        router(
+            AppState::new(
+                dir.to_str().unwrap().into(),
+                dir.join("eng.yaml").to_str().unwrap().into(),
+            )
+            .with_engagements_dir(dir.join("engagements").to_str().unwrap().into()),
+        )
+    }
+
+    fn api_post_json(uri: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("host", "127.0.0.1:8787")
+            .header("origin", "http://127.0.0.1:8787")
+            .header("x-ascent", "1")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_engagement_writes_file_and_repoints_console() {
+        let dir = tmp();
+        let app = app_newscan(&dir);
+        let body = json!({
+            "name": "Acme Q4 Test!",
+            "targets": ["example.com", "10.0.0.0/24", "http://localhost:3000/", ""],
+            "source": "",
+        });
+        let resp = app
+            .clone()
+            .oneshot(api_post_json("/api/engagements", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["name"], "Acme Q4 Test!");
+        let expected_path = dir
+            .join("engagements")
+            .join("acme-q4-test.yaml")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(v["path"], expected_path);
+        assert_eq!(v["scope"]["hosts"], json!(["example.com"]));
+        assert_eq!(v["scope"]["cidrs"], json!(["10.0.0.0/24"]));
+        assert_eq!(v["scope"]["urls"], json!(["http://localhost:3000/"]));
+        assert!(v["run_command"]
+            .as_str()
+            .unwrap()
+            .contains("ascent run --engagement"));
+
+        // the file exists and parses as a scoped engagement
+        let file = dir.join("engagements").join("acme-q4-test.yaml");
+        assert!(file.exists());
+        let eng = scope::load_engagement(file.to_str().unwrap()).unwrap();
+        let g = scope::ScopeGuard::new(&eng);
+        assert!(g.in_scope("example.com"));
+        assert!(g.in_scope("10.0.0.5"));
+        assert!(!g.in_scope("evil.com"));
+
+        // the console now reflects the new engagement
+        let resp = app.oneshot(api_get("/api/engagement")).await.unwrap();
+        assert_eq!(body_json(resp).await["name"], "Acme Q4 Test!");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_bad_targets_and_writes_nothing() {
+        let dir = tmp();
+        let body = json!({
+            "name": "Acme",
+            "targets": ["example.com", "evil.com/path", "exa mple.com"],
+        });
+        let resp = app_newscan(&dir)
+            .oneshot(api_post_json("/api/engagements", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["rejected"], json!(["evil.com/path", "exa mple.com"]));
+        assert!(!dir.join("engagements").join("acme.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn create_empty_name_is_400() {
+        let dir = tmp();
+        let resp = app_newscan(&dir)
+            .oneshot(api_post_json(
+                "/api/engagements",
+                json!({ "name": "  ", "targets": ["example.com"] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_no_targets_is_422() {
+        let dir = tmp();
+        let resp = app_newscan(&dir)
+            .oneshot(api_post_json(
+                "/api/engagements",
+                json!({ "name": "Acme", "targets": [] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_source_not_found_is_422() {
+        let dir = tmp();
+        let resp = app_newscan(&dir)
+            .oneshot(api_post_json(
+                "/api/engagements",
+                json!({ "name": "Acme", "targets": ["example.com"], "source": "./definitely-not-here" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body_json(resp).await["field"], "source");
+        assert!(!dir.join("engagements").join("acme.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn create_duplicate_slug_is_409() {
+        let dir = tmp();
+        let app = app_newscan(&dir);
+        let body = json!({ "name": "Acme", "targets": ["example.com"] });
+        let first = app
+            .clone()
+            .oneshot(api_post_json("/api/engagements", body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = app
+            .oneshot(api_post_json("/api/engagements", body))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_without_csrf_header_is_403_and_writes_nothing() {
+        let dir = tmp();
+        let mut req = api_post_json(
+            "/api/engagements",
+            json!({ "name": "Acme", "targets": ["example.com"] }),
+        );
+        req.headers_mut().remove("x-ascent");
+        let resp = app_newscan(&dir).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!dir.join("engagements").join("acme.yaml").exists());
     }
 }

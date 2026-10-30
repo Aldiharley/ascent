@@ -184,3 +184,57 @@ export async function getEngagement(): Promise<Engagement | null> {
   }
   return body as Engagement;
 }
+
+// POST /api/engagements: define a new scan. This only writes a validated scope
+// file; it never starts a scan. The backend requires `X-Ascent: 1` (CSRF) and
+// validates every target with the same scope parser the pipeline enforces.
+export interface NewScanInput {
+  name: string;
+  targets: string[];
+  source?: string;
+}
+
+export interface CreatedEngagement {
+  ok: true;
+  name: string;
+  path: string;
+  scope: { hosts: string[]; cidrs: string[]; urls: string[] };
+  source: string;
+  run_command: string;
+}
+
+/** Thrown on a non-2xx create so the screen can show the message and rejected list. */
+export class CreateEngagementError extends Error {
+  readonly status: number;
+  readonly rejected?: string[];
+  readonly field?: string;
+  constructor(status: number, message: string, extra?: { rejected?: string[]; field?: string }) {
+    super(message);
+    this.name = "CreateEngagementError";
+    this.status = status;
+    this.rejected = extra?.rejected;
+    this.field = extra?.field;
+  }
+}
+
+export async function createEngagement(input: NewScanInput): Promise<CreatedEngagement> {
+  const res = await fetch("/api/engagements", {
+    method: "POST",
+    headers: { "X-Ascent": "1", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const b = isObject(body) ? body : {};
+    const message = typeof b.error === "string" ? b.error : `create failed: ${res.status}`;
+    const rejected = Array.isArray(b.rejected)
+      ? b.rejected.filter((x): x is string => typeof x === "string")
+      : undefined;
+    const field = typeof b.field === "string" ? b.field : undefined;
+    throw new CreateEngagementError(res.status, message, { rejected, field });
+  }
+  if (!isObject(body) || body.ok !== true) {
+    throw new CreateEngagementError(res.status, "create returned an unexpected payload");
+  }
+  return body as unknown as CreatedEngagement;
+}
