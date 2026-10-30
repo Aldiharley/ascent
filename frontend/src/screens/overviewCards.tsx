@@ -3,45 +3,18 @@ import type { TriageItem, Verdict } from "../api";
 import { AuditEntryRow } from "../components/AuditEntryRow";
 import { Button } from "../components/Button";
 import { EmptyState } from "../components/EmptyState";
-import { ErrorState } from "../components/ErrorState";
 import { IconBadge } from "../components/IconBadge";
-import { IconCrosshairCheck, IconDocument, IconFunnelSlash, IconHand, IconRadar } from "../components/icons";
-import { KpiTile } from "../components/KpiTile";
+import { IconDocument } from "../components/icons";
 import { ListCard } from "../components/ListCard";
 import { SeverityChip } from "../components/SeverityChip";
 import { Skeleton } from "../components/Skeleton";
+import { ErrorCard, LoadingCard } from "../components/StateCards";
 import { VerdictChip } from "../components/VerdictChip";
-import { percent, scannerCount, verdictCounts } from "../data/findingStats";
+import { VerdictTiles } from "../components/VerdictTiles";
 import { useStaleResource } from "../data/resources";
 import type { Resource } from "../data/resources";
 import { matchFinding } from "../data/search";
 import { orderFindings } from "./Findings";
-
-const BACKEND_HINT = "check that the Ascent backend is running";
-
-/** Load-failure card: fixed text only (a response body can carry scanned data) and a Retry. */
-function ErrorCard({ title, onRetry }: { title: string; onRetry: () => void }) {
-  return (
-    <section className="card">
-      <ErrorState title={title} detail={BACKEND_HINT} onRetry={onRetry} />
-    </section>
-  );
-}
-
-/** Skeleton card: announced as a status, with a visible caption (spec 4.12). */
-function LoadingCard({ caption, rows = 3, h = 56 }: { caption: string; rows?: number; h?: number }) {
-  return (
-    <section className="card list-card" role="status">
-      <div className="skeleton-stack">
-        <Skeleton h={22} w="45%" />
-        {Array.from({ length: rows }, (_, i) => (
-          <Skeleton key={i} h={h} r={16} />
-        ))}
-      </div>
-      <p className="loading-caption">{caption}</p>
-    </section>
-  );
-}
 
 // ---- KPI row (3.1.2) ----
 
@@ -71,40 +44,7 @@ export function KpiRow({
   }
   if (res.status === "error") return <ErrorCard title="Could not load findings" onRetry={res.retry} />;
 
-  const items = res.data;
-  const c = verdictCounts(items);
-  const scanners = scannerCount(items);
-  const sub0 =
-    scanners > 0 ? `from ${scanners} ${scanners === 1 ? "scanner" : "scanners"}` : "triaged by Crux";
-  return (
-    <div className="kpi-row">
-      <KpiTile label="Findings" value={c.total} sub={sub0} tone="teal" icon={<IconRadar />} onClick={() => onOpen("ALL")} />
-      <KpiTile
-        label="True positive"
-        value={c.tp}
-        sub={`${percent(c.tp, c.total)}% · confirmed by triage`}
-        tone="bluegrey"
-        icon={<IconCrosshairCheck />}
-        onClick={() => onOpen("TRUE_POSITIVE")}
-      />
-      <KpiTile
-        label="Needs human"
-        value={c.hu}
-        sub={`${percent(c.hu, c.total)}% · awaiting your review`}
-        tone="ice"
-        icon={<IconHand />}
-        onClick={() => onOpen("ABSTAIN")}
-      />
-      <KpiTile
-        label="Likely noise"
-        value={c.fp}
-        sub={`${percent(c.fp, c.total)}% · cut by Crux`}
-        tone="lav"
-        icon={<IconFunnelSlash />}
-        onClick={() => onOpen("LIKELY_FALSE_POSITIVE")}
-      />
-    </div>
-  );
+  return <VerdictTiles items={res.data} onSelect={onOpen} />;
 }
 
 // ---- chart slot: skeleton / error / the chart itself ----

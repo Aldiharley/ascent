@@ -346,7 +346,7 @@ test("the hero's Review approvals and the Approval required See all both open Ap
   expect(h1Name()).toBe("Ascent Console: Approval gates");
 });
 
-test("a KPI tile opens Findings narrowed to that verdict, and Show all lifts it", async () => {
+test("a KPI tile opens Findings narrowed to that verdict, and Clear filters lifts it", async () => {
   mockApi({ "/api/findings": () => json([finding, noise, unsure]) });
   render(<App />);
   await screen.findByText("SSRF in fetch");
@@ -357,8 +357,12 @@ test("a KPI tile opens Findings narrowed to that verdict, and Show all lifts it"
   expect(within(table).getByText("Open redirect")).toBeInTheDocument();
   expect(within(table).queryByText("SSRF in fetch")).not.toBeInTheDocument();
   expect(within(table).queryByText("Reflected XSS")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+  // The filter is visible as the pressed tile and a "shown" count, and one button lifts it.
+  expect(screen.getByText("Needs human", { selector: ".kpi .l" }).closest("button")).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByText("1 shown")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
   expect(within(screen.getByRole("table")).getByText("SSRF in fetch")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
 });
 
 test("the Findings tile opens an unfiltered Findings screen", async () => {
@@ -454,4 +458,143 @@ test("deciding a gate on the Overview updates the bell and the hero", async () =
   expect(await screen.findByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
   expect(await screen.findByText("No actions awaiting approval")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Review approvals" })).not.toBeInTheDocument();
+});
+
+// ---- Findings: filter toggles, search, empty state (spec 3.3) ----
+
+function tileButton(label: string) {
+  return screen.getByText(label, { selector: ".kpi .l" }).closest("button") as HTMLElement;
+}
+
+function findingRows() {
+  return within(screen.getByRole("table"))
+    .getAllByRole("row")
+    .slice(1)
+    .map((r) => r.querySelector(".fname")?.textContent);
+}
+
+test("the Findings tiles toggle the filter, and pressing the pressed tile shows everything again", async () => {
+  mockApi({ "/api/findings": () => json([finding, noise, unsure]) });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Findings" }));
+  await screen.findByRole("table");
+  expect(findingRows()).toHaveLength(3);
+  fireEvent.click(tileButton("Likely noise"));
+  expect(findingRows()).toEqual(["Reflected XSS"]);
+  expect(tileButton("Likely noise")).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(tileButton("True positive"));
+  expect(findingRows()).toEqual(["SSRF in fetch"]);
+  fireEvent.click(tileButton("True positive"));
+  expect(findingRows()).toHaveLength(3);
+  expect(tileButton("Findings")).toHaveAttribute("aria-pressed", "true");
+});
+
+test("the top-bar search filters the Findings rows live, and Clear filters empties it and the verdict filter", async () => {
+  mockApi({ "/api/findings": () => json([finding, noise, unsure]) });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Findings" }));
+  await screen.findByRole("table");
+  const box = screen.getByRole("searchbox", { name: "Search findings" });
+  fireEvent.change(box, { target: { value: "xss" } });
+  expect(findingRows()).toEqual(["Reflected XSS"]);
+  expect(screen.getByText("1 shown")).toBeInTheDocument();
+  fireEvent.click(tileButton("True positive")); // narrower than the query allows
+  expect(await screen.findByText("No findings match these filters")).toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole("button", { name: "Clear filters" })[0]);
+  expect(box).toHaveValue("");
+  expect(findingRows()).toHaveLength(3);
+  expect(tileButton("Findings")).toHaveAttribute("aria-pressed", "true");
+});
+
+test("the search text and the verdict filter survive a trip to another screen", async () => {
+  mockApi({ "/api/findings": () => json([finding, noise, unsure]) });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Findings" }));
+  await screen.findByRole("table");
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search findings" }), { target: { value: "lab" } });
+  fireEvent.click(tileButton("Needs human"));
+  fireEvent.click(screen.getByRole("button", { name: "Audit" }));
+  await screen.findByText("Hash chain OK");
+  fireEvent.click(screen.getByRole("button", { name: "Findings" }));
+  expect(findingRows()).toEqual(["Open redirect"]);
+  expect(screen.getByRole("searchbox", { name: "Search findings" })).toHaveValue("lab");
+  expect(tileButton("Needs human")).toHaveAttribute("aria-pressed", "true");
+});
+
+test("an unknown verdict is counted by its Overview tile and listed by that tile's filter", async () => {
+  const odd = { ...unsure, finding: { ...unsure.finding, id: "f9", title: "Odd verdict" }, verdict: "SOMETHING_NEW" };
+  mockApi({ "/api/findings": () => json([finding, unsure, odd]) });
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  const tile = tileButton("Needs human");
+  expect(within(tile).getByText("2", { selector: ".n" })).toBeInTheDocument();
+  fireEvent.click(tile);
+  await screen.findByRole("table");
+  expect(findingRows().sort()).toEqual(["Odd verdict", "Open redirect"]);
+});
+
+test("the Findings empty state sends you to New scan", async () => {
+  mockApi({ "/api/findings": () => json([]) });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Findings" }));
+  await screen.findByText("No findings yet");
+  const cta = screen
+    .getAllByRole("button", { name: "Define a new scan" })
+    .find((b) => b.closest(".empty-state")) as HTMLElement;
+  fireEvent.click(cta);
+  expect(h1Name()).toBe("Ascent Console: New scan");
+});
+
+// ---- approval decisions: one pending count, wherever it is shown ----
+
+test("after a decision the bell, the hero and the Approval card agree, even if the refetch is stale", async () => {
+  let posted = false;
+  mockApi({
+    // A stale server view: it keeps listing the gate after the decision was recorded.
+    "/api/gates": () => json([gate]),
+    "/api/gates/g1/approve": () => {
+      posted = true;
+      return json({ ok: true });
+    },
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: "Pending approvals: 1" });
+  expect(screen.getByText("1 pending")).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  expect(await screen.findByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
+  expect(posted).toBe(true);
+  expect(screen.getByText("0 pending")).toBeInTheDocument();
+  expect(screen.getByText("No actions awaiting approval")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Review approvals" })).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Welcome" }).textContent).not.toMatch(/approval/i);
+  expect(within(screen.getByRole("button", { name: "Approval gates" })).queryByText("1")).not.toBeInTheDocument();
+});
+
+test("a decision made on the Approval gates screen is still recorded when you leave before the answer arrives", async () => {
+  let release!: () => void;
+  const answer = new Promise<void>((r) => (release = r));
+  let decided = false;
+  mockApi({
+    "/api/gates/g1/approve": async () => {
+      await answer;
+      decided = true;
+      return json({ ok: true });
+    },
+    "/api/gates": () => json(decided ? [] : [gate]),
+    "/api/audit": () =>
+      json({
+        entries: decided ? [{ type: "gate_decision", gate_id: "g1", decision: "approved", entry_hash: "abc" }] : [],
+        chain_ok: true,
+      }),
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Pending approvals: 1" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  // Leave while the POST is still in flight.
+  fireEvent.click(screen.getByRole("button", { name: "Audit" }));
+  await screen.findByText("Hash chain OK");
+  expect(screen.queryByText(/gate g1 → approved/)).not.toBeInTheDocument();
+  release();
+  expect(await screen.findByText(/gate g1 → approved/)).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
 });

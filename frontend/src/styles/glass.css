@@ -50,54 +50,16 @@ body{
 
 /* (the app shell -- .app, sidebar, top bar, search, status dot, avatar -- moved to shell.css) */
 
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
-/* scoped to the legacy ring tile (`<div class="kpi glass">`) so the new KpiTile keeps components.css */
-.kpi.glass{padding:16px 18px;display:flex;align-items:center;gap:14px}
-.kpi.glass .n{font-size:30px;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.kpi.glass .l{font-size:12px;color:var(--muted);font-weight:600}
-.kpi.glass .sub{font-size:11px;color:var(--faint);margin-top:2px}
-.ring{--p:60;--c:var(--accent);width:52px;height:52px;border-radius:50%;flex:none;display:grid;place-items:center;
-  background:conic-gradient(var(--c) calc(var(--p)*1%),rgba(21,35,59,.1) 0);}
-.ring i{width:40px;height:40px;border-radius:50%;background:#fff;display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--ink);font-style:normal}
+/* (the KPI tiles are KpiTile in components.css; the ring tile and `.kpis` row are gone) */
 
 .panel{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .phead{display:flex;align-items:center;gap:12px;padding:16px 18px;flex-wrap:wrap}
 .ptitle{font-size:16px;font-weight:700;letter-spacing:-.01em}
 /* .count, .segs, .btn: removed, components.css owns them (they won every tie because this sheet loads last) */
 
-.tbl{overflow:auto;padding:0 8px 8px}
-table{width:100%;border-collapse:separate;border-spacing:0 8px;min-width:720px}
-th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:700;padding:4px 12px}
-td{padding:14px 12px;background:rgba(255,255,255,.5);border-top:1px solid rgba(255,255,255,.6);border-bottom:1px solid rgba(255,255,255,.6)}
-tr td:first-child{border-left:1px solid rgba(255,255,255,.6);border-radius:14px 0 0 14px;position:relative}
-tr td:last-child{border-right:1px solid rgba(255,255,255,.6);border-radius:0 14px 14px 0}
-tbody tr{transition:.15s;cursor:pointer}
-tbody tr:hover td{background:rgba(255,255,255,.82)}
-.stripe{position:absolute;left:0;top:10px;bottom:10px;width:4px;border-radius:4px}
-.s-crit{background:var(--crit)}.s-high{background:var(--high)}.s-med{background:var(--med)}.s-low{background:var(--ok)}
-.fname{font-weight:700;font-size:13.5px}
-.frule{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:3px}
-.sev{font-size:11px;font-weight:700;padding:3px 9px;border-radius:7px}
-.sev.crit{color:#b21f24;background:rgba(229,72,77,.13)}
-.sev.high{color:#b9530f;background:rgba(242,115,28,.14)}
-.sev.med{color:#8a6a00;background:rgba(224,164,0,.16)}
-.sev.low{color:#0b7a6e;background:rgba(18,165,148,.14)}
-.conf{display:flex;align-items:center;gap:9px;min-width:120px}
-.bar{flex:1;height:7px;border-radius:7px;background:rgba(21,35,59,.1);overflow:hidden}
-.bar i{display:block;height:100%;border-radius:7px;background:linear-gradient(90deg,var(--accent),#38c6b5)}
-.conf b{font-size:12px;font-variant-numeric:tabular-nums;font-family:var(--mono);color:var(--muted);font-weight:500}
-.loc{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
-.verdict{font-size:11px;font-weight:700;padding:5px 11px;border-radius:20px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
-.verdict::before{content:"";width:7px;height:7px;border-radius:50%}
-.v-tp{color:#b21f24;background:rgba(229,72,77,.12)}.v-tp::before{background:var(--crit)}
-.v-hu{color:#8a6a00;background:rgba(224,164,0,.16)}.v-hu::before{background:var(--med)}
-.v-fp{color:#5b6b82;background:rgba(91,107,130,.14)}.v-fp::before{background:var(--faint)}
-.tags{display:flex;gap:5px;flex-wrap:wrap}
+/* (the findings table, severity/verdict chips and confidence bar are styled in screens.css / components.css) */
 
 /* (the right rail, `.side`, is gone: the Overview is one 12-column grid) */
-.gate{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
-.gate h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}
-.pill{font-size:11px;font-weight:700;color:#8a6a00;background:rgba(224,164,0,.18);padding:3px 9px;border-radius:20px}
 /* .gcard*, .cmd, .scope-ok, .acts, .approve, .deny, .feed, .ev*: removed, the gate card, the command
    block and the audit rows are styled in components.css / screens.css */
 .note{font-size:11px;color:var(--faint);text-align:center}
@@ -109,7 +71,6 @@ tbody tr:hover td{background:rgba(255,255,255,.82)}
 .toast .m b{font-size:13px}.toast .m div{font-size:11.5px;color:var(--muted)}
 
 @media (max-width:640px){
-  .kpis{grid-template-columns:repeat(2,1fr)}
   .toast{display:none}
 }
 

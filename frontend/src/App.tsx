@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Shell, navTitle } from "./components/Shell";
 import type { NavId, ShellPolicy } from "./components/Shell";
+import { usePendingGates as usePendingGatesResource } from "./data/gates";
 import { RESOURCE_KEYS, useResource } from "./data/resources";
 import type { ResourceKey } from "./data/resources";
 import type { Verdict } from "./api";
@@ -35,9 +36,11 @@ function useEngagementStatus(version: number): { status: string; loading: boolea
 }
 
 /** Number of pending approval gates for the nav badge and the bell. Unknown (undefined) until the
- *  first load; a refetch or a failure keeps the last known count so the badge does not flicker. */
+ *  first load; a refetch or a failure keeps the last known count so the badge does not flicker.
+ *  It reads the same pending list as the Approval gates views (decided gates already subtracted), so
+ *  the badge, the bell, the hero and the cards always show one number. */
 function usePendingGates(version: number): { count: number | undefined; loading: boolean } {
-  const res = useResource("gates", version);
+  const res = usePendingGatesResource(version);
   const last = useRef<number | undefined>(undefined);
   if (res.status === "ready") last.current = Array.isArray(res.data) ? res.data.length : undefined;
   return { count: last.current, loading: res.status === "loading" };
@@ -101,6 +104,11 @@ export default function App() {
     refreshing: engagement.loading || pending.loading || policy.loading,
   };
   const onDecided = () => bump("gates", "audit");
+  // "Clear filters" on Findings: the verdict toggle and the search box both go back to empty.
+  const clearFilters = () => {
+    setVerdictFilter("ALL");
+    setQuery("");
+  };
 
   switch (active) {
     case "newscan":
@@ -118,7 +126,10 @@ export default function App() {
             <Findings
               version={versions.findings}
               verdictFilter={verdictFilter}
-              onClearFilter={() => setVerdictFilter("ALL")}
+              onVerdictFilterChange={setVerdictFilter}
+              query={query}
+              onClearFilters={clearFilters}
+              onNavigate={setActive}
             />
           </ErrorBoundary>
         </Shell>

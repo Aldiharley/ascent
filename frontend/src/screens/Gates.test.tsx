@@ -257,7 +257,57 @@ test("unmounting mid-request and then resolving does not warn or throw", async (
   resolve(json({ ok: true }));
   await new Promise((r) => setTimeout(r, 0));
   expect(errors).not.toHaveBeenCalled();
-  expect(onDecided).not.toHaveBeenCalled();
+  // The decision was recorded even though the view is gone, so the app must still refresh
+  // (bell, hero, audit log). Only the toast, which needs a mounted view, is skipped.
+  expect(onDecided).toHaveBeenCalledTimes(1);
+});
+
+test("unmounting mid-request and then getting a 409 still tells the app, without warnings", async () => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  let resolve!: (r: Response) => void;
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockReturnValueOnce(new Promise<Response>((r) => (resolve = r)));
+  const onDecided = vi.fn();
+  const { unmount } = render(<Gates onDecided={onDecided} />);
+  fireEvent.click(await screen.findByRole("button", { name: /deny/i }));
+  unmount();
+  resolve(json({ error: "decided" }, 409));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(errors).not.toHaveBeenCalled();
+  expect(onDecided).toHaveBeenCalledTimes(1);
+});
+
+test("unmounting mid-request and then failing neither refreshes the app nor warns", async () => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  let resolve!: (r: Response) => void;
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockReturnValueOnce(new Promise<Response>((r) => (resolve = r)));
+  const onDecided = vi.fn();
+  const { unmount } = render(<Gates onDecided={onDecided} />);
+  fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+  unmount();
+  resolve(json({ error: "boom" }, 500));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(errors).not.toHaveBeenCalled();
+  expect(onDecided).not.toHaveBeenCalled(); // nothing was recorded
+});
+
+test("a gate decided in a view that was then unmounted stays hidden when the list comes back", async () => {
+  let resolve!: (r: Response) => void;
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockReturnValueOnce(new Promise<Response>((r) => (resolve = r)))
+    .mockResolvedValue(json([gate()])); // a stale server view
+  const first = render(<Gates />);
+  fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+  first.unmount();
+  resolve(json({ ok: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  render(<Gates version={1} />);
+  expect(await screen.findByText(/No actions awaiting approval/i)).toBeInTheDocument();
+  expect(screen.queryByText("Confirm SSRF")).not.toBeInTheDocument();
 });
 
 test("toast timers are cleared on unmount", async () => {
@@ -546,4 +596,143 @@ test("empty or non-true detect-only metadata renders nothing; HTML in it stays l
   expect(container.querySelector("img")).toBeNull();
   expect(screen.queryByText("DETECT-ONLY")).not.toBeInTheDocument();
   expect(screen.queryByText(/Expected evidence/i)).not.toBeInTheDocument();
+});
+
+// ---- page variant: intro strip, grid, empty / loading / error (spec 3.4) ----
+
+const CONSENT =
+  "Every decision is written to the audit log. Approving records consent; it does not run the command.";
+
+test("page: an intro strip with the Approval required heading, the pending count and the detect-only line", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate(), gate({ id: "g2", title: "Two" })]));
+  const { container } = render(<Gates />);
+  const heading = await screen.findByRole("heading", { level: 2, name: "Approval required" });
+  const strip = heading.closest("section") as HTMLElement;
+  expect(strip).toHaveClass("intro-strip");
+  expect(within(strip).getByText("2 pending")).toHaveClass("count");
+  expect(
+    within(strip).getByText(
+      "Detect-only verification gates. Approving records your consent in the hash-chained audit log. It never runs anything from this console.",
+    ),
+  ).toBeInTheDocument();
+  expect(strip.querySelector(".ibadge")).not.toBeNull();
+  // The strip is the only "Approval required" heading, and it carries no legacy glass wrapper.
+  expect(screen.getAllByRole("heading", { name: "Approval required" })).toHaveLength(1);
+  expect(container.querySelector(".glass")).toBeNull();
+});
+
+test("page: the gates sit in a grid, one full card each, with the consent sentence under every Approve", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    json([gate(), gate({ id: "g2", title: "Two" }), gate({ id: "g3", title: "Three" })]),
+  );
+  const { container } = render(<Gates />);
+  await screen.findByText("Confirm SSRF");
+  const grid = container.querySelector(".gate-grid") as HTMLElement;
+  expect(grid).not.toBeNull();
+  expect(grid.querySelectorAll("article.gcard")).toHaveLength(3);
+  expect(within(grid).getAllByRole("button", { name: "Approve" })).toHaveLength(3);
+  expect(within(grid).getAllByText(CONSENT)).toHaveLength(3);
+  for (const card of grid.querySelectorAll("article.gcard")) {
+    expect(card.querySelector("details")).toBeNull();
+  }
+});
+
+test("page: the pending count follows the decisions", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate(), gate({ id: "g2", title: "Two" })]))
+    .mockResolvedValueOnce(json({ ok: true }));
+  render(<Gates />);
+  await screen.findByText("2 pending");
+  fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]);
+  expect(await screen.findByText("1 pending")).toBeInTheDocument();
+});
+
+test("page: the empty state is a resting watchdog (180px), the title and a hint, no grid", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([]));
+  const { container } = render(<Gates />);
+  expect(await screen.findByText("No actions awaiting approval")).toBeInTheDocument();
+  expect(screen.getByText("When triage proposes a verification step, it waits here for you.")).toBeInTheDocument();
+  expect((container.querySelector(".empty-state .mascot") as HTMLElement).style.width).toBe("180px");
+  expect(container.querySelector(".gate-grid")).toBeNull();
+  expect(screen.getByText("0 pending")).toBeInTheDocument();
+});
+
+test("page: loading shows two skeleton gate cards and a status caption", () => {
+  vi.spyOn(globalThis, "fetch").mockReturnValue(new Promise<Response>(() => {}));
+  const { container } = render(<Gates />);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading approval gates…");
+  expect(container.querySelectorAll(".gate-grid > .card")).toHaveLength(2);
+  expect(container.querySelector(".panel, .glass")).toBeNull();
+});
+
+test("page: a load failure is one alert with the fixed copy and a Retry", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json({ error: "<b>detail</b>" }, 500));
+  render(<Gates />);
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Could not load approval gates");
+  expect(alert).toHaveTextContent("check that the Ascent backend is running");
+  expect(alert).not.toHaveTextContent("detail");
+  expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+});
+
+test("page: a toast can be dismissed", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate()])).mockResolvedValueOnce(json({ error: "decided" }, 409));
+  render(<Gates />);
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  expect(await screen.findByText("Already decided")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss notification" }));
+  expect(screen.queryByText("Already decided")).not.toBeInTheDocument();
+});
+
+// ---- compact: consent note, toasts, shared load/error cards ----
+
+test("compact: the consent sentence stays under every Approve button", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    json([gate(), gate({ id: "g2", title: "Two" }), gate({ id: "g3", title: "Three" })]),
+  );
+  render(<Gates variant="compact" />);
+  await screen.findByText("Confirm SSRF");
+  expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(3);
+  expect(screen.getAllByText(CONSENT)).toHaveLength(3);
+});
+
+test("compact: a decision toast can be dismissed", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate()])).mockResolvedValueOnce(json({ ok: true }));
+  render(<Gates variant="compact" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  expect(await screen.findByText(/recorded in the audit log/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss notification" }));
+  expect(screen.queryByText(/recorded in the audit log/i)).not.toBeInTheDocument();
+});
+
+test("compact: loading and failure are the shared skeleton and error cards", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json({}, 500));
+  const { container } = render(<Gates variant="compact" />);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading approval gates…");
+  expect(container.querySelectorAll(".skeleton").length).toBeGreaterThanOrEqual(3);
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Could not load approval gates");
+  expect(alert).toHaveTextContent("check that the Ascent backend is running");
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+});
+
+// ---- decided ids: pruned when the server stops listing them ----
+
+test("a decided id is forgotten once a newer payload no longer lists it, so a real pending gate with that id shows", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockResolvedValueOnce(json({ ok: true }))
+    .mockResolvedValueOnce(json([])) // the server has recorded the decision
+    .mockResolvedValueOnce(json([gate({ title: "Confirm SSRF again" })])); // later: a new gate, same id
+  const { rerender } = render(<Gates version={0} />);
+  fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+  await screen.findByText(/No actions awaiting approval/i);
+  rerender(<Gates version={1} />);
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  expect(screen.queryByText("Confirm SSRF")).not.toBeInTheDocument();
+  rerender(<Gates version={2} />);
+  expect(await screen.findByText("Confirm SSRF again")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
 });

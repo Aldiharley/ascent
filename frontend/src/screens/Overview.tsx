@@ -7,6 +7,7 @@ import { PolicyGate } from "../components/PolicyGate";
 import type { NavId } from "../components/Shell";
 import { SeverityBarChart } from "../components/SeverityBarChart";
 import { verdictCounts } from "../data/findingStats";
+import { usePendingGates } from "../data/gates";
 import { useStaleResource } from "../data/resources";
 import type { Resource, ResourceKey, ResourceMap } from "../data/resources";
 import { Gates } from "./Gates";
@@ -39,7 +40,8 @@ function heroEngagement(res: Resource<ResourceMap["engagement"]>): HeroEngagemen
  */
 export function Overview({ versions, query, onClearQuery, onNavigate, onOpenFindings, onDecided }: OverviewProps) {
   const findings = useStaleResource("findings", versions.findings);
-  const gates = useStaleResource("gates", versions.gates);
+  // The same pending list the cards and the bell read: a decided gate is gone from all of them at once.
+  const gates = usePendingGates(versions.gates);
   const gate = useStaleResource("gate", versions.gate);
   const engagement = useStaleResource("engagement", versions.engagement);
 

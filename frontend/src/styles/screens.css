@@ -15,8 +15,8 @@
   .col-4,.col-5,.col-6,.col-7{grid-column:1 / -1}
 }
 @media (max-width:640px){
-  .kpi{min-height:148px}
-  .kpi-row .kpi{min-height:148px}
+  .kpi:not(.kpi--compact){min-height:148px}
+  .kpi-row .kpi:not(.kpi--compact){min-height:148px}
 }
 .stack{display:flex;flex-direction:column;gap:var(--s-5);min-width:0}
 
@@ -129,7 +129,9 @@
     background:#ffffff;box-shadow:var(--shadow-card)}
   .tbl td{padding:6px 0;background:none;border:0;border-radius:0}
   .tbl td:first-child,.tbl td:last-child{border-radius:0;min-width:0}
-  .tbl td[data-label]{display:grid;grid-template-columns:96px 1fr;gap:var(--s-2);align-items:center}
+  .tbl td:first-child{position:static}   /* so the severity stripe runs the height of the whole card */
+  .tbl td[data-label]{display:grid;grid-template-columns:96px 1fr;gap:var(--s-2);align-items:center;justify-items:start}
+  .tbl td[data-label] .conf{width:100%}
   .tbl td[data-label]::before{content:attr(data-label);font:var(--t-micro);text-transform:uppercase;
     letter-spacing:var(--tracking-caps);color:var(--ink-2)}
   .tbl .stripe{left:0}
@@ -137,7 +139,11 @@
 
 /* ---------- approval gates (3.4, 4.5) ---------- */
 .intro-strip{display:flex;align-items:center;gap:var(--s-4);flex-wrap:wrap;
-  background:var(--ice-100);border:1px solid var(--ice-200);border-radius:var(--r-lg)}
+  background:var(--ice-100);border:1px solid var(--ice-200);border-radius:var(--r-lg);
+  backdrop-filter:none;-webkit-backdrop-filter:none}
+.intro-text{flex:1;min-width:240px;display:flex;flex-direction:column;gap:var(--s-1)}
+.intro-head{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap}
+.intro-sub{margin:0;font:var(--t-body);color:var(--ink-2)}
 .gate-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr));gap:var(--s-5)}
 .gcard{
   display:flex;flex-direction:column;gap:14px;padding:22px;border-radius:24px;
@@ -254,6 +260,7 @@
 .gcard-label{font:var(--t-micro);text-transform:uppercase;letter-spacing:var(--tracking-caps);color:var(--ink-2)}
 .tag--wrap{height:auto;min-height:24px;padding:3px 8px;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .gcard .scope-ok svg{width:14px;height:14px;stroke:currentColor;stroke-width:2.6;fill:none}
+.gcard .scope-ok,.gcard .scope-bad{margin-top:auto}   /* in a grid row the actions line up at the bottom of every card */
 .gcard .acts .btn{height:44px}
 .gcard--compact .acts .btn{height:40px}
 .gcard .acts .deny{padding:0 20px}

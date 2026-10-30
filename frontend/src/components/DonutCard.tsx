@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
 import type { TriageItem } from "../api";
+import { verdictCounts } from "../data/findingStats";
 import { SegmentedControl } from "./SegmentedControl";
 
 export type DonutMode = "verdict" | "category";
@@ -26,11 +27,8 @@ const CATEGORY_ROWS = [
 
 /** Findings per verdict. An unknown verdict is counted as "Needs human", like `VerdictChip`. */
 export function verdictMix(items: readonly TriageItem[]): MixSegment[] {
-  const counts = [0, 0, 0];
-  for (const it of items) {
-    const i = VERDICT_ROWS.findIndex((r) => r.verdict === it.verdict);
-    counts[i === -1 ? 1 : i] += 1;
-  }
+  const c = verdictCounts(items);
+  const counts = [c.tp, c.hu, c.fp];
   return VERDICT_ROWS.map((r, i) => ({ label: r.label, value: counts[i], color: r.color }));
 }
 

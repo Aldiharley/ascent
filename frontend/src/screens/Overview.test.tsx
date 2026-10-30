@@ -448,3 +448,18 @@ test("bumping versions swaps the data in place instead of remounting", async () 
   expect(await screen.findByText("Title new")).toBeInTheDocument();
   expect(screen.getByRole("heading", { level: 2, name: "Findings by severity" })).toBe(heading);
 });
+
+test("a decision empties the hero summary and the Approval card together, even if the refetch is stale", async () => {
+  mockApi({
+    "/api/gates": () => json([gate]), // stale: still lists the decided gate
+    "/api/gates/g1/approve": () => json({ ok: true }),
+  });
+  const { container, props } = overview();
+  await waitFor(() => expect(container.querySelector(".hero-sum")).toHaveTextContent("1 approval pending"));
+  expect(screen.getByText("1 pending")).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  expect(await screen.findByText("0 pending")).toBeInTheDocument();
+  await waitFor(() => expect(container.querySelector(".hero-sum")?.textContent ?? "").not.toMatch(/approval/));
+  expect(screen.queryByRole("button", { name: "Review approvals" })).toBeNull();
+  expect(props.onDecided).toHaveBeenCalledTimes(1);
+});
