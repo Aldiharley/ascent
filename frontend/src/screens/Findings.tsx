@@ -3,8 +3,9 @@ import { getFindings } from "../api";
 import type { TriageItem, Verdict } from "../api";
 import { ConfidenceBar } from "../components/ConfidenceBar";
 import { Kpi } from "../components/Kpi";
-import { SeverityBadge, SeverityStripe } from "../components/SeverityStripe";
+import { SeverityChip, SeverityStripe } from "../components/SeverityChip";
 import { VerdictChip } from "../components/VerdictChip";
+import { findingLocus } from "../data/search";
 
 const VERDICT_RANK: Record<Verdict, number> = {
   TRUE_POSITIVE: 0,
@@ -21,13 +22,6 @@ function order(items: TriageItem[]): TriageItem[] {
   return [...items].sort(
     (a, b) => rank(a.verdict) - rank(b.verdict) || (b.confidence ?? 0) - (a.confidence ?? 0),
   );
-}
-
-function locus(item: TriageItem): string {
-  const { url, file, line } = item.finding;
-  if (url) return url;
-  if (file) return line ? `${file}:${line}` : file;
-  return "—";
 }
 
 function pct(n: number, total: number): number {
@@ -122,7 +116,7 @@ export function Findings() {
                         <div className="frule">{f.rule_id}</div>
                       </td>
                       <td>
-                        <SeverityBadge severity={f.severity} />
+                        <SeverityChip severity={f.severity} />
                       </td>
                       <td>
                         <ConfidenceBar confidence={item.confidence} verdict={item.verdict} />
@@ -131,7 +125,7 @@ export function Findings() {
                         <VerdictChip verdict={item.verdict} />
                       </td>
                       <td>
-                        <span className="loc">{locus(item)}</span>
+                        <span className="loc">{findingLocus(item) || "—"}</span>
                       </td>
                       <td>
                         <div className="tags">

@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { getEngagement } from "./api";
+import { useCallback, useRef, useState } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PolicyGate } from "./components/PolicyGate";
 import { Shell } from "./components/Shell";
 import type { NavId } from "./components/Shell";
+import { RESOURCE_KEYS, useResource } from "./data/resources";
+import type { ResourceKey } from "./data/resources";
 import { Audit } from "./screens/Audit";
 import { Findings } from "./screens/Findings";
 import { Gates } from "./screens/Gates";
@@ -12,33 +13,39 @@ import { Report } from "./screens/Report";
 
 const NO_ENGAGEMENT = "no engagement loaded";
 
+type Versions = Record<ResourceKey, number>;
+
+const INITIAL_VERSIONS = Object.fromEntries(RESOURCE_KEYS.map((k) => [k, 0])) as Versions;
+
 /** Topbar status text; anything but a named engagement is the neutral fallback.
- *  Refetches whenever `version` changes (e.g. after a new scan is created). */
+ *  Refetches whenever `version` changes (e.g. after a new scan is created). While a refetch is in
+ *  flight the last known text stays, so the chip does not flicker. */
 function useEngagementStatus(version: number): string {
-  const [status, setStatus] = useState(NO_ENGAGEMENT);
-  useEffect(() => {
-    let live = true;
-    getEngagement().then(
-      (eng) => {
-        const name = typeof eng?.name === "string" ? eng.name.trim() : "";
-        if (live) setStatus(name ? `engagement: ${name}` : NO_ENGAGEMENT);
-      },
-      () => undefined,
-    );
-    return () => {
-      live = false;
-    };
-  }, [version]);
-  return status;
+  const res = useResource("engagement", version);
+  const last = useRef(NO_ENGAGEMENT);
+  if (res.status === "ready") {
+    const name = typeof res.data?.name === "string" ? res.data.name.trim() : "";
+    last.current = name ? `engagement: ${name}` : NO_ENGAGEMENT;
+  } else if (res.status === "error") {
+    last.current = NO_ENGAGEMENT;
+  }
+  return last.current;
 }
 
 export default function App() {
   const [active, setActive] = useState<NavId>("overview");
-  // Bumped when a gate decision is recorded so the Overview audit feed refetches.
-  const [auditVersion, setAuditVersion] = useState(0);
-  // Bumped when a new scan is created so the topbar engagement name refetches.
-  const [engVersion, setEngVersion] = useState(0);
-  const status = useEngagementStatus(engVersion);
+  // One version counter per shared resource (see data/resources.ts). Bumping a key makes every
+  // reader of it refetch: a recorded gate decision bumps gates + audit, a created scan bumps all
+  // the data the new engagement affects.
+  const [versions, setVersions] = useState<Versions>(INITIAL_VERSIONS);
+  const bump = useCallback((...keys: ResourceKey[]) => {
+    setVersions((v) => {
+      const next = { ...v };
+      for (const k of keys) next[k] += 1;
+      return next;
+    });
+  }, []);
+  const status = useEngagementStatus(versions.engagement);
 
   const shell = { active, onNavigate: setActive, status };
 
@@ -47,7 +54,7 @@ export default function App() {
       return (
         <Shell {...shell}>
           <ErrorBoundary key="newscan">
-            <NewScan onCreated={() => setEngVersion((v) => v + 1)} />
+            <NewScan onCreated={() => bump(...RESOURCE_KEYS)} />
           </ErrorBoundary>
         </Shell>
       );
@@ -90,10 +97,10 @@ export default function App() {
           aside={
             <>
               <ErrorBoundary key="overview-gates">
-                <Gates onDecided={() => setAuditVersion((v) => v + 1)} />
+                <Gates onDecided={() => bump("gates", "audit")} />
               </ErrorBoundary>
               <ErrorBoundary key="overview-audit">
-                <Audit key={auditVersion} />
+                <Audit key={versions.audit} />
               </ErrorBoundary>
             </>
           }

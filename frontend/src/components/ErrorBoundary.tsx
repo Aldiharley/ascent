@@ -1,5 +1,6 @@
 import { Component } from "react";
 import type { ErrorInfo, ReactNode } from "react";
+import { ErrorState } from "./ErrorState";
 
 interface Props {
   children: ReactNode;
@@ -31,13 +32,8 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (!this.state.failed) return this.props.children;
     return (
-      <section className="panel glass" role="alert">
-        <div className="phead">
-          <span className="ptitle">This view failed to render.</span>
-        </div>
-        <button type="button" onClick={this.reset}>
-          Try again
-        </button>
+      <section className="card">
+        <ErrorState title="This view failed to render." onRetry={this.reset} retryLabel="Try again" />
       </section>
     );
   }
