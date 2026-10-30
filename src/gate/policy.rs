@@ -80,14 +80,27 @@ fn check_in(field: &str, vals: &[String], allowed: &[&str]) -> Result<(), String
     }
 }
 
-fn check_cwe(field: &str, vals: &[String]) -> Result<(), String> {
-    for v in vals {
-        let ok = v.strip_prefix("CWE-").is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
-        if !ok {
-            return Err(format!("{field}: {v:?} is not a CWE id like CWE-89"));
-        }
+/// `CWE-<n>` with the number re-rendered (`CWE-089` → `CWE-89`); `None` unless
+/// the input is `CWE-` followed by digits only (case-insensitive prefix).
+pub fn canonical_cwe(v: &str) -> Option<String> {
+    let v = v.trim().to_ascii_uppercase();
+    let d = v.strip_prefix("CWE-")?;
+    if d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    d.parse::<u64>().ok().map(|n| format!("CWE-{n}"))
+}
+
+fn canonicalise_cwes(field: &str, vals: &mut [String]) -> Result<(), String> {
+    for v in vals.iter_mut() {
+        *v = canonical_cwe(v).ok_or_else(|| format!("{field}: {v:?} is not a CWE id like CWE-89"))?;
     }
     Ok(())
+}
+
+fn sort_dedupe(v: &mut Vec<String>) {
+    v.sort();
+    v.dedup();
 }
 
 pub fn parse_policy(text: &str) -> Result<Policy, String> {
@@ -106,8 +119,13 @@ pub fn parse_policy(text: &str) -> Result<Policy, String> {
     if p.fail_on.categories.is_empty() {
         return Err("fail_on.categories is empty: the gate would evaluate nothing".into());
     }
-    check_cwe("fail_on.cwe", &p.fail_on.cwe)?;
-    check_cwe("warn_on.cwe", &p.warn_on.cwe)?;
+    canonicalise_cwes("fail_on.cwe", &mut p.fail_on.cwe)?;
+    canonicalise_cwes("warn_on.cwe", &mut p.warn_on.cwe)?;
+    // Order and duplicates carry no meaning: normalise them so policy_hash is semantic.
+    for v in [&mut p.fail_on.severity, &mut p.fail_on.categories, &mut p.fail_on.cwe,
+              &mut p.warn_on.severity, &mut p.warn_on.cwe] {
+        sort_dedupe(v);
+    }
     Ok(p)
 }
 
@@ -138,7 +156,9 @@ mod tests {
     fn minimal_policy_gets_safe_defaults() {
         let p = parse_policy("version: 1\n").unwrap();
         assert_eq!(p.name, "default");
-        assert_eq!(p.fail_on.categories, CATEGORIES.to_vec());
+        let mut all = CATEGORIES.to_vec();
+        all.sort(); // lists are stored sorted so the policy hash is order-independent
+        assert_eq!(p.fail_on.categories, all);
         assert!(p.fail_on.severity.is_empty() && p.warn_on.severity.is_empty());
         assert_eq!(p.triage.likely_false_positive, FpMode::DemoteToWarn);
     }
@@ -148,6 +168,24 @@ mod tests {
         assert_eq!(p.fail_on.severity, vec!["HIGH"]);
         assert_eq!(p.fail_on.categories, vec!["SAST"]);
         assert_eq!(p.fail_on.cwe, vec!["CWE-89"]);
+    }
+    #[test]
+    fn cwe_ids_are_canonical() {
+        let p = parse_policy("version: 1\nfail_on:\n  cwe: [CWE-089, cwe-0798]\nwarn_on:\n  cwe: [CWE-0022]\n").unwrap();
+        assert_eq!(p.fail_on.cwe, vec!["CWE-798", "CWE-89"]);
+        assert_eq!(p.warn_on.cwe, vec!["CWE-22"]);
+        for bad in ["CWE-", "CWE-8a9", "CWE--89", "CWE-+89", "89"] {
+            assert!(parse_policy(&format!("version: 1\nfail_on:\n  cwe: ['{bad}']\n")).is_err(), "{bad}");
+        }
+    }
+    #[test]
+    fn hash_is_semantic_over_order_and_duplicates() {
+        let a = parse_policy("version: 1\nfail_on:\n  severity: [HIGH, CRITICAL]\n").unwrap();
+        let b = parse_policy("version: 1\nfail_on:\n  severity: [CRITICAL, HIGH, HIGH]\n").unwrap();
+        assert_eq!(policy_hash(&a), policy_hash(&b));
+        let c = parse_policy("version: 1\nfail_on:\n  categories: [SCA, SAST, SAST]\n  cwe: [CWE-89, CWE-089]\n").unwrap();
+        let d = parse_policy("version: 1\nfail_on:\n  categories: [SAST, SCA]\n  cwe: [CWE-89]\n").unwrap();
+        assert_eq!(policy_hash(&c), policy_hash(&d));
     }
     #[test]
     fn rejects_everything_suspicious() {

@@ -2,7 +2,7 @@
 //! PASS / CONDITIONAL / FAIL / INCOMPLETE, written to gate.json and chained
 //! into audit.jsonl so the verdict is tamper-evident.
 use super::fingerprint::{fingerprints, kind};
-use super::policy::{policy_hash, FpMode, Policy, SEVERITIES};
+use super::policy::{canonical_cwe, policy_hash, FpMode, Policy, SEVERITIES};
 use crate::runstatus::RunStatus;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -126,6 +126,7 @@ pub fn evaluate(items: &[Value], policy: &Policy, status: Option<&RunStatus>, fa
         counts.evaluated += 1;
         let sev = s(f, "severity").to_ascii_uppercase();
         let cwe = s(f, "cwe").split(':').next().unwrap_or("").trim().to_ascii_uppercase();
+        let cwe = canonical_cwe(&cwe).unwrap_or(cwe);
         let entry = |reason: String| GateEntry {
             fingerprint: fps[i].clone(),
             rule_id: s(f, "rule_id"),
@@ -349,6 +350,16 @@ mod tests {
         assert!(r.warned[0].reason.contains("unrecognised severity"), "{}", r.warned[0].reason);
         // a fail_on CWE still fails even with an unrecognised severity
         let r = evaluate(&[item("opengrep", "UNKNOWN", "CWE-798", "TRUE_POSITIVE")], &policy(), Some(&done()), false);
+        assert_eq!(r.decision, Decision::Fail);
+    }
+    #[test]
+    fn zero_padded_policy_cwe_matches_the_canonical_finding_cwe() {
+        let p = parse_policy("version: 1\nfail_on:\n  cwe: [CWE-089]\n").unwrap();
+        let r = evaluate(&[item("opengrep", "LOW", "CWE-89", "TRUE_POSITIVE")], &p, Some(&done()), false);
+        assert_eq!(r.decision, Decision::Fail);
+        assert_eq!(r.failed[0].reason, "CWE-89 in fail_on");
+        // and the other way round: a zero-padded finding CWE matches too
+        let r = evaluate(&[item("opengrep", "LOW", "CWE-0798", "TRUE_POSITIVE")], &policy(), Some(&done()), false);
         assert_eq!(r.decision, Decision::Fail);
     }
     #[test]
