@@ -69,6 +69,16 @@ pub fn category_of(f: &Value) -> String {
     .into()
 }
 
+/// The policy category an analyser covers (for `skipped_tools`).
+fn tool_category(tool: &str) -> Option<&'static str> {
+    match tool {
+        "opengrep" => Some("SAST"),
+        "gitleaks" => Some("SECRETS"),
+        "trivy" => Some("SCA"),
+        _ => None,
+    }
+}
+
 fn locus(f: &Value) -> String {
     let url = s(f, "url");
     if url.is_empty() {
@@ -142,7 +152,13 @@ pub fn evaluate(items: &[Value], policy: &Policy, status: Option<&RunStatus>, fa
     }
     counts.failed = failed.len();
     counts.warned = warned.len();
-    let complete = status.is_some_and(|st| st.complete);
+    // A policy category whose analyser was not installed was never scanned.
+    let complete = status.is_some_and(|st| {
+        st.complete
+            && !st.skipped_tools.iter().any(|t| {
+                tool_category(t).is_some_and(|c| policy.fail_on.categories.iter().any(|x| x == c))
+            })
+    });
     let decision = if !complete {
         Decision::Incomplete
     } else if !failed.is_empty() {
@@ -168,6 +184,7 @@ pub fn gate_document(policy: &Policy, r: &GateResult, status: Option<&RunStatus>
         "exit_code": r.exit_code,
         "complete": r.complete,
         "failed_tools": status.map(|st| st.failed_tools.clone()).unwrap_or_default(),
+        "skipped_tools": status.map(|st| st.skipped_tools.clone()).unwrap_or_default(),
         "dry_run": status.is_some_and(|st| st.dry_run),
         "counts": r.counts,
         "failed": r.failed,
@@ -288,6 +305,27 @@ mod tests {
         // findings are still listed so a human can see them
         let r = evaluate(&[item("opengrep", "HIGH", "", "TRUE_POSITIVE")], &policy(), None, false);
         assert_eq!((r.decision, r.failed.len()), (Decision::Incomplete, 1));
+    }
+    #[test]
+    fn missing_analyser_for_a_policy_category_is_incomplete() {
+        let mut st = done();
+        st.skipped_tools = vec!["gitleaks".into()];
+        let r = evaluate(&[], &policy(), Some(&st), false); // default: all categories
+        assert_eq!((r.decision, r.exit_code, r.complete), (Decision::Incomplete, 3, false));
+        let sast_only = parse_policy("version: 1\nfail_on:\n  severity: [HIGH]\n  categories: [SAST]\n").unwrap();
+        let r = evaluate(&[], &sast_only, Some(&st), false);
+        assert_eq!((r.decision, r.complete), (Decision::Pass, true));
+        st.skipped_tools = vec!["opengrep".into()];
+        assert_eq!(evaluate(&[], &sast_only, Some(&st), false).decision, Decision::Incomplete);
+    }
+    #[test]
+    fn gate_document_lists_skipped_tools() {
+        let mut st = done();
+        st.skipped_tools = vec!["trivy".into()];
+        let r = evaluate(&[], &policy(), Some(&st), false);
+        let doc = gate_document(&policy(), &r, Some(&st), "t");
+        assert_eq!(doc["skipped_tools"], json!(["trivy"]));
+        assert_eq!(gate_document(&policy(), &r, None, "t")["skipped_tools"], json!([]));
     }
     #[test]
     fn category_filter_excludes_findings() {

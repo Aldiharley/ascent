@@ -84,6 +84,7 @@ export function PolicyGate() {
           <div className="policy-why">
             {g.dry_run ? "This was a dry run: no scanners ran. " : ""}
             {g.failed_tools && g.failed_tools.length > 0 ? `Scanners that failed: ${g.failed_tools.join(", ")}. ` : ""}
+            {g.skipped_tools && g.skipped_tools.length > 0 ? `Analysers not installed: ${g.skipped_tools.join(", ")}. ` : ""}
             An incomplete scan never passes the gate.
           </div>
         )}

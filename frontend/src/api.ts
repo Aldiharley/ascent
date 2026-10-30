@@ -284,6 +284,8 @@ export interface GateReport {
   complete: boolean;
   dry_run?: boolean;
   failed_tools?: string[];
+  // Analysers that were not installed; one covering a policy category makes the run INCOMPLETE.
+  skipped_tools?: string[];
   counts: { evaluated: number; failed: number; warned: number; demoted_fp: number };
   failed: GateEntryView[];
   warned: GateEntryView[];
@@ -306,6 +308,7 @@ export async function getGate(): Promise<GateReport | null> {
   const policy = isObject(body.policy) ? body.policy : {};
   const counts = isObject(body.counts) ? body.counts : {};
   const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((t): t is string => typeof t === "string") : []);
   return {
     policy: {
       name: typeof policy.name === "string" ? policy.name : "",
@@ -315,7 +318,8 @@ export async function getGate(): Promise<GateReport | null> {
     exit_code: num(body.exit_code),
     complete: body.complete === true,
     dry_run: body.dry_run === true,
-    failed_tools: Array.isArray(body.failed_tools) ? body.failed_tools.filter((t): t is string => typeof t === "string") : [],
+    failed_tools: strings(body.failed_tools),
+    skipped_tools: strings(body.skipped_tools),
     counts: {
       evaluated: num(counts.evaluated),
       failed: num(counts.failed),

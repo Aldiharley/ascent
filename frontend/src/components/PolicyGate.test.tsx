@@ -47,6 +47,25 @@ test("INCOMPLETE explains why it cannot pass", async () => {
   expect(screen.getByText(/opengrep/)).toBeInTheDocument();
 });
 
+test("INCOMPLETE names analysers that were not installed", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    json(report({ decision: "INCOMPLETE", exit_code: 3, complete: false, failed: [],
+                  skipped_tools: ["gitleaks", "trivy"] })),
+  );
+  render(<PolicyGate />);
+  expect(await screen.findByText("INCOMPLETE")).toBeInTheDocument();
+  expect(screen.getByText(/Analysers not installed: gitleaks, trivy\./)).toBeInTheDocument();
+});
+
+test("INCOMPLETE without skipped_tools says nothing about analysers", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    json(report({ decision: "INCOMPLETE", exit_code: 3, complete: false, failed: [], skipped_tools: "bogus" })),
+  );
+  render(<PolicyGate />);
+  expect(await screen.findByText("INCOMPLETE")).toBeInTheDocument();
+  expect(screen.queryByText(/Analysers not installed/)).toBeNull();
+});
+
 test("no gate yet shows how to enable one", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(null));
   render(<PolicyGate />);
