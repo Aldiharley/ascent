@@ -108,6 +108,7 @@ pub fn run_pipeline(
     };
     let report_path = Path::new(out_dir).join("report.md");
     std::fs::write(&report_path, to_markdown(&items, &eng.name))?;
+    crate::sarif::write_sarif(out_dir, &crate::sarif::item_values(&items), eff_source.as_deref())?;
     let complete = !dry_run && failed_tools.is_empty();
     write_run_status(out_dir, &RunStatus { complete, dry_run, failed_tools: failed_tools.clone(),
         skipped_tools, finished_at: now_ts() })?;
@@ -259,6 +260,18 @@ mod tests {
         assert!(s.complete && s.failed_tools.is_empty());
         let st = crate::runstatus::read_run_status(&dir).unwrap();
         assert!(st.complete && !st.dry_run && !st.finished_at.is_empty());
+    }
+
+    #[test]
+    fn pipeline_writes_sarif() {
+        let dir = unique_dir();
+        run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
+        let read = |n: &str| -> Value {
+            serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(&dir).join(n)).unwrap()).unwrap()
+        };
+        assert_eq!(read("ascent.sarif")["version"], "2.1.0");
+        // FakeRun's nuclei finding is a URL finding: it lands in the DAST file
+        assert_eq!(read("ascent-dast.sarif")["runs"][0]["results"].as_array().unwrap().len(), 1);
     }
 
     /// Every DAST tool call errors (as a crashed scanner now does); version gate passes.

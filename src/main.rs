@@ -9,6 +9,7 @@ mod pipeline;
 mod report;
 mod runner;
 mod runstatus;
+mod sarif;
 mod scope;
 mod stages;
 mod triage;
