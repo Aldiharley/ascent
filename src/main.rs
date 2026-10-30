@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 mod exploit;
+mod gate;
 mod gatesio;
 mod models;
 mod normalise;
