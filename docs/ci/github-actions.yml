@@ -1,6 +1,11 @@
 # Example: gate a pull request on Ascent's policy and publish SARIF to GitHub
-# code scanning. Assumes opengrep, gitleaks and trivy are installed on the runner
-# and that `engagement.yaml` scopes only what this repository owns.
+# code scanning. The repository under test is checked out to `app/`; Ascent and
+# its sibling `crux` crate (a path dependency, `../crux`) are checked out side by
+# side and built from source. `app/engagement.yaml` must scope only what this
+# repository owns, and `app/ascent-policy.yaml` holds the gate policy.
+#
+# Adjust the `repository:` values below if you use a fork or a mirror of Ascent
+# or crux.
 name: ascent
 on: [pull_request]
 permissions:
@@ -10,21 +15,65 @@ jobs:
   ascent:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the code under test
+        uses: actions/checkout@v4
+        with:
+          path: app
+      - name: Check out Ascent
+        uses: actions/checkout@v4
+        with:
+          repository: Aldiharley/ascent   # adjust to your Ascent repository
+          path: ascent
+      - name: Check out crux (Ascent's sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Aldiharley/crux     # adjust to your crux repository
+          path: crux
       - name: Build Ascent
+        working-directory: ascent
         run: cargo build --release
+
+      # SAST analysers. Each one that is missing makes the gate INCOMPLETE (exit 3)
+      # when its category (SAST / SECRETS / SCA) is in the policy's fail_on.categories.
+      - name: Install opengrep (SAST)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
+          # The script prints where it installed opengrep; adjust this if it differs.
+          echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install gitleaks (SECRETS)
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install trivy (SCA)
+        uses: aquasecurity/setup-trivy@v0.2.0
+      # nuclei (and ProjectDiscovery subfinder/httpx/katana) are only needed when
+      # the engagement has DAST scope (`hosts` or `urls`). A source-only engagement
+      # needs none of them.
+
       - name: Scan, triage and gate
-        id: ascent
         # exit 0 pass/conditional, 1 policy fail, 2 config error,
         # 3 incomplete scan, 4 audit-chain integrity failure
-        run: ./target/release/ascent run --engagement engagement.yaml --source . --out out --policy ascent-policy.yaml
+        run: >
+          ./ascent/target/release/ascent run
+          --engagement app/engagement.yaml
+          --source app
+          --out out
+          --policy app/ascent-policy.yaml
       - name: Upload SARIF (even when the gate fails)
-        if: always()
+        # Skipped when the run stopped before writing SARIF (e.g. exit 2 or 4).
+        # No `category:` input: each SARIF run carries its own automationDetails.id
+        # (ascent/sast/, ascent/secrets/, ascent/sca/).
+        if: always() && hashFiles('out/ascent.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: out/ascent.sarif
-          category: ascent
+          checkout_path: ${{ github.workspace }}/app
       - name: Keep the evidence
+        # out/ascent-dast.sarif is kept here as an artifact only: GitHub code
+        # scanning cannot fingerprint URL locations, so it is not uploaded.
         if: always()
         uses: actions/upload-artifact@v4
         with:

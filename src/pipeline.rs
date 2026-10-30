@@ -5,7 +5,7 @@ use crate::runstatus::{now_ts, write_run_status, RunStatus};
 use crate::scope::Engagement;
 use crate::stages::{
     enumerate::enumerate_surface,
-    recon::recon,
+    recon::{ensure_httpx_identity, recon},
     sast::{is_within, sast},
     scan::{ensure_nuclei_version, scan},
 };
@@ -114,11 +114,15 @@ pub fn run_pipeline(
     // leave a previous run's "complete" behind for the policy gate to trust.
     write_run_status(out_dir, &RunStatus { complete: false, dry_run, failed_tools: vec![],
         skipped_tools: vec![], finished_at: String::new() })?;
-    // In dry-run the runner returns empty output, which would always fail the version gate.
-    if !dry_run {
+    let root = eng.hosts.first().cloned().unwrap_or_default();
+    // In dry-run the runner returns empty output, which would always fail these checks.
+    // nuclei is needed only with DAST scope; httpx only when recon runs.
+    if !dry_run && (!eng.hosts.is_empty() || !eng.urls.is_empty()) {
         ensure_nuclei_version(runner)?;
     }
-    let root = eng.hosts.first().cloned().unwrap_or_default();
+    if !dry_run && !root.is_empty() {
+        ensure_httpx_identity(runner)?;
+    }
     let mut urls = if !root.is_empty() {
         recon(runner, &root)?
     } else {
@@ -232,11 +236,19 @@ mod tests {
         }
         fn run_text(
             &self,
-            _t: &str,
+            t: &str,
             _a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok("nuclei v3.10.1".into())
+            Ok(version_of(t))
+        }
+    }
+
+    /// `-version` output of the real ProjectDiscovery tools.
+    fn version_of(tool: &str) -> String {
+        match tool {
+            "httpx" => "projectdiscovery.io\n[INF] Current Version: v1.12.0".into(),
+            _ => "nuclei v3.10.1".into(),
         }
     }
 
@@ -332,12 +344,57 @@ mod tests {
         }
         fn run_text(
             &self,
-            _t: &str,
+            t: &str,
             _a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok("nuclei v3.10.1".into())
+            Ok(version_of(t))
         }
+    }
+
+    #[test]
+    fn source_only_engagement_needs_no_nuclei() {
+        let src = std::path::PathBuf::from(unique_dir());
+        let out = unique_dir();
+        let mut eng = sast_engagement(&src);
+        eng.urls = vec![];
+        // EmptyRun's run_text returns "": the nuclei version gate would fail if it ran.
+        let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None).unwrap();
+        assert_eq!(s.findings, 0);
+        assert!(s.complete);
+    }
+
+    /// A pip-installed Python `httpx` shadowing ProjectDiscovery httpx on PATH.
+    struct PyHttpxRun;
+    impl Runner for PyHttpxRun {
+        fn run_json(
+            &self,
+            t: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            FakeRun.run_json(t, a, g)
+        }
+        fn run_text(
+            &self,
+            t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(match t {
+                "httpx" => "Usage: httpx [OPTIONS] URL".into(),
+                _ => version_of(t),
+            })
+        }
+    }
+
+    #[test]
+    fn recon_refuses_a_non_projectdiscovery_httpx() {
+        let dir = unique_dir();
+        let e = run_pipeline(&engagement(), &PyHttpxRun, &FakeTri, &dir, false, None).err().unwrap();
+        assert!(e.to_string().contains("not ProjectDiscovery httpx"), "{e}");
+        // dry-run skips the identity check (the runner returns "")
+        assert!(run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).is_ok());
     }
 
     #[test]
