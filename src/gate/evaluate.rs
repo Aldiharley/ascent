@@ -2,7 +2,7 @@
 //! PASS / CONDITIONAL / FAIL / INCOMPLETE, written to gate.json and chained
 //! into audit.jsonl so the verdict is tamper-evident.
 use super::fingerprint::{fingerprints, kind};
-use super::policy::{policy_hash, FpMode, Policy};
+use super::policy::{policy_hash, FpMode, Policy, SEVERITIES};
 use crate::runstatus::RunStatus;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -50,8 +50,9 @@ fn s(f: &Value, k: &str) -> String {
     f[k].as_str().unwrap_or("").to_string()
 }
 
-/// `SECRETS` for gitleaks findings, else the finding's own category (upper-cased),
-/// falling back to the fingerprint kind.
+/// `SECRETS` for gitleaks findings and credential-CWE findings (CWE-798/259/321,
+/// as classified by `fingerprint::kind`), else the finding's own category
+/// (upper-cased), falling back to the fingerprint kind.
 pub fn category_of(f: &Value) -> String {
     if kind(f) == "secret" {
         return "SECRETS".into();
@@ -94,13 +95,27 @@ pub fn evaluate(items: &[Value], policy: &Policy, status: Option<&RunStatus>, fa
     let mut counts = Counts::default();
     for (i, it) in items.iter().enumerate() {
         let f = &findings[i];
+        if !it["finding"].is_object() {
+            // Fail closed: a malformed entry must never silently disappear.
+            counts.evaluated += 1;
+            failed.push(GateEntry {
+                fingerprint: fps[i].clone(),
+                rule_id: String::new(),
+                severity: String::new(),
+                category: String::new(),
+                title: "malformed queue entry".into(),
+                locus: String::new(),
+                reason: "malformed queue entry: no finding object".into(),
+            });
+            continue;
+        }
         let category = category_of(f);
         if !policy.fail_on.categories.contains(&category) {
             continue;
         }
         counts.evaluated += 1;
         let sev = s(f, "severity").to_ascii_uppercase();
-        let cwe = s(f, "cwe").to_ascii_uppercase();
+        let cwe = s(f, "cwe").split(':').next().unwrap_or("").trim().to_ascii_uppercase();
         let entry = |reason: String| GateEntry {
             fingerprint: fps[i].clone(),
             rule_id: s(f, "rule_id"),
@@ -118,6 +133,9 @@ pub fn evaluate(items: &[Value], policy: &Policy, status: Option<&RunStatus>, fa
             } else {
                 failed.push(entry(r));
             }
+        } else if !SEVERITIES.contains(&sev.as_str()) {
+            // Unknown or missing severity (e.g. trivy's UNKNOWN): surface it, never drop it.
+            warned.push(entry(format!("unrecognised severity {sev:?}: review manually")));
         } else if let Some(r) = matches(&sev, &cwe, &policy.warn_on.severity, &policy.warn_on.cwe, "warn_on") {
             warned.push(entry(r));
         }
@@ -271,6 +289,29 @@ mod tests {
         assert_eq!((r.decision, r.counts.evaluated), (Decision::Pass, 0));
     }
 
+    #[test]
+    fn malformed_entry_fails_closed() {
+        let bad = json!({"verdict": "TRUE_POSITIVE"}); // no finding object
+        let r = evaluate(&[bad], &policy(), Some(&done()), false);
+        assert_eq!(r.decision, Decision::Fail);
+        assert_eq!(r.failed[0].reason, "malformed queue entry: no finding object");
+        assert_eq!(r.counts.evaluated, 1);
+    }
+    #[test]
+    fn unrecognised_severity_warns_instead_of_vanishing() {
+        let r = evaluate(&[item("trivy", "UNKNOWN", "", "TRUE_POSITIVE")], &policy(), Some(&done()), false);
+        assert_eq!(r.decision, Decision::Conditional);
+        assert!(r.warned[0].reason.contains("unrecognised severity"), "{}", r.warned[0].reason);
+        // a fail_on CWE still fails even with an unrecognised severity
+        let r = evaluate(&[item("opengrep", "UNKNOWN", "CWE-798", "TRUE_POSITIVE")], &policy(), Some(&done()), false);
+        assert_eq!(r.decision, Decision::Fail);
+    }
+    #[test]
+    fn cwe_with_a_description_suffix_still_matches() {
+        let r = evaluate(&[item("opengrep", "LOW", "CWE-798: Use of Hard-coded Credentials", "TRUE_POSITIVE")], &policy(), Some(&done()), false);
+        assert_eq!(r.decision, Decision::Fail);
+    }
+
     fn tmp() -> String {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
@@ -301,12 +342,15 @@ mod tests {
     #[test]
     fn broken_chain_refuses_and_writes_no_gate() {
         let dir = tmp();
-        std::fs::write(std::path::Path::new(&dir).join("audit.jsonl"), "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n").unwrap();
+        let audit = std::path::Path::new(&dir).join("audit.jsonl");
+        std::fs::write(&audit, "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n").unwrap();
+        let before = std::fs::read(&audit).unwrap();
         let p = policy();
         let r = evaluate(&[], &p, Some(&done()), false);
         let doc = gate_document(&p, &r, Some(&done()), "t");
         assert!(matches!(write_gate(&dir, &doc), Err(WriteGateError::Integrity(_))));
         assert!(!std::path::Path::new(&dir).join("gate.json").exists());
+        assert_eq!(std::fs::read(&audit).unwrap(), before, "audit log must not be appended to");
     }
     #[test]
     fn read_queue_requires_an_array() {
