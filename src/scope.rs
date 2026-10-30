@@ -630,11 +630,31 @@ mod tests {
         assert!(!e.name.is_empty());
         assert!(!e.starts.is_empty() && !e.ends.is_empty());
         let g = ScopeGuard::new(&e);
-        assert!(g.in_scope("localhost"));
         assert!(g.in_scope("127.0.0.1"));
-        assert!(g.in_scope("http://localhost:3000/"));
+        assert!(g.in_scope("http://127.0.0.1:3000/"));
+        // ProjectDiscovery tools may not resolve `localhost`: the sample avoids it
+        assert!(!g.in_scope("localhost"));
         assert!(!g.in_scope("example.com"));
         assert!(!g.in_scope("8.8.8.8"));
+    }
+
+    #[test]
+    fn every_sample_engagement_loads_and_avoids_localhost() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/samples");
+        let mut n = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if !(name.starts_with("engagement") && name.ends_with(".yaml")) {
+                continue;
+            }
+            let e = load_engagement(p.to_str().unwrap()).unwrap_or_else(|err| panic!("{name}: {err}"));
+            let all = e.hosts.iter().chain(&e.urls).map(|s| s.to_ascii_lowercase());
+            assert!(all.into_iter().all(|t| !t.contains("localhost")), "{name} targets localhost");
+            assert!(!e.urls.is_empty() && e.urls.iter().all(|u| ScopeGuard::new(&e).in_scope(u)), "{name}");
+            n += 1;
+        }
+        assert!(n >= 2, "expected the example and juice-shop samples, found {n}");
     }
 
     #[test]

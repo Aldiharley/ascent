@@ -35,6 +35,24 @@ function parseTargets(text: string): string[] {
     .filter((l) => l !== "");
 }
 
+/** The lower-cased host of a raw target line (URL, host[:port][/path], or IP). */
+function hostOf(target: string): string {
+  if (target.includes("://")) {
+    try {
+      return new URL(target).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+  const authority = target.split(/[/?#]/)[0];
+  return (authority.startsWith("[") ? authority : authority.split(":")[0]).toLowerCase();
+}
+
+/** True when any target names `localhost`, which ProjectDiscovery tools may not resolve. */
+function mentionsLocalhost(text: string): boolean {
+  return parseTargets(text).some((t) => hostOf(t) === "localhost");
+}
+
 export function NewScan({ onCreated }: NewScanProps = {}) {
   const [name, setName] = useState("");
   const [targetsText, setTargetsText] = useState("");
@@ -115,9 +133,14 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
             id="ns-targets"
             value={targetsText}
             onChange={(e) => setTargetsText(e.target.value)}
-            placeholder={"localhost\n127.0.0.0/8\nhttp://localhost:3000/"}
+            placeholder={"127.0.0.1\n127.0.0.0/8\nhttp://127.0.0.1:3000/"}
             spellCheck={false}
           />
+          {mentionsLocalhost(targetsText) && (
+            <span className="hint" role="note">
+              ProjectDiscovery tools may not resolve localhost; prefer 127.0.0.1
+            </span>
+          )}
         </div>
 
         <div className="fld">

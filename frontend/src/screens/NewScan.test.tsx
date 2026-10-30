@@ -160,11 +160,46 @@ test("there is no input that accepts the auth header value itself", () => {
 
 test("a dast validation error from the backend is surfaced", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-    json({ ok: false, error: "dast.auth.value_env \"x\" must look like ASCENT_DAST_AUTH", field: "dast" }, 422),
+    json(
+      {
+        ok: false,
+        error: "dast.auth.value_env must be an environment variable name like ASCENT_DAST_AUTH ([A-Z_][A-Z0-9_]*)",
+        field: "dast",
+      },
+      422,
+    ),
   );
   render(<NewScan />);
   fireEvent.change(screen.getByLabelText("Engagement name"), { target: { value: "Acme" } });
   fireEvent.change(screen.getByLabelText("Targets"), { target: { value: "example.com" } });
   fireEvent.click(screen.getByRole("button", { name: /create scan/i }));
   await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/value_env/));
+});
+
+test("the targets placeholder suggests 127.0.0.1, not localhost", () => {
+  render(<NewScan />);
+  const ta = screen.getByLabelText("Targets") as HTMLTextAreaElement;
+  expect(ta.placeholder).toContain("http://127.0.0.1:3000/");
+  expect(ta.placeholder).not.toMatch(/localhost/);
+});
+
+test("a localhost target shows a non-blocking resolver hint", async () => {
+  const spy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(created()));
+  render(<NewScan />);
+  const hint = /ProjectDiscovery tools may not resolve localhost; prefer 127\.0\.0\.1/;
+  const targets = screen.getByLabelText("Targets");
+  expect(screen.queryByText(hint)).toBeNull();
+  for (const value of ["example.com\nhttp://LOCALHOST:3000/", "localhost", "localhost:8080/x"]) {
+    fireEvent.change(targets, { target: { value } });
+    expect(screen.getByText(hint)).toBeInTheDocument();
+  }
+  fireEvent.change(targets, { target: { value: "http://127.0.0.1:3000/\nlocalhost.example.com" } });
+  expect(screen.queryByText(hint)).toBeNull();
+
+  // non-blocking: the scan is still created
+  fireEvent.change(targets, { target: { value: "http://localhost:3000/" } });
+  fireEvent.change(screen.getByLabelText("Engagement name"), { target: { value: "Acme" } });
+  fireEvent.click(screen.getByRole("button", { name: /create scan/i }));
+  expect(await screen.findByText(/Scan defined: Acme/)).toBeInTheDocument();
+  expect(spy).toHaveBeenCalledTimes(1);
 });
