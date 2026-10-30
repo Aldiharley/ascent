@@ -303,16 +303,19 @@ pub fn coverage(
 }
 
 /// Active runs two passes that can return the same hit; keep the first of each
-/// (`template-id`, `matched-at`) pair.
+/// (`template-id`, `matcher-name`, `matched-at`, `fuzzing_parameter`) key (missing
+/// fields count as ""). The template pass runs first, so its verifiable copy wins.
 fn dedupe_rows(rows: Vec<Value>) -> Vec<Value> {
-    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut seen: BTreeSet<[String; 4]> = BTreeSet::new();
+    let f = |r: &Value, k: &str| r[k].as_str().unwrap_or("").to_string();
     rows.into_iter()
         .filter(|r| {
-            let key = (
-                r["template-id"].as_str().unwrap_or("").to_string(),
-                r["matched-at"].as_str().unwrap_or("").to_string(),
-            );
-            seen.insert(key)
+            seen.insert([
+                f(r, "template-id"),
+                f(r, "matcher-name"),
+                f(r, "matched-at"),
+                f(r, "fuzzing_parameter"),
+            ])
         })
         .collect()
 }
@@ -407,10 +410,19 @@ pub fn run_dast(
     let mut rows = Vec::new();
     if !surface.is_empty() {
         for pass in nuclei_passes(eng.dast.profile) {
+            // Tag the `-dast` fuzzing pass's rows so they normalise as `nuclei-dast`.
+            let fuzz_pass = pass.iter().any(|a| a == "-dast");
             let mut args = common_nuclei_args();
             args.extend(pass);
             args.extend(headers.iter().cloned());
-            rows.extend(scan_rows(runner, &surface, &args).map_err(scrubbed)?);
+            for mut r in scan_rows(runner, &surface, &args).map_err(scrubbed)? {
+                if fuzz_pass {
+                    if let Some(o) = r.as_object_mut() {
+                        o.insert("ascent-pass".into(), json!("dast"));
+                    }
+                }
+                rows.push(r);
+            }
         }
     }
     let rows = scrub_rows(dedupe_rows(rows), secret);
@@ -465,6 +477,10 @@ mod tests {
         subs: Vec<&'static str>,
         /// The URL list file (`-l`) of each nuclei call, read while it exists.
         nuclei_lists: RefCell<Vec<Vec<String>>>,
+        /// When set, the template pass returns these rows instead of the default one.
+        template_rows: Option<Vec<Value>>,
+        /// When set, the `-dast` pass returns these rows instead.
+        dast_rows: Option<Vec<Value>>,
     }
     impl Fake {
         fn new() -> Self {
@@ -477,6 +493,8 @@ mod tests {
                 httpx_version: "projectdiscovery.io\n[INF] Current Version: v1.12.0",
                 subs: vec![],
                 nuclei_lists: RefCell::new(vec![]),
+                template_rows: None,
+                dast_rows: None,
             }
         }
         fn count(&self, tool: &str) -> usize {
@@ -528,6 +546,11 @@ mod tests {
                     }
                     if let Some(e) = self.nuclei_err {
                         return Err(e.into());
+                    }
+                    let is_dast = args.iter().any(|a| a == "-dast");
+                    match (is_dast, &self.dast_rows, &self.template_rows) {
+                        (true, Some(r), _) | (false, _, Some(r)) => return Ok(r.clone()),
+                        _ => {}
                     }
                     let row = json!({
                         "template-id":"t1","matched-at":"http://localhost:3000/rest/products",
@@ -885,6 +908,41 @@ mod tests {
         let out = run_dast(&e, &f, None, true).unwrap().unwrap();
         assert_eq!(f.count("nuclei"), 2);
         assert_eq!(out.findings.len(), 1);
+        // the template-pass copy is kept, so the hit stays verifiable
+        assert_eq!(out.findings[0].tool, "nuclei");
+    }
+
+    fn hit(matcher: Option<&str>, fuzz: Option<&str>) -> Value {
+        let mut r = json!({"template-id":"t1","matched-at":"http://localhost:3000/rest/products",
+            "info":{"name":"n","severity":"high","tags":["xss"]}});
+        if let Some(m) = matcher {
+            r["matcher-name"] = json!(m);
+        }
+        if let Some(p) = fuzz {
+            r["fuzzing_parameter"] = json!(p);
+        }
+        r
+    }
+
+    #[test]
+    fn multi_matcher_template_yields_one_finding_per_matcher() {
+        let mut f = Fake::new();
+        f.template_rows = Some(vec![hit(Some("a"), None), hit(Some("b"), None), hit(Some("a"), None)]);
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(out.findings.len(), 2);
+        assert_ne!(out.findings[0].id, out.findings[1].id);
+    }
+
+    #[test]
+    fn dast_pass_rows_are_nuclei_dast_and_differ_by_fuzzing_parameter() {
+        let mut f = Fake::new();
+        f.template_rows = Some(vec![]);
+        f.dast_rows = Some(vec![hit(None, Some("q")), hit(None, Some("id")), hit(None, Some("q"))]);
+        let mut e = eng();
+        e.dast.profile = DastProfile::Active;
+        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        assert_eq!(out.findings.len(), 2);
+        assert!(out.findings.iter().all(|x| x.tool == "nuclei-dast"), "{:?}", out.findings);
     }
 
     #[test]

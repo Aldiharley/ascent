@@ -10,6 +10,9 @@ fn cwe_of(info: &Value) -> String {
     }
 }
 
+/// Rows the DAST stage tagged `"ascent-pass": "dast"` (nuclei's `-dast` fuzzing pass)
+/// become tool `nuclei-dast`: they are reported but never proposed for verification.
+/// A template with several matchers yields one finding per `matcher-name`.
 pub fn normalise_nuclei(rows: &[Value]) -> Vec<Finding> {
     rows.iter()
         .map(|r| {
@@ -20,12 +23,18 @@ pub fn normalise_nuclei(rows: &[Value]) -> Vec<Finding> {
                 .unwrap_or("")
                 .to_string();
             let rid = r["template-id"].as_str().unwrap_or("nuclei").to_string();
+            let tool = if r["ascent-pass"] == "dast" { "nuclei-dast" } else { "nuclei" };
+            let name = info["name"].as_str().unwrap_or("finding");
+            let (id, title) = match r["matcher-name"].as_str().filter(|m| !m.is_empty()) {
+                Some(m) => (format!("{tool}:{rid}:{m}:{loc}"), format!("{name} ({m})")),
+                None => (format!("{tool}:{rid}:{loc}"), name.to_string()),
+            };
             Finding {
-                id: format!("nuclei:{rid}:{loc}"),
-                tool: "nuclei".into(),
+                id,
+                tool: tool.into(),
                 rule_id: rid,
                 severity: info["severity"].as_str().unwrap_or("info").to_uppercase(),
-                title: info["name"].as_str().unwrap_or("finding").to_string(),
+                title,
                 message: info["description"]
                     .as_str()
                     .unwrap_or("")
@@ -227,6 +236,32 @@ mod tests {
         assert_eq!(out[0].url, "https://app.example.com/ping?ip=1");
         assert_eq!(out[0].cwe, "CWE-78");
         assert_eq!(out[0].to_crux_json()["tool"], "nuclei");
+    }
+
+    #[test]
+    fn nuclei_matcher_name_is_part_of_id_and_title() {
+        let row = |m: &str| {
+            serde_json::json!({"template-id":"exposed-panels","matcher-name":m,
+                "info":{"name":"Panel","severity":"info"},"matched-at":"http://h/"})
+        };
+        let out = normalise_nuclei(&[row("grafana"), row("kibana")]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, "nuclei:exposed-panels:grafana:http://h/");
+        assert_eq!(out[0].title, "Panel (grafana)");
+        assert_ne!(out[0].id, out[1].id);
+        // without a matcher name nothing changes
+        let plain = normalise_nuclei(&[serde_json::json!({"template-id":"t","info":{"name":"N"},"matched-at":"http://h/"})]);
+        assert_eq!((plain[0].id.as_str(), plain[0].title.as_str()), ("nuclei:t:http://h/", "N"));
+    }
+
+    #[test]
+    fn rows_from_the_dast_pass_are_tool_nuclei_dast() {
+        let r = serde_json::json!({"template-id":"t","info":{"name":"N"},"matched-at":"http://h/?q=1",
+            "ascent-pass":"dast"});
+        let out = normalise_nuclei(&[r]);
+        assert_eq!(out[0].tool, "nuclei-dast");
+        assert_eq!(out[0].category, "DAST");
+        assert!(out[0].id.starts_with("nuclei-dast:"), "{}", out[0].id);
     }
 }
 
