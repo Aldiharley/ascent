@@ -161,22 +161,53 @@
 .newscan-grid{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:var(--s-5);align-items:start}
 @media (max-width:1023px){.newscan-grid{grid-template-columns:minmax(0,1fr)}}
 .newscan-form{display:flex;flex-direction:column;gap:var(--s-5)}
+.newscan-submit{align-self:flex-start}
+.fieldset .hint{margin:0 0 var(--s-4)}
 .fieldset-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--s-4)}
 @media (max-width:1023px){.fieldset-grid{grid-template-columns:1fr}}
+.callout-body{flex:1;min-width:0}
+.callout-body p{margin:0}
+.chip-list{list-style:none;margin:var(--s-2) 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.chip-list code{font-weight:500}
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s-4)}
 .step{display:flex;gap:var(--s-3);align-items:flex-start}
+.step p{margin:3px 0 0;font:var(--t-body);color:var(--ink-2)}
+.step p b{color:var(--ink)}
+.step code{font:var(--t-mono);background:var(--surface-sunken);border-radius:6px;padding:1px 6px;color:var(--ink)}
 .step-num{width:32px;height:32px;border-radius:50%;flex:none;display:grid;place-items:center;
   background:var(--badge-teal);box-shadow:var(--shadow-clay);color:#fff;font:800 15px/1 var(--font-display)}
-.ok-card{background:var(--ok-bg);border:1px solid var(--ok-border);border-radius:var(--r-xl);padding:var(--s-5) var(--s-6)}
-.ok-card h3{color:var(--ok-ink)}
+.guidance-foot{display:flex;align-items:center;gap:var(--s-4);margin-top:var(--s-6);padding-top:var(--s-5);
+  border-top:1px solid var(--border-soft)}
+.guidance-foot p{font:var(--t-body-strong);color:var(--ink-2)}
+.ok-card{scroll-margin-top:76px;   /* clears the 60px phone top bar when the card is scrolled to */
+  display:flex;flex-direction:column;gap:var(--s-4);
+  background:var(--ok-bg);border:1px solid var(--ok-border);border-radius:var(--r-xl);padding:var(--s-5) var(--s-6)}
+.ok-card h3{color:var(--ok-ink);margin:0;overflow-wrap:anywhere}
+.ok-head{display:flex;align-items:center;gap:var(--s-3)}
+.ok-head .ibadge{width:40px;height:40px;border-radius:14px}
+.ok-head .ibadge svg{width:20px;height:20px}
+.ok-head h3:focus{outline:none}   /* focused by script on success; the card itself is the cue */
+.ok-card .hint{color:var(--ink-2)}
+.ok-card .hint code{font:var(--t-mono);background:rgba(255,255,255,.7);border-radius:6px;padding:1px 6px}
+.scope-list{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;font:var(--t-small);color:var(--ink-2)}
+.scope-list b{color:var(--ink)}
+.ok-card .tag{background:rgba(255,255,255,.7)}
+.ok-run{display:flex;flex-direction:column;gap:var(--s-2)}
+.cmd-row{display:flex;gap:var(--s-2);align-items:flex-start}
+.cmd-row .cmd{flex:1;min-width:0}
+.cmd-row .btn{flex:none}
+@media (max-width:640px){.cmd-row{flex-direction:column}.cmd-row .btn{align-self:flex-start}}
 
 /* ---------- Report (3.5) ---------- */
 .report-layout{display:grid;grid-template-columns:minmax(0,820px) 220px;gap:var(--s-6);align-items:start}
 @media (max-width:1279px){.report-layout{grid-template-columns:minmax(0,1fr)}.report-index{display:none}}
 .report-index{position:sticky;top:16px;font-size:13.5px}
+.report-index.card{padding:var(--s-4) var(--s-4) var(--s-3)}
 .report-index .idx-title{font:var(--t-micro);text-transform:uppercase;letter-spacing:var(--tracking-caps);color:var(--ink);margin-bottom:var(--s-2)}
 .report-index a{display:block;padding:4px 0 4px 12px;color:var(--ink);text-decoration:none;
-  border-left:3px solid transparent;font-size:13.5px}
-.report-index a[aria-current="true"]{border-left-color:var(--teal-500)}
+  border-left:3px solid transparent;font-size:13.5px;overflow-wrap:anywhere}
+.report-index a:hover{text-decoration:underline;text-underline-offset:3px}
+.report-index a[aria-current]{border-left-color:var(--teal-500);font-weight:700}
 .report{overflow-wrap:anywhere}
 .report.card{padding:40px 48px;background:rgba(255,255,255,.96)}
 @media (max-width:640px){.report.card{padding:24px 20px}}
@@ -185,6 +216,13 @@
 .report h2:first-of-type{border-top:0;padding-top:0}
 .report h3{font:var(--t-h3);margin:20px 0 8px}
 .report p,.report li{font:400 15px/1.7 var(--font-ui)}
+.report p{margin:0 0 12px}
+.report ul,.report ol{margin:0 0 12px;padding-left:24px}
+.report li + li{margin-top:4px}
+.report hr{border:0;border-top:1px solid var(--border-soft);margin:24px 0}
+.report hr + h2{border-top:0;padding-top:0;margin-top:0}   /* the rule above it is already the divider */
+.report > :first-child{margin-top:0}
+.report pre code{font:var(--t-mono)}
 .report a{color:var(--link);font-weight:600;text-underline-offset:3px}
 .report code{font:var(--t-mono);background:var(--surface-sunken);border-radius:6px;padding:1px 6px}
 .report pre{background:var(--code-bg);border-radius:var(--r-md);padding:14px 16px;overflow:auto}
@@ -202,6 +240,12 @@
 .feed--page{max-height:calc(100vh - 280px)}
 .feed--compact{max-height:none}
 @media (max-width:640px){.feed--page{max-height:none}}
+.chain-card{display:flex;align-items:center;gap:var(--s-4);flex-wrap:wrap}
+.chain-count{margin-left:auto;font:var(--t-body);color:var(--ink-2)}
+@media (max-width:640px){
+  /* five filter options do not fit one row: let the well wrap, with a rounded-rectangle shape */
+  .card-head .segs{margin-left:0;flex-wrap:wrap;border-radius:var(--r-lg)}
+}
 .audit-row{display:flex;gap:var(--s-3);position:relative}
 .audit-node{width:28px;height:28px;border-radius:50%;flex:none;display:grid;place-items:center;
   color:#fff;box-shadow:var(--shadow-clay)}

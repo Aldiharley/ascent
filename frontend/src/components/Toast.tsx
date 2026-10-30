@@ -68,9 +68,8 @@ export function ToastView({
   }, [paused, key]);
 
   return (
-    // `gate-toast` only keeps glass.css's stacking override alive until Task 6 deletes that sheet.
     <div
-      className={`toast toast-${toast.kind} gate-toast`}
+      className={`toast toast-${toast.kind}`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onFocus={() => setFocused(true)}

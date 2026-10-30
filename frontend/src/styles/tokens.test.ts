@@ -2,17 +2,20 @@
 // disk. The specifiers are variables so tsc (which has no Node types here)
 // treats the modules as `any`.
 const [FS, URL_MOD] = ["node:fs", "node:url"];
-const { readFileSync } = (await import(/* @vite-ignore */ FS)) as {
+const fsExtra = (await import(/* @vite-ignore */ FS)) as {
   readFileSync(path: string, enc: "utf8"): string;
+  existsSync(path: string): boolean;
 };
+const { readFileSync } = fsExtra;
 const { fileURLToPath } = (await import(/* @vite-ignore */ URL_MOD)) as {
   fileURLToPath(url: string): string;
 };
+/** Absolute path of a file next to this test (`../x` for the src folder). */
+function path(name: string): string {
+  return fileURLToPath(import.meta.url).replace(/tokens\.test\.ts$/, name);
+}
 function load(name: string): string {
-  return readFileSync(
-    fileURLToPath(import.meta.url).replace(/tokens\.test\.ts$/, name),
-    "utf8",
-  );
+  return readFileSync(path(name), "utf8");
 }
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -227,6 +230,44 @@ test("the audit feed caps: page feed is viewport-based, compact feed is uncapped
   expect(rule(screensCss, ".feed")["max-height"]).toBeUndefined();
   expect(rule(screensCss, ".feed--page")["max-height"]).toBe("calc(100vh - 280px)");
   expect(rule(screensCss, ".feed--compact")["max-height"]).toBe("none");
+});
+
+test("the legacy glass sheet is gone: no file, no import, and no module-level reference to it", () => {
+  const { existsSync } = fsExtra;
+  expect(existsSync(path("glass.css"))).toBe(false);
+  const main = readFileSync(path("../main.tsx"), "utf8");
+  expect(main).not.toMatch(/glass/i);
+  // the five sheets that remain load in cascade order, reduced-motion's home (screens.css) last
+  const imports = [...main.matchAll(/import "\.\/styles\/([a-z]+)\.css"/g)].map((m) => m[1]);
+  expect(imports).toEqual(["tokens", "base", "components", "shell", "screens"]);
+});
+
+test("no sheet reads a custom property that only the deleted glass sheet defined", () => {
+  const legacy = [
+    "--muted", "--faint", "--accent", "--stroke", "--stroke-soft", "--glass", "--glass-2",
+    "--shadow", "--radius", "--crit", "--high", "--med", "--ok", "--violet", "--font", "--mono",
+    "--field-1", "--field-2", "--field-3",
+  ];
+  for (const [name, css] of [
+    ["tokens", tokensCss], ["base", baseCss], ["components", componentsCss], ["shell", shellCss], ["screens", screensCss],
+  ] as const) {
+    for (const token of legacy) {
+      expect(css, `${name}.css uses var(${token})`).not.toMatch(new RegExp(`var\\(${token}[,)]`));
+    }
+  }
+});
+
+test("toasts no longer position themselves: the stack in shell.css owns placement", () => {
+  const toast = rule(componentsCss, ".toast");
+  expect(toast.position).toBeUndefined();
+  expect(shellCss).toMatch(/\.toast-stack\{position:fixed/);
+});
+
+test("the New scan and Report layouts are styled: two-column grid, sticky index, active-section bar", () => {
+  expect(rule(screensCss, ".newscan-grid")["grid-template-columns"]).toBe("minmax(0,7fr) minmax(0,5fr)");
+  expect(screensCss).toMatch(/\.report-index\{position:sticky/);
+  expect(screensCss).toMatch(/\.report-index\{display:none\}/); // hidden (and out of the a11y tree) below 1280
+  expect(screensCss).toMatch(/\.report-index a\[aria-current\]\{[^}]*border-left-color:var\(--teal-500\)/);
 });
 
 test("tokens.css defines the typography, radius and layout tokens the spec names", () => {

@@ -136,3 +136,13 @@ test("toast text is rendered as text, not markup", () => {
   expect(container.querySelector(".m b")?.textContent).toBe("<b>x</b>");
   expect(container.querySelector("img")).toBeNull();
 });
+
+test("a toast carries only its own classes: the legacy gate-toast hook is gone", () => {
+  const { container } = render(<Harness />);
+  fire("ok");
+  fire("err");
+  const toasts = Array.from(container.querySelectorAll(".toast"));
+  expect(toasts).toHaveLength(2);
+  for (const t of toasts) expect(t.className).not.toContain("gate-toast");
+  expect(toasts.map((t) => t.className)).toEqual(["toast toast-ok", "toast toast-error"]);
+});

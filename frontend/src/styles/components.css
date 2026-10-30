@@ -251,7 +251,7 @@ button.kpi[aria-pressed="true"]::after{ /* tick in the badge corner (data: URI a
   stroke-linecap:round;stroke-linejoin:round}
 .callout--err{background:var(--err-bg);color:var(--err-ink);border:1px solid var(--err-border);font-weight:600}
 .callout--warn{background:var(--sand-50);color:var(--sand-800);border:1px solid var(--sand-300);border-radius:var(--r-sm)}
-.callout--info{color:var(--ink-2)}
+.callout--info{color:var(--ink-2);padding:2px 0}   /* an info row, not a box */
 
 /* ---------- code / command blocks ---------- */
 .cmd{font:var(--t-mono);color:var(--code-ink);background:var(--code-bg);border:1px solid var(--code-border);

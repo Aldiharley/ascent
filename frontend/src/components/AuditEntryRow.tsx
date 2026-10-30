@@ -6,7 +6,8 @@ export type AuditDensity = "page" | "compact";
 
 const HASH_CHARS = 12;
 
-type Kind = "triage" | "decision" | "policy" | "run";
+export type AuditKind = "triage" | "decision" | "policy" | "run";
+type Kind = AuditKind;
 
 // Glyph and tint per entry kind. A fixed table: nothing here is read from the entry.
 const KINDS: Record<Kind, { cls: string; icon: ReactNode }> = {
@@ -22,7 +23,8 @@ const BY_TYPE: Record<string, Kind> = {
   gate_execution: "run",
 };
 
-function kindOf(entry: AuditEntry): Kind {
+/** Which kind of entry this is; the Audit type filter counts with the same rule the rows draw by. */
+export function kindOf(entry: AuditEntry): AuditKind {
   const t = entry.type;
   // Any other (or unknown) type is a triage entry, as before.
   return typeof t === "string" && Object.hasOwn(BY_TYPE, t) ? BY_TYPE[t] : "triage";
