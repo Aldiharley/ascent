@@ -12,3 +12,8 @@ urls:
 # ISO-8601 with timezone. Stored but not enforced in the MVP.
 starts: "2026-01-01T00:00:00Z"
 ends: "2030-01-01T00:00:00Z"
+# DAST profile: passive | standard | active (default: standard). `active` adds
+# parameter fuzzing; use it only on targets you may actively test. Optional
+# authenticated scanning is described in samples/engagement.juiceshop.yaml.
+dast:
+  profile: standard

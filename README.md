@@ -36,7 +36,7 @@ Prerequisites: a Rust toolchain, Node.js and npm. Crux is a path dependency, so 
 
    It is fine for it to be empty before the first run. It reads results from `out/` (`ASCENT_OUT` changes that).
 
-3. **Define a scan.** Open New Scan, enter the targets you are authorised to test (for example `localhost`, `127.0.0.0/8` and `http://localhost:3000/`) and optionally a source directory for SAST. Ascent validates them and writes an engagement scope file under `engagements/`. This screen only defines scope; it never launches a scan. It shows the exact command to run:
+3. **Define a scan.** Open New Scan, enter the targets you are authorised to test (for example `localhost`, `127.0.0.0/8` and `http://localhost:3000/`) and optionally a source directory for SAST. Pick a DAST profile (passive, standard or active; the default is standard, and `active` adds parameter fuzzing, so use it only on targets you may actively test). For an authenticated scan you can also give an auth header name and the name of the environment variable that holds its value (never the value itself); see [DAST track](#dast-track). Ascent validates the input and writes an engagement scope file under `engagements/`. This screen only defines scope and settings; it never launches a scan. It shows the exact command to run:
 
    | Scope defined, with the command to copy | Ambiguous targets refused, nothing written |
    |---|---|
@@ -48,7 +48,7 @@ Prerequisites: a Rust toolchain, Node.js and npm. Crux is a path dependency, so 
    cargo run -- run --engagement engagements/<name>.yaml --out out --policy samples/ascent-policy.example.yaml
    ```
 
-   The process exit code follows the verdict (see [Policy gate and CI](#policy-gate-and-ci)).
+   The process exit code follows the verdict (see [Policy gate and CI](#policy-gate-and-ci)). With DAST scope the run also prints a `dast:` line (profile, authenticated or not, and how many URLs were seeded, crawled, dropped as out of scope and scanned) and the path of `dast-coverage.json`.
 
 5. **Review in the dashboard.** Refresh <http://127.0.0.1:8787> to see the policy verdict, the triaged findings, the report and the audit log.
 
@@ -102,6 +102,81 @@ cargo run -- run --engagement samples/engagement.example.yaml --out out --source
 SAST findings join the DAST queue and flow through the same triage, `report.md` and audit log. With no hosts or urls in scope, the DAST track is skipped and only the SAST track runs. Findings from gitleaks are redacted: the secret value is never stored.
 
 **Your source never leaves the machine**, and no analyser is ever pointed at a network target (SAST runs locally over files). But note the analyser *subprocesses* make their own outbound calls that Ascent does not gate: opengrep's `--config auto` fetches rules from the opengrep registry (telemetry is disabled with `--metrics=off`), and `trivy fs` updates its vulnerability database from a registry. Neither sends your source or engagement targets anywhere. For an air-gapped or fully governed run, use a pinned local opengrep ruleset and `trivy --skip-db-update --offline-scan` (a planned follow-up; see `docs/followups-sast.md`).
+
+## DAST track
+
+The DAST track tests running web targets with [nuclei](https://github.com/projectdiscovery/nuclei), after ProjectDiscovery httpx probes the hosts and katana crawls them. It runs when the engagement lists `hosts` or `urls`. This section describes what it covers, and what it deliberately does not.
+
+### How the surface is built
+
+- **The whole declared scope is used.** The seed is every host (through recon) plus every URL in the engagement, de-duplicated. Hosts and URLs are no longer alternatives: a URL is scanned even when hosts are also listed.
+- **Recon per host.** Each host is probed with httpx on the default web ports. subfinder runs only for real DNS names (a name with at least one dot that is not an IP literal); `localhost`, other single-label names and IP addresses are probed directly.
+- **Crawl.** katana crawls the seed with `-fs fqdn`, so it stays on the exact hostnames it was given. katana's own default is the whole root domain, which Ascent does not use.
+- **Scope filter.** Seeds and crawl results that the scope guard does not accept are dropped, counted and never sent to a scanner. A crawl that finds links to GitHub or a CDN no longer aborts the run. The counts are printed and stored in `run.json` under `dast`: `seeded`, `crawled`, `out_of_scope_dropped` and `scanned`.
+
+### Profiles
+
+Set the profile in the engagement file (`dast.profile`) or in the New Scan screen. The default is `standard`.
+
+```yaml
+dast:
+  profile: standard   # passive | standard | active
+```
+
+| Profile | nuclei tags | Also excluded | Extra pass |
+|---|---|---|---|
+| `passive` | `tech, misconfig, exposure, headers, cors, cookie, session` | `intrusive, fuzz` | none |
+| `standard` (default) | the passive tags plus `cve, sqli, xss, auth-bypass, jwt, idor, csrf, redirect, ssrf, lfi` | `fuzz` | none |
+| `active` | same as standard | `fuzz` in the first pass | a second `nuclei -dast` pass (parameter-fuzzing templates) over the same surface |
+
+Every pass of every profile uses `-rate-limit 50` (50 requests per second), `-concurrency 10` and `-timeout 10`, and always excludes the tags `dos`, `brute-force` and `default-login`. These exclusions are fixed in code and cannot be changed from the engagement file. `active` sends fuzzing payloads at every parameter it finds, so use it only on targets you are allowed to test actively. Findings from both `active` passes are merged and de-duplicated by template id and matched URL.
+
+### Authenticated scanning
+
+Many findings sit behind a login. Ascent supports one static request header, which covers a bearer token or a session cookie:
+
+```yaml
+dast:
+  auth:
+    header: Authorization          # the header name only
+    value_env: ASCENT_DAST_AUTH    # the environment variable that holds the value
+```
+
+```
+export ASCENT_DAST_AUTH="Bearer <token>"
+ascent run --engagement engagements/<name>.yaml --out out
+```
+
+- The header is sent by both nuclei and katana, so the crawl is authenticated too.
+- The engagement file holds only the header name and the variable name. The value is never written to `run.json`, `queue.json`, `report.md`, `gate.json`, the SARIF files, `dast-coverage.json` or `audit.jsonl`. It is replaced with `***` in the raw scanner results and in DAST error text before anything is written.
+- It fails closed. If auth is configured and the variable is unset, empty or contains a line break, the run exits 2 before any scan starts, rather than silently scanning unauthenticated.
+- **Caveat:** the value is passed to nuclei and katana as a command-line argument, so other users on the same machine can read it from the process list while a scan runs. Use a short-lived token, and do not run an authenticated scan on a shared host.
+- Form-login automation, OAuth flows and token refresh are not supported (see `docs/followups-policy-gate.md`).
+
+### Coverage matrix
+
+A scan that finds nothing is only reassuring if you know what it tested. Every run with DAST scope writes `out/dast-coverage.json` and appends a "DAST coverage" table to `report.md`, which the dashboard's Report screen shows. For each category it states whether it was `tested`, `limited` or `not_tested`, why, and how many raw nuclei results carried one of its tags (counted before triage). If no in-scope URL was actually scanned, every category is `not_tested`, whatever the profile says. A category that needs a higher profile than the one chosen is `not_tested` with the reason "enable the standard profile" (or `active`).
+
+### Mapping to a commercial DAST checklist
+
+The checklist below is the one commercial DAST products such as Veracode DAST are usually compared on. Ascent is a black-box template scanner, not a full application-aware scanner, and the table says where that matters.
+
+| Checklist item | Ascent | Notes |
+|---|---|---|
+| SQL injection | `standard` | nuclei `sqli` templates; `active` adds parameter fuzzing. |
+| Cross-site scripting | `standard` | nuclei `xss` templates; `active` adds parameter fuzzing. |
+| Authentication bypass | `standard` | `auth-bypass` and `jwt` templates. |
+| Authorization flaws (IDOR) | `limited` | Only the generic `idor` templates (12 on nuclei 3.11.1). Most access-control bugs need app-specific logic and two users, which Ascent does not model. |
+| CORS misconfiguration | `passive` and up | `cors` templates. |
+| Security headers | `passive` and up | `headers` templates. |
+| Session management | `passive` and up | `session` and `cookie` templates; `csrf` from `standard`. The template sets are small (8 `session`/`cookie` and 5 `csrf` on nuclei 3.11.1). |
+| Rate limiting | not tested, by design | It needs load generation, and Ascent never floods a target. Reported as `not_tested` in every profile. |
+| SSRF, path traversal, open redirect | `standard` | `ssrf`, `lfi` and `redirect` templates (`active` adds fuzzing). Not part of the usual checklist, covered anyway. |
+| Known CVEs, exposures, misconfiguration | `passive` and up | `tech`, `misconfig`, `exposure`; `cve` from `standard`. |
+| Authenticated scanning | static header | One header from an environment variable. No scripted login. |
+| "Validate exploitability" | human-gated, detect-only re-test | After triage, `--propose` writes a re-check gate that a person approves before anything runs (see [Human-gated verification](#human-gated-verification-phase-5)). It is a detect-only `nuclei -id <id> -u <url>` re-run, not an exploit. Findings from the `active` fuzzing pass cannot be re-checked by this gate. |
+
+Coverage depends on the installed nuclei templates, so the counts differ by version and between machines. Run `nuclei -tl -tags <tag>` to see what is installed locally.
 
 ## Dashboard
 

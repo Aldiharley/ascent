@@ -9,6 +9,16 @@ The policy gate (`--policy`, `ascent gate`), native SARIF 2.1.0 output and the e
 3. **(M4) License findings.** `trivy --scanners license` mapped to a LICENSE category, with SPDX normalisation and policy deny/warn lists.
 4. **(M4) Container images.** `trivy image` scans, scoped by a pinned digest or a registry allow-list so only images the engagement owns are scanned.
 
+## DAST follow-ups
+
+The DAST profiles, authenticated scanning (one static header) and the coverage matrix are done (see the README's DAST track section). Deferred:
+
+1. **Scripted or form login and OAuth.** Authentication today is one static request header whose value comes from an environment variable, which covers bearer tokens and session cookies. Form-login automation, OAuth flows and token refresh are not supported.
+2. **OpenAPI / GraphQL import.** The surface comes from the declared hosts and URLs plus a katana crawl. Importing an API description would let API endpoints that are not linked from a page be tested.
+3. **Headless JS crawl.** katana runs without a headless browser, so routes that exist only in client-side JavaScript are mostly missed.
+4. **Verification allow-list cannot re-check fuzz findings.** The human-gated re-test is limited to `nuclei -id <id> -u <url> -silent -jsonl`. The command has no `-dast` flag and no way to carry fuzzing parameters, so findings from the `active` profile's `-dast` fuzzing pass cannot be re-checked through the current gate. Widening the allow-list is a deliberate safety decision and has not been made.
+5. **Auth header value is visible in argv.** The value is passed to nuclei and katana as a `-H` argument, so other local users can read it from the process list while a scan runs. It is scrubbed from every output Ascent writes. A fix needs a way to hand the header to the scanners that keeps the value out of argv.
+
 ## Verify early
 
 - opengrep exit codes were verified on 2026-10-30: 0 with findings, 2 on error. Re-check on tool upgrades, since the gate treats a failed scanner as INCOMPLETE.
