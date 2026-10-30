@@ -151,6 +151,36 @@ fn bad_source_exits_2() {
     assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
     assert!(!out.join("queue.json").exists(), "nothing ran");
 }
+const AUTH_ENG: &str = "name: t\nurls: ['http://127.0.0.1:9/']\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\ndast:\n  auth:\n    header: Authorization\n    value_env: ASCENT_CLI_TEST_UNSET_AUTH\n";
+
+#[test]
+fn dry_run_never_needs_the_auth_secret() {
+    let d = tmp();
+    let out = d.join("out");
+    let eng = write(&d, "eng.yaml", AUTH_ENG);
+    let o = Command::new(env!("CARGO_BIN_EXE_ascent"))
+        .args(["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--dry-run"])
+        .env_remove("ASCENT_CLI_TEST_UNSET_AUTH")
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(out.join("queue.json").exists());
+}
+
+#[test]
+fn missing_auth_secret_exits_2_before_scanning() {
+    let d = tmp();
+    let out = d.join("out");
+    let eng = write(&d, "eng.yaml", AUTH_ENG);
+    let o = Command::new(env!("CARGO_BIN_EXE_ascent"))
+        .args(["run", "--engagement", &eng, "--out", out.to_str().unwrap()])
+        .env_remove("ASCENT_CLI_TEST_UNSET_AUTH")
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(!out.join("queue.json").exists(), "nothing ran");
+}
+
 #[test]
 fn tampered_audit_during_run_exits_4_and_rewrites_nothing() {
     let d = tmp();

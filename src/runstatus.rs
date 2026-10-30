@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct RunStatus {
     pub complete: bool,
     pub dry_run: bool,
@@ -15,6 +15,9 @@ pub struct RunStatus {
     pub skipped_tools: Vec<String>,
     #[serde(default)]
     pub finished_at: String,
+    /// What the DAST track covered; `None` (JSON null) when the engagement has no DAST scope.
+    #[serde(default)]
+    pub dast: Option<crate::stages::dast::DastSummary>,
 }
 
 pub fn write_run_status(out_dir: &str, s: &RunStatus) -> std::io::Result<()> {
@@ -45,7 +48,8 @@ mod tests {
         let d = dir.to_str().unwrap();
         assert_eq!(read_run_status(d), None);
         let s = RunStatus { complete: true, dry_run: false, failed_tools: vec![],
-            skipped_tools: vec!["gitleaks".into()], finished_at: now_ts() };
+            skipped_tools: vec!["gitleaks".into()], finished_at: now_ts(),
+            dast: Some(crate::stages::dast::DastSummary { scanned: 2, ..Default::default() }) };
         write_run_status(d, &s).unwrap();
         assert_eq!(read_run_status(d), Some(s));
         std::fs::write(dir.join("run.json"), "not json").unwrap();

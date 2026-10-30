@@ -300,8 +300,6 @@ fn dedupe_rows(rows: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-// Wired into the report in Task 4; remove this allow then.
-#[allow(dead_code)]
 pub fn coverage_markdown(cov: &Value) -> String {
     let mut out = format!(
         "\n## DAST coverage\n\nProfile: `{}` · authenticated: {}\n\n| Category | Status | Findings | Notes |\n|---|---|---|---|\n",
@@ -331,8 +329,6 @@ pub struct DastSummary {
     pub scanned: usize,
 }
 
-// Fields are read by the pipeline in Task 4; remove this allow then.
-#[allow(dead_code)]
 pub struct DastOutcome {
     pub findings: Vec<Finding>,
     pub summary: DastSummary,
@@ -340,8 +336,6 @@ pub struct DastOutcome {
 }
 
 /// `Ok(None)` when the engagement has no hosts and no urls (no DAST scope).
-// Wired into the pipeline in Task 4; remove this allow then.
-#[allow(dead_code)]
 pub fn run_dast(
     eng: &Engagement,
     runner: &dyn Runner,

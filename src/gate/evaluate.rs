@@ -256,7 +256,7 @@ mod tests {
         parse_policy("version: 1\nfail_on:\n  severity: [CRITICAL, HIGH]\n  cwe: [CWE-798]\nwarn_on:\n  severity: [MEDIUM]\n").unwrap()
     }
     fn done() -> RunStatus {
-        RunStatus { complete: true, dry_run: false, failed_tools: vec![], skipped_tools: vec![], finished_at: "t".into() }
+        RunStatus { complete: true, dry_run: false, failed_tools: vec![], skipped_tools: vec![], finished_at: "t".into(), ..Default::default() }
     }
 
     #[test]

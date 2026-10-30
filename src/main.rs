@@ -193,6 +193,16 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
                 "urls={} findings={} triaged={}",
                 s.urls, s.findings, s.triaged
             );
+            if let Some(d) = &s.dast {
+                println!(
+                    "dast: profile={} authenticated={} seeded={} crawled={} out_of_scope_dropped={} scanned={}",
+                    d.profile, d.authenticated, d.seeded, d.crawled, d.out_of_scope_dropped, d.scanned
+                );
+                println!(
+                    "coverage: {}",
+                    std::path::Path::new(&out).join("dast-coverage.json").display()
+                );
+            }
             if !s.complete {
                 // stderr, so CI logs show it even when stdout is captured.
                 eprintln!("run INCOMPLETE (dry run or failed scanners: {:?})", s.failed_tools);
