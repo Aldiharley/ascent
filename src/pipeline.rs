@@ -1,5 +1,6 @@
 use crate::report::to_markdown;
 use crate::runner::Runner;
+use crate::runstatus::{now_ts, write_run_status, RunStatus};
 use crate::scope::Engagement;
 use crate::stages::{
     enumerate::enumerate_surface,
@@ -16,6 +17,9 @@ pub struct Summary {
     pub triaged: usize,
     pub report_path: String,
     pub audit_path: String,
+    /// True only for a non-dry run in which every SAST analyser that is present completed.
+    pub complete: bool,
+    pub failed_tools: Vec<String>,
 }
 
 /// Effective SAST source root: the `--source` override if non-empty, else the
@@ -83,9 +87,14 @@ pub fn run_pipeline(
         vec![]
     };
     // SAST track (white-box): only when a source root is resolved; never in dry-run.
-    if let Some(src) = eff_source {
+    let mut failed_tools = Vec::new();
+    let mut skipped_tools = Vec::new();
+    if let Some(src) = eff_source.as_deref() {
         if !dry_run {
-            findings.extend(sast(runner, &src)?);
+            let o = sast(runner, src)?;
+            findings.extend(o.findings);
+            failed_tools = o.failed_tools;
+            skipped_tools = o.skipped_tools;
         }
     }
     let items = if !findings.is_empty() {
@@ -95,6 +104,9 @@ pub fn run_pipeline(
     };
     let report_path = Path::new(out_dir).join("report.md");
     std::fs::write(&report_path, to_markdown(&items, &eng.name))?;
+    let complete = !dry_run && failed_tools.is_empty();
+    write_run_status(out_dir, &RunStatus { complete, dry_run, failed_tools: failed_tools.clone(),
+        skipped_tools, finished_at: now_ts() })?;
     Ok(Summary {
         urls: urls.len(),
         findings: findings.len(),
@@ -104,6 +116,8 @@ pub fn run_pipeline(
             .join("audit.jsonl")
             .to_string_lossy()
             .into(),
+        complete,
+        failed_tools,
     })
 }
 
@@ -223,6 +237,24 @@ mod tests {
         let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
         assert!(s.findings >= 1);
         assert!(std::path::Path::new(&s.report_path).exists());
+    }
+
+    #[test]
+    fn dry_run_writes_an_incomplete_run_status() {
+        let dir = unique_dir();
+        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).unwrap();
+        assert!(!s.complete);
+        let st = crate::runstatus::read_run_status(&dir).unwrap();
+        assert!(!st.complete && st.dry_run);
+    }
+
+    #[test]
+    fn full_run_writes_a_complete_run_status() {
+        let dir = unique_dir();
+        let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
+        assert!(s.complete && s.failed_tools.is_empty());
+        let st = crate::runstatus::read_run_status(&dir).unwrap();
+        assert!(st.complete && !st.dry_run && !st.finished_at.is_empty());
     }
 
     fn queue(dir: &str) -> Value {

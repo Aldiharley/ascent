@@ -7,6 +7,7 @@ mod normalise;
 mod pipeline;
 mod report;
 mod runner;
+mod runstatus;
 mod scope;
 mod stages;
 mod triage;
@@ -83,6 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "urls={} findings={} triaged={}",
                 s.urls, s.findings, s.triaged
             );
+            if !s.complete {
+                println!("run INCOMPLETE (dry run or failed scanners: {:?})", s.failed_tools);
+            }
             println!("report: {}\naudit:  {}", s.report_path, s.audit_path);
             if do_propose {
                 let queue_path = std::path::Path::new(&out).join("queue.json");
