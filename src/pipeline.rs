@@ -22,6 +22,29 @@ pub struct Summary {
     pub failed_tools: Vec<String>,
 }
 
+/// The output directory's audit chain does not verify (CLI exit 4).
+#[derive(Debug)]
+pub struct IntegrityError(pub String);
+impl std::fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for IntegrityError {}
+
+/// A configuration/usage error such as a bad `--source` (CLI exit 2).
+#[derive(Debug)]
+pub struct ConfigError(pub String);
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ConfigError {}
+
+/// Outputs a previous run may have left behind that must never outlive a new run.
+const STALE_OUTPUTS: [&str; 3] = ["gate.json", "ascent.sarif", "ascent-dast.sarif"];
+
 /// Effective SAST source root: the `--source` override if non-empty, else the
 /// engagement's `source`, else none. An override must lie within the engagement's
 /// source root (when one is set). The result is canonical, existing, and cannot
@@ -29,11 +52,13 @@ pub struct Summary {
 fn resolve_source(
     eng: &Engagement,
     source: Option<&str>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+) -> Result<Option<String>, ConfigError> {
     let raw = match source {
         Some(s) if !s.is_empty() => {
             if !eng.source.is_empty() && !is_within(Path::new(&eng.source), Path::new(s)) {
-                return Err("--source is outside the engagement's authorised source root".into());
+                return Err(ConfigError(
+                    "--source is outside the engagement's authorised source root".into(),
+                ));
             }
             s
         }
@@ -41,11 +66,11 @@ fn resolve_source(
         _ => return Ok(None),
     };
     if raw.starts_with('-') {
-        return Err("source path must not start with '-'".into());
+        return Err(ConfigError("source path must not start with '-'".into()));
     }
     let canon = Path::new(raw)
         .canonicalize()
-        .map_err(|e| format!("source path {raw:?} is not accessible: {e}"))?;
+        .map_err(|e| ConfigError(format!("source path {raw:?} is not accessible: {e}")))?;
     let canon = canon.to_string_lossy().into_owned();
     // Windows canonical paths carry a `\\?\` verbatim prefix many tools mishandle.
     let canon = match canon.strip_prefix(r"\\?\") {
@@ -63,10 +88,24 @@ pub fn run_pipeline(
     dry_run: bool,
     source: Option<&str>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
+    // A tampered audit chain stops the run before anything is reset or written.
+    let (ok, msg) = crux::AuditLog::new(Path::new(out_dir).join("audit.jsonl")).verify();
+    if !ok {
+        return Err(Box::new(IntegrityError(format!(
+            "audit chain failed verification; nothing was run: {msg}"
+        ))));
+    }
     // Resolve and validate the SAST source root first so a bad `--source` fails
     // before any tool runs or any output is written.
     let eff_source = resolve_source(eng, source)?;
     std::fs::create_dir_all(out_dir)?;
+    // A previous run's verdict and SARIF must never outlive this run.
+    for name in STALE_OUTPUTS {
+        match std::fs::remove_file(Path::new(out_dir).join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
     // Reset the triage queue up front so a re-run that yields no findings (or
     // fails before triage writes it) never shows the previous run's findings.
     write_atomic(&Path::new(out_dir).join("queue.json"), b"[]\n")?;
@@ -312,6 +351,39 @@ mod tests {
         assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
         let st = crate::runstatus::read_run_status(&dir).unwrap();
         assert!(!st.complete, "stale complete=true survived an aborted run");
+    }
+
+    #[test]
+    fn stale_gate_and_sarif_never_survive_a_new_run() {
+        let dir = unique_dir();
+        for n in STALE_OUTPUTS {
+            std::fs::write(std::path::Path::new(&dir).join(n), r#"{"decision":"PASS"}"#).unwrap();
+        }
+        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
+        for n in STALE_OUTPUTS {
+            assert!(!std::path::Path::new(&dir).join(n).exists(), "stale {n} survived an aborted run");
+        }
+    }
+
+    #[test]
+    fn tampered_audit_is_an_integrity_error_and_nothing_is_reset() {
+        let dir = unique_dir();
+        seed_stale_queue(&dir);
+        let audit = std::path::Path::new(&dir).join("audit.jsonl");
+        std::fs::write(&audit, "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n").unwrap();
+        let e = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).err().unwrap();
+        assert!(e.downcast_ref::<IntegrityError>().is_some(), "{e}");
+        assert_eq!(queue(&dir)[0]["finding"]["title"], "stale from last run");
+        assert!(!std::path::Path::new(&dir).join("run.json").exists());
+    }
+
+    #[test]
+    fn bad_source_is_a_config_error() {
+        let out = unique_dir();
+        let mut eng = sast_engagement(std::path::Path::new(&out));
+        eng.source = String::new();
+        let e = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, Some("--config=evil")).err().unwrap();
+        assert!(e.downcast_ref::<ConfigError>().is_some(), "{e}");
     }
 
     fn queue(dir: &str) -> Value {

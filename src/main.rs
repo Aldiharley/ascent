@@ -18,7 +18,7 @@ use exploit::execute::{verify_approved, Outcome};
 use exploit::propose::{propose, write_proposed};
 use gate::evaluate::{evaluate, gate_document, read_queue, write_gate, Decision, WriteGateError};
 use gate::policy::{load_policy, Policy};
-use pipeline::run_pipeline;
+use pipeline::{run_pipeline, ConfigError, IntegrityError};
 use runner::ToolRunner;
 use runstatus::{now_ts, read_run_status};
 use scope::{load_engagement, ScopeGuard};
@@ -179,13 +179,23 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
                 dry_run,
                 source.as_deref(),
             )
-            .map_err(Failure::incomplete)?;
+            .map_err(|e| {
+                // Typed errors pick the exit code; never match on message text.
+                if e.downcast_ref::<IntegrityError>().is_some() {
+                    Failure::integrity(e)
+                } else if e.downcast_ref::<ConfigError>().is_some() {
+                    Failure::usage(e)
+                } else {
+                    Failure::incomplete(e)
+                }
+            })?;
             println!(
                 "urls={} findings={} triaged={}",
                 s.urls, s.findings, s.triaged
             );
             if !s.complete {
-                println!("run INCOMPLETE (dry run or failed scanners: {:?})", s.failed_tools);
+                // stderr, so CI logs show it even when stdout is captured.
+                eprintln!("run INCOMPLETE (dry run or failed scanners: {:?})", s.failed_tools);
             }
             println!("report: {}\naudit:  {}", s.report_path, s.audit_path);
             println!("sarif:  {}", std::path::Path::new(&out).join("ascent.sarif").display());

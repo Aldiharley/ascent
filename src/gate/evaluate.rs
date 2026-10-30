@@ -201,8 +201,15 @@ pub fn write_gate(out_dir: &str, doc: &Value) -> Result<(), WriteGateError> {
     body.insert("exit_code".into(), doc["exit_code"].clone());
     body.insert("policy_hash".into(), doc["policy"]["hash"].clone());
     body.insert("gate_hash".into(), Value::from(crux::canon::hash_value(doc)));
-    let audit = audit.to_str().ok_or_else(|| WriteGateError::Io("audit path is not UTF-8".into()))?;
-    crate::gatesio::append_chained(audit, body).map_err(|e| WriteGateError::Io(e.to_string()))
+    let appended = match audit.to_str() {
+        Some(a) => crate::gatesio::append_chained(a, body).map_err(|e| e.to_string()),
+        None => Err("audit path is not UTF-8".into()),
+    };
+    appended.map_err(|m| {
+        // Never leave a verdict on disk that is not chained into the audit log.
+        let _ = std::fs::remove_file(dir.join("gate.json"));
+        WriteGateError::Io(m)
+    })
 }
 
 /// The triaged queue. Missing or non-array → Err (the CLI maps it to exit 3).
@@ -351,6 +358,27 @@ mod tests {
         assert!(matches!(write_gate(&dir, &doc), Err(WriteGateError::Integrity(_))));
         assert!(!std::path::Path::new(&dir).join("gate.json").exists());
         assert_eq!(std::fs::read(&audit).unwrap(), before, "audit log must not be appended to");
+    }
+    #[test]
+    fn failed_audit_append_leaves_no_unchained_gate_json() {
+        let dir = tmp();
+        let audit = std::path::Path::new(&dir).join("audit.jsonl");
+        std::fs::write(&audit, "").unwrap();
+        let mut perm = std::fs::metadata(&audit).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&audit, perm.clone()).unwrap();
+        // A privileged user (e.g. root) can still append; then there is nothing to test.
+        let appendable = std::fs::OpenOptions::new().append(true).open(&audit).is_ok();
+        let p = policy();
+        let r = evaluate(&[], &p, Some(&done()), false);
+        let res = write_gate(&dir, &gate_document(&p, &r, Some(&done()), "t"));
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(false);
+        std::fs::set_permissions(&audit, perm).unwrap();
+        if !appendable {
+            assert!(matches!(res, Err(WriteGateError::Io(_))), "{res:?}");
+            assert!(!std::path::Path::new(&dir).join("gate.json").exists(), "unchained gate.json left on disk");
+        }
     }
     #[test]
     fn read_queue_requires_an_array() {
