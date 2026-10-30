@@ -18,7 +18,6 @@ pub fn ensure_httpx_identity(runner: &dyn Runner) -> Result<(), Box<dyn std::err
 
 /// True only for a DNS name worth passing to subfinder: it contains a `.` and is
 /// not an IP literal. `localhost`, `10.0.0.5` and `::1` have no subdomains to find.
-#[allow(dead_code)] // wired up by the DAST orchestrator (stages/dast.rs)
 pub fn is_subfinder_candidate(host: &str) -> bool {
     host.contains('.') && host.parse::<std::net::IpAddr>().is_err()
 }

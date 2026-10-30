@@ -1,0 +1,689 @@
+//! The DAST track: seed the surface from the whole declared scope, crawl, drop anything
+//! out of scope (counted, never scanned, never fatal), run the profile's nuclei passes
+//! with the optional auth header, scrub the auth value from every raw result, and report
+//! what was and was not tested. dos / brute-force / default-login are never run.
+use super::enumerate::enumerate_surface;
+use super::recon::{ensure_httpx_identity, is_subfinder_candidate, recon};
+use super::scan::scan_rows;
+use crate::models::Finding;
+use crate::normalise::normalise_nuclei;
+use crate::runner::Runner;
+use crate::scope::{DastProfile, Engagement, ScopeGuard};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+
+pub const ALWAYS_EXCLUDED: &str = "dos,brute-force,default-login";
+const PASSIVE_TAGS: &str = "tech,misconfig,exposure,headers,cors,cookie,session";
+const STANDARD_TAGS: &str = "tech,misconfig,exposure,headers,cors,cookie,session,cve,sqli,xss,auth-bypass,jwt,idor,csrf,redirect,ssrf,lfi";
+
+pub fn common_nuclei_args() -> Vec<String> {
+    [
+        "-silent",
+        "-jsonl",
+        "-rate-limit",
+        "50",
+        "-concurrency",
+        "10",
+        "-timeout",
+        "10",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// The profile's nuclei passes. Every pass of every profile excludes
+/// [`ALWAYS_EXCLUDED`]; nothing here comes from engagement config.
+pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
+    let pass = |tags: &str, extra_etags: &str| -> Vec<String> {
+        vec![
+            "-tags".into(),
+            tags.into(),
+            "-etags".into(),
+            format!("{ALWAYS_EXCLUDED},{extra_etags}"),
+        ]
+    };
+    match profile {
+        DastProfile::Passive => vec![pass(PASSIVE_TAGS, "intrusive,fuzz")],
+        DastProfile::Standard => vec![pass(STANDARD_TAGS, "fuzz")],
+        DastProfile::Active => vec![
+            pass(STANDARD_TAGS, "fuzz"),
+            vec!["-dast".into(), "-etags".into(), ALWAYS_EXCLUDED.into()],
+        ],
+    }
+}
+
+/// `-H` plus exactly ONE `"Name: value"` element (never split, never other flags).
+pub fn header_args(auth: Option<&(String, String)>) -> Vec<String> {
+    match auth {
+        Some((name, value)) => vec!["-H".into(), format!("{name}: {value}")],
+        None => vec![],
+    }
+}
+
+pub fn filter_in_scope(urls: Vec<String>, in_scope: &dyn Fn(&str) -> bool) -> (Vec<String>, usize) {
+    let total = urls.len();
+    let kept: Vec<String> = urls.into_iter().filter(|u| in_scope(u)).collect();
+    let dropped = total - kept.len();
+    (kept, dropped)
+}
+
+pub fn scrub_text(s: &str, secret: Option<&str>) -> String {
+    match secret {
+        Some(v) if !v.is_empty() => s.replace(v, "***"),
+        _ => s.to_string(),
+    }
+}
+
+/// A row that could not be re-parsed after replacement (should be impossible) is
+/// kept as a placeholder built only from individually scrubbed fields, never dropped.
+fn scrub_placeholder(row: &Value, secret: Option<&str>) -> Value {
+    let s = |v: &Value, default: &str| -> String {
+        let t = scrub_text(v.as_str().unwrap_or(""), secret);
+        if t.is_empty() {
+            default.to_string()
+        } else {
+            t
+        }
+    };
+    let info = &row["info"];
+    let tags: Vec<String> = row_tags(row)
+        .iter()
+        .map(|t| scrub_text(t, secret))
+        .collect();
+    json!({
+        "template-id": s(&row["template-id"], "nuclei"),
+        "matched-at": s(&row["matched-at"], ""),
+        "host": s(&row["host"], ""),
+        "info": {
+            "name": s(&info["name"], "finding"),
+            "severity": s(&info["severity"], "info"),
+            "description": s(&info["description"], ""),
+            "tags": tags,
+        },
+    })
+}
+
+/// Replace the auth value everywhere in each raw nuclei row (curl-command, request, …).
+/// The value is replaced in the JSON *text*, in both its raw and its JSON-escaped form
+/// (a value containing `"` or `\` appears escaped in the text).
+pub fn scrub_rows(rows: Vec<Value>, secret: Option<&str>) -> Vec<Value> {
+    let Some(v) = secret.filter(|v| !v.is_empty()) else {
+        return rows;
+    };
+    let esc_full = serde_json::to_string(v).unwrap_or_default();
+    let esc = esc_full
+        .get(1..esc_full.len().saturating_sub(1))
+        .unwrap_or("");
+    rows.into_iter()
+        .map(|r| {
+            let mut text = r.to_string();
+            if !esc.is_empty() {
+                text = text.replace(esc, "***");
+            }
+            text = text.replace(v, "***");
+            serde_json::from_str(&text).unwrap_or_else(|_| scrub_placeholder(&r, secret))
+        })
+        .collect()
+}
+
+struct Category {
+    id: &'static str,
+    name: &'static str,
+    tags: &'static [&'static str],
+    min: Option<DastProfile>,   // None = never tested
+    note: Option<&'static str>, // limited-coverage note
+}
+
+const CATEGORIES: &[Category] = &[
+    Category {
+        id: "sqli",
+        name: "SQL injection",
+        tags: &["sqli"],
+        min: Some(DastProfile::Standard),
+        note: None,
+    },
+    Category {
+        id: "xss",
+        name: "Cross-site scripting",
+        tags: &["xss"],
+        min: Some(DastProfile::Standard),
+        note: None,
+    },
+    Category {
+        id: "auth-bypass",
+        name: "Authentication bypass",
+        tags: &["auth-bypass", "jwt"],
+        min: Some(DastProfile::Standard),
+        note: None,
+    },
+    Category {
+        id: "authz",
+        name: "Authorization flaws (IDOR)",
+        tags: &["idor"],
+        min: Some(DastProfile::Standard),
+        note: Some("12 generic templates; most IDOR needs app-specific logic and a second user"),
+    },
+    Category {
+        id: "cors",
+        name: "CORS misconfiguration",
+        tags: &["cors"],
+        min: Some(DastProfile::Passive),
+        note: None,
+    },
+    Category {
+        id: "headers",
+        name: "Security headers",
+        tags: &["headers"],
+        min: Some(DastProfile::Passive),
+        note: None,
+    },
+    Category {
+        id: "session",
+        name: "Session management",
+        tags: &["session", "cookie", "csrf"],
+        min: Some(DastProfile::Passive),
+        note: None,
+    },
+    Category {
+        id: "ssrf",
+        name: "Server-side request forgery",
+        tags: &["ssrf"],
+        min: Some(DastProfile::Standard),
+        note: None,
+    },
+    Category {
+        id: "lfi",
+        name: "Path traversal / file inclusion",
+        tags: &["lfi"],
+        min: Some(DastProfile::Standard),
+        note: None,
+    },
+    Category {
+        id: "redirect",
+        name: "Open redirect",
+        tags: &["redirect"],
+        min: Some(DastProfile::Standard),
+        note: None,
+    },
+    Category {
+        id: "known-vulns",
+        name: "Known CVEs, exposures, misconfiguration",
+        tags: &["cve", "exposure", "misconfig", "tech"],
+        min: Some(DastProfile::Passive),
+        note: None,
+    },
+    Category {
+        id: "rate-limit",
+        name: "API rate limiting",
+        tags: &[],
+        min: None,
+        note: None,
+    },
+];
+
+fn row_tags(r: &Value) -> Vec<String> {
+    match &r["info"]["tags"] {
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|t| t.as_str())
+            .map(|t| t.trim().to_ascii_lowercase())
+            .collect(),
+        Value::String(s) => s
+            .split(',')
+            .map(|t| t.trim().to_ascii_lowercase())
+            .collect(),
+        _ => vec![],
+    }
+}
+
+pub fn coverage(profile: DastProfile, authenticated: bool, rows: &[Value]) -> Value {
+    let tagsets: Vec<Vec<String>> = rows.iter().map(row_tags).collect();
+    let cats: Vec<Value> = CATEGORIES
+        .iter()
+        .map(|c| {
+            let findings = tagsets
+                .iter()
+                .filter(|ts| ts.iter().any(|t| c.tags.contains(&t.as_str())))
+                .count();
+            let (status, reason) = match c.min {
+                None => (
+                    "not_tested",
+                    "needs load generation; Ascent never floods a target".to_string(),
+                ),
+                Some(min) if min > profile => {
+                    ("not_tested", format!("enable the {} profile", min.as_str()))
+                }
+                Some(_) => match c.note {
+                    Some(n) => ("limited", n.to_string()),
+                    None if profile == DastProfile::Active
+                        && matches!(c.id, "sqli" | "xss") =>
+                    {
+                        ("tested", "templates plus parameter fuzzing".to_string())
+                    }
+                    None => ("tested", String::new()),
+                },
+            };
+            json!({"id": c.id, "name": c.name, "tags": c.tags, "status": status, "reason": reason, "findings": findings})
+        })
+        .collect();
+    json!({"profile": profile.as_str(), "authenticated": authenticated, "categories": cats})
+}
+
+pub fn coverage_markdown(cov: &Value) -> String {
+    let mut out = format!(
+        "\n## DAST coverage\n\nProfile: `{}` · authenticated: {}\n\n| Category | Status | Findings | Notes |\n|---|---|---|---|\n",
+        cov["profile"].as_str().unwrap_or(""),
+        if cov["authenticated"] == true { "yes" } else { "no" },
+    );
+    for c in cov["categories"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            c["name"].as_str().unwrap_or(""),
+            c["status"].as_str().unwrap_or("").replace('_', " "),
+            c["findings"],
+            c["reason"].as_str().unwrap_or(""),
+        ));
+    }
+    out
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DastSummary {
+    pub profile: String,
+    pub authenticated: bool,
+    pub auth_header: String,
+    pub seeded: usize,
+    pub crawled: usize,
+    pub out_of_scope_dropped: usize,
+    pub scanned: usize,
+}
+
+pub struct DastOutcome {
+    pub findings: Vec<Finding>,
+    pub summary: DastSummary,
+    pub coverage: Value,
+}
+
+/// `Ok(None)` when the engagement has no hosts and no urls (no DAST scope).
+pub fn run_dast(
+    eng: &Engagement,
+    runner: &dyn Runner,
+    auth: Option<&(String, String)>,
+    check_httpx: bool,
+) -> Result<Option<DastOutcome>, Box<dyn std::error::Error>> {
+    if eng.hosts.is_empty() && eng.urls.is_empty() {
+        return Ok(None);
+    }
+    let secret = auth.map(|(_, v)| v.as_str());
+    let scrubbed = |e: Box<dyn std::error::Error>| -> Box<dyn std::error::Error> {
+        scrub_text(&e.to_string(), secret).into()
+    };
+    if check_httpx && !eng.hosts.is_empty() {
+        ensure_httpx_identity(runner).map_err(scrubbed)?;
+    }
+    let mut seed: BTreeSet<String> = eng.urls.iter().cloned().collect();
+    for h in &eng.hosts {
+        for u in recon(runner, h, is_subfinder_candidate(h)).map_err(scrubbed)? {
+            seed.insert(u);
+        }
+    }
+    let seed: Vec<String> = seed.into_iter().collect();
+    let headers = header_args(auth);
+    let crawled = enumerate_surface(runner, &seed, &headers).map_err(scrubbed)?;
+    let guard = ScopeGuard::new(eng);
+    let crawled_n = crawled.len();
+    let (surface, dropped) = filter_in_scope(crawled, &|u| guard.in_scope(u));
+    let mut rows = Vec::new();
+    if !surface.is_empty() {
+        for pass in nuclei_passes(eng.dast.profile) {
+            let mut args = common_nuclei_args();
+            args.extend(pass);
+            args.extend(headers.iter().cloned());
+            rows.extend(scan_rows(runner, &surface, &args).map_err(scrubbed)?);
+        }
+    }
+    let rows = scrub_rows(rows, secret);
+    let coverage = coverage(eng.dast.profile, auth.is_some(), &rows);
+    Ok(Some(DastOutcome {
+        findings: normalise_nuclei(&rows),
+        summary: DastSummary {
+            profile: eng.dast.profile.as_str().into(),
+            authenticated: auth.is_some(),
+            auth_header: auth.map(|(n, _)| n.clone()).unwrap_or_default(),
+            seeded: seed.len(),
+            crawled: crawled_n,
+            out_of_scope_dropped: dropped,
+            scanned: surface.len(),
+        },
+        coverage,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    const SECRET: &str = "Bearer s3cr3t";
+
+    type Call = (String, Vec<String>, Vec<String>);
+
+    /// Recording fake: canned output per tool, optional nuclei failure.
+    struct Fake {
+        calls: RefCell<Vec<Call>>,
+        nuclei_err: Option<&'static str>,
+    }
+    impl Fake {
+        fn new() -> Self {
+            Fake {
+                calls: RefCell::new(vec![]),
+                nuclei_err: None,
+            }
+        }
+        fn count(&self, tool: &str) -> usize {
+            self.calls.borrow().iter().filter(|c| c.0 == tool).count()
+        }
+    }
+    impl Runner for Fake {
+        fn run_json(
+            &self,
+            tool: &str,
+            args: &[String],
+            targets: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            self.calls
+                .borrow_mut()
+                .push((tool.into(), args.to_vec(), targets.to_vec()));
+            Ok(match tool {
+                "subfinder" => vec![],
+                "httpx" => {
+                    if args.iter().any(|a| a == "example.com") {
+                        vec![json!({"url":"https://example.com"})]
+                    } else {
+                        vec![]
+                    }
+                }
+                "katana" => vec![
+                    json!({"endpoint":"https://github.com/x"}),
+                    json!({"endpoint":"http://localhost:3000/rest/products"}),
+                    json!({"endpoint":"https://example.com/a"}),
+                ],
+                "nuclei" => {
+                    if let Some(e) = self.nuclei_err {
+                        return Err(e.into());
+                    }
+                    vec![json!({
+                        "template-id":"t1","matched-at":"http://localhost:3000/rest/products",
+                        "info":{"name":"n","severity":"high","tags":["xss"]},
+                        "curl-command": format!("curl -H 'Authorization: {SECRET}' http://localhost:3000/rest/products")
+                    })]
+                }
+                _ => vec![],
+            })
+        }
+        fn run_text(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(String::new())
+        }
+    }
+
+    fn eng() -> Engagement {
+        Engagement {
+            name: "t".into(),
+            hosts: vec!["example.com".into(), "localhost".into()],
+            urls: vec!["http://localhost:3000/".into()],
+            cidrs: vec!["127.0.0.0/8".into()],
+            ..Default::default()
+        }
+    }
+
+    fn joined(v: &[String]) -> String {
+        v.join(" ")
+    }
+
+    #[test]
+    fn passes_by_profile() {
+        let p = nuclei_passes(DastProfile::Passive);
+        assert_eq!(p.len(), 1);
+        let s = joined(&p[0]);
+        assert!(
+            s.contains("dos,brute-force,default-login,intrusive,fuzz"),
+            "{s}"
+        );
+        assert!(!s.contains("sqli"), "{s}");
+
+        let st = nuclei_passes(DastProfile::Standard);
+        assert_eq!(st.len(), 1);
+        let tags = &st[0][1];
+        assert!(tags.contains("sqli") && tags.contains("xss"), "{tags}");
+        let etags = &st[0][3];
+        for t in ["dos", "brute-force", "default-login", "fuzz"] {
+            assert!(etags.contains(t), "{etags}");
+        }
+        assert!(!etags.contains("intrusive"), "{etags}");
+
+        let a = nuclei_passes(DastProfile::Active);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[1][0], "-dast");
+        assert!(joined(&a[1]).contains("dos,brute-force,default-login"));
+    }
+
+    #[test]
+    fn every_profile_excludes_dos_bruteforce_defaultlogin() {
+        for prof in [
+            DastProfile::Passive,
+            DastProfile::Standard,
+            DastProfile::Active,
+        ] {
+            for pass in nuclei_passes(prof) {
+                let i = pass
+                    .iter()
+                    .position(|a| a == "-etags")
+                    .expect("-etags present");
+                let etags: Vec<&str> = pass[i + 1].split(',').collect();
+                for t in ["dos", "brute-force", "default-login"] {
+                    assert!(etags.contains(&t), "{prof:?} pass {pass:?} missing {t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn header_args_formats_name_value() {
+        let a = ("Authorization".to_string(), "Bearer abc".to_string());
+        assert_eq!(
+            header_args(Some(&a)),
+            vec!["-H", "Authorization: Bearer abc"]
+        );
+    }
+
+    #[test]
+    fn no_auth_no_header_args() {
+        assert!(header_args(None).is_empty());
+    }
+
+    #[test]
+    fn filter_drops_and_counts_out_of_scope() {
+        let urls = vec![
+            "http://a.test/1".to_string(),
+            "http://evil.test/2".into(),
+            "http://a.test/3".into(),
+        ];
+        let (kept, dropped) = filter_in_scope(urls, &|u| u.contains("a.test"));
+        assert_eq!(kept, vec!["http://a.test/1", "http://a.test/3"]);
+        assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn scrub_removes_value_everywhere_including_json_escaped() {
+        let v = r#"tok"en\x"#;
+        let rows = vec![json!({
+            "curl-command": format!("curl -H 'X: {v}' http://h/"),
+            "request": format!("GET / HTTP/1.1\r\nX: {v}"),
+            "info": {"name": "n"},
+        })];
+        let out = scrub_rows(rows, Some(v));
+        assert_eq!(out.len(), 1);
+        let text = out[0].to_string();
+        assert!(!text.contains(v), "{text}");
+        let esc = serde_json::to_string(v).unwrap();
+        assert!(!text.contains(&esc[1..esc.len() - 1]), "{text}");
+        assert!(out[0]["curl-command"].as_str().unwrap().contains("***"));
+        assert_eq!(out[0]["info"]["name"], "n");
+    }
+
+    #[test]
+    fn scrub_keeps_normal_rows_and_is_noop_without_secret() {
+        let rows = vec![json!({"template-id":"a"}), json!({"template-id":"b"})];
+        assert_eq!(scrub_rows(rows.clone(), None), rows);
+        assert_eq!(scrub_rows(rows.clone(), Some("")), rows);
+        let out = scrub_rows(rows.clone(), Some("zzz"));
+        assert_eq!(out, rows);
+    }
+
+    #[test]
+    fn scrub_placeholder_keeps_the_finding_without_the_secret() {
+        let row = json!({"template-id": format!("t-{SECRET}"), "matched-at":"http://h/",
+            "info":{"name": format!("n {SECRET}"), "severity":"high"}});
+        let p = scrub_placeholder(&row, Some(SECRET));
+        assert!(!p.to_string().contains(SECRET), "{p}");
+        assert!(!p.is_null());
+        assert_eq!(p["info"]["severity"], "high");
+        assert_eq!(p["matched-at"], "http://h/");
+    }
+
+    #[test]
+    fn scrub_text_replaces_value() {
+        assert_eq!(
+            scrub_text("bad Bearer s3cr3t here", Some("Bearer s3cr3t")),
+            "bad *** here"
+        );
+        assert_eq!(scrub_text("keep", None), "keep");
+    }
+
+    fn cat<'a>(cov: &'a Value, id: &str) -> &'a Value {
+        cov["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn coverage_marks_profile_gaps_rate_limit_and_limited() {
+        let rows = vec![
+            json!({"info":{"tags":["xss","Other"]}}),
+            json!({"info":{"tags":"cors, headers"}}),
+            json!({"info":{"tags":["xss"]}}),
+        ];
+        let p = coverage(DastProfile::Passive, false, &rows);
+        assert_eq!(cat(&p, "sqli")["status"], "not_tested");
+        assert_eq!(cat(&p, "sqli")["reason"], "enable the standard profile");
+        assert_eq!(cat(&p, "rate-limit")["status"], "not_tested");
+        assert_eq!(cat(&p, "cors")["status"], "tested");
+        assert_eq!(cat(&p, "cors")["findings"], 1);
+        assert_eq!(cat(&p, "headers")["findings"], 1);
+        assert_eq!(cat(&p, "xss")["findings"], 2);
+        assert_eq!(p["authenticated"], false);
+
+        let s = coverage(DastProfile::Standard, true, &rows);
+        assert_eq!(cat(&s, "authz")["status"], "limited");
+        assert_eq!(cat(&s, "sqli")["status"], "tested");
+        assert_eq!(cat(&s, "rate-limit")["status"], "not_tested");
+        assert_eq!(s["authenticated"], true);
+
+        let a = coverage(DastProfile::Active, false, &[]);
+        assert_eq!(cat(&a, "xss")["reason"], "templates plus parameter fuzzing");
+        assert_eq!(a["profile"], "active");
+    }
+
+    #[test]
+    fn coverage_markdown_has_a_row_per_category() {
+        let cov = coverage(DastProfile::Passive, false, &[]);
+        let md = coverage_markdown(&cov);
+        assert!(md.contains("## DAST coverage"));
+        assert!(
+            md.contains("| SQL injection | not tested | 0 | enable the standard profile |"),
+            "{md}"
+        );
+        let rows = md
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| Category"))
+            .count();
+        assert_eq!(rows, cov["categories"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn run_dast_none_without_scope() {
+        let e = Engagement {
+            name: "x".into(),
+            ..Default::default()
+        };
+        let f = Fake::new();
+        assert!(run_dast(&e, &f, None, false).unwrap().is_none());
+        assert!(f.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn run_dast_seeds_every_host_and_url_and_drops_off_scope() {
+        let f = Fake::new();
+        let auth = ("Authorization".to_string(), SECRET.to_string());
+        let out = run_dast(&eng(), &f, Some(&auth), false).unwrap().unwrap();
+        assert_eq!(f.count("subfinder"), 1);
+        {
+            let calls = f.calls.borrow();
+            let sf = calls.iter().find(|c| c.0 == "subfinder").unwrap();
+            assert_eq!(sf.2, vec!["example.com".to_string()]);
+            for c in calls.iter().filter(|c| c.0 == "nuclei") {
+                assert!(!joined(&c.1).contains("github.com"), "{:?}", c.1);
+                assert!(c
+                    .1
+                    .windows(2)
+                    .any(|w| w[0] == "-H" && w[1] == format!("Authorization: {SECRET}")));
+            }
+        }
+        assert_eq!(out.summary.seeded, 2);
+        assert_eq!(out.summary.crawled, 5);
+        assert_eq!(out.summary.out_of_scope_dropped, 1);
+        assert_eq!(out.summary.scanned, 4);
+        assert_eq!(out.summary.auth_header, "Authorization");
+        assert!(out.summary.authenticated);
+        assert_eq!(out.summary.profile, "standard");
+        let nuclei_args = f
+            .calls
+            .borrow()
+            .iter()
+            .find(|c| c.0 == "nuclei")
+            .unwrap()
+            .1
+            .clone();
+        assert!(nuclei_args.contains(&"http://localhost:3000/rest/products".to_string()));
+        assert_eq!(out.findings.len(), 1);
+        assert!(out.findings[0].evidence.contains("***"));
+        assert!(!out.findings[0].evidence.contains("s3cr3t"));
+        assert!(!out.coverage.to_string().contains("s3cr3t"));
+        assert!(!serde_json::to_string(&out.summary)
+            .unwrap()
+            .contains("s3cr3t"));
+    }
+
+    #[test]
+    fn run_dast_error_text_is_scrubbed() {
+        let mut f = Fake::new();
+        f.nuclei_err = Some("nuclei exited: header Bearer s3cr3t rejected");
+        let auth = ("Authorization".to_string(), SECRET.to_string());
+        let e = run_dast(&eng(), &f, Some(&auth), false)
+            .err()
+            .expect("error");
+        let t = e.to_string();
+        assert!(t.contains("***"), "{t}");
+        assert!(!t.contains("s3cr3t"), "{t}");
+    }
+}

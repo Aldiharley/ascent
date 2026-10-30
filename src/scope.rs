@@ -25,8 +25,6 @@ pub enum DastProfile {
 }
 
 impl DastProfile {
-    // Consumed by the DAST stage (later task).
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             DastProfile::Passive => "passive",
