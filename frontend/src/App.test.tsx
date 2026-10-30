@@ -45,7 +45,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("overview shows the findings table and the gate panel", async () => {
+test("overview shows the top findings and the pending approvals", async () => {
   mockApi();
   render(<App />);
   expect(await screen.findByText("SSRF in fetch")).toBeInTheDocument();
@@ -53,7 +53,7 @@ test("overview shows the findings table and the gate panel", async () => {
   expect(screen.getByRole("button", { name: "Overview" })).toHaveAttribute("aria-current", "page");
 });
 
-test("overview also shows the audit feed in the aside", async () => {
+test("overview also shows the recent audit card", async () => {
   mockApi();
   render(<App />);
   expect(await screen.findByText("Hash chain OK")).toBeInTheDocument();
@@ -286,7 +286,7 @@ test("View verdict returns to Overview and focuses the policy card heading", asy
   await waitFor(() => expect(document.getElementById("policy-gate-title")).toHaveFocus());
 });
 
-test("a crash in the gates panel leaves the findings table working", async () => {
+test("a crash in the approvals card leaves the findings list working", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   // An object title is not a valid React child, so the Gates panel throws on render.
   mockApi({ "/api/gates": () => json([{ ...gate, title: { not: "text" } }]) });
@@ -308,4 +308,150 @@ test("a crashed screen does not leak its fallback into the next screen", async (
   fireEvent.click(screen.getByRole("button", { name: "Approval gates" }));
   expect(await screen.findByText("Confirm SSRF")).toBeInTheDocument();
   expect(screen.queryByText("This view failed to render.")).not.toBeInTheDocument();
+});
+
+// ---- Overview navigation paths (spec 7.1) ----
+
+const noise = {
+  finding: { id: "f2", rule_id: "xss-2", severity: "LOW", title: "Reflected XSS", url: "http://lab/y" },
+  verdict: "LIKELY_FALSE_POSITIVE",
+  confidence: 0.7,
+  fp_likelihood: 0.6,
+};
+const unsure = {
+  finding: { id: "f3", rule_id: "redir-3", severity: "MEDIUM", title: "Open redirect", url: "http://lab/z" },
+  verdict: "ABSTAIN",
+  confidence: 0.4,
+  fp_likelihood: 0.3,
+};
+
+test("the hero CTA opens New scan and the hero never uses the sidebar chip's phrases", async () => {
+  mockApi();
+  render(<App />);
+  const hero = (await screen.findByRole("region", { name: "Welcome" })) as HTMLElement;
+  await within(hero).findByText(/Watching/);
+  expect(hero.textContent).not.toMatch(/engagement:|no engagement loaded/);
+  fireEvent.click(within(hero).getByRole("button", { name: "Define a new scan" }));
+  expect(h1Name()).toBe("Ascent Console: New scan");
+  expect(screen.getByRole("button", { name: "New scan" })).toHaveAttribute("aria-current", "page");
+});
+
+test("the hero's Review approvals and the Approval required See all both open Approval gates", async () => {
+  mockApi();
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Review approvals" }));
+  expect(h1Name()).toBe("Ascent Console: Approval gates");
+  fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+  fireEvent.click(await screen.findByRole("button", { name: "See all approval gates" }));
+  expect(h1Name()).toBe("Ascent Console: Approval gates");
+});
+
+test("a KPI tile opens Findings narrowed to that verdict, and Show all lifts it", async () => {
+  mockApi({ "/api/findings": () => json([finding, noise, unsure]) });
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  const tile = screen.getByText("Needs human", { selector: ".kpi .l" }).closest("button") as HTMLElement;
+  fireEvent.click(tile);
+  expect(h1Name()).toBe("Ascent Console: Findings");
+  const table = await screen.findByRole("table");
+  expect(within(table).getByText("Open redirect")).toBeInTheDocument();
+  expect(within(table).queryByText("SSRF in fetch")).not.toBeInTheDocument();
+  expect(within(table).queryByText("Reflected XSS")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+  expect(within(screen.getByRole("table")).getByText("SSRF in fetch")).toBeInTheDocument();
+});
+
+test("the Findings tile opens an unfiltered Findings screen", async () => {
+  mockApi({ "/api/findings": () => json([finding, noise]) });
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  fireEvent.click(screen.getByText("True positive", { selector: ".kpi .l" }).closest("button") as HTMLElement);
+  expect(within(await screen.findByRole("table")).queryByText("Reflected XSS")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+  fireEvent.click((await screen.findByText("Findings", { selector: ".kpi .l" })).closest("button") as HTMLElement);
+  expect(within(await screen.findByRole("table")).getByText("Reflected XSS")).toBeInTheDocument();
+});
+
+test("search Enter on Overview opens Findings", async () => {
+  mockApi();
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search findings" }), { target: { value: "ssrf" } });
+  fireEvent.submit(screen.getByRole("search"));
+  expect(h1Name()).toBe("Ascent Console: Findings");
+  expect(screen.getByRole("searchbox", { name: "Search findings" })).toHaveValue("ssrf");
+});
+
+test("the Overview top findings follow the search box, and Clear search empties it", async () => {
+  mockApi({ "/api/findings": () => json([finding, noise]) });
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  const box = screen.getByRole("searchbox", { name: "Search findings" });
+  fireEvent.change(box, { target: { value: "xss" } });
+  expect(screen.queryByText("SSRF in fetch")).not.toBeInTheDocument();
+  expect(screen.getByText("Reflected XSS")).toBeInTheDocument();
+  expect(screen.getByText("1 of 2 match")).toBeInTheDocument();
+  fireEvent.change(box, { target: { value: "nothing-like-this" } });
+  expect(screen.getByText("No findings match “nothing-like-this”")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+  expect(box).toHaveValue("");
+  expect(screen.getByText("SSRF in fetch")).toBeInTheDocument();
+});
+
+test("the Overview has one Approve button and fetches each endpoint once", async () => {
+  const spy = mockApi();
+  render(<App />);
+  await screen.findByRole("button", { name: "Approve" });
+  expect(screen.getAllByRole("button", { name: /approve/i })).toHaveLength(1);
+  expect(screen.getByText(/Approving records consent; it does not run the command/)).toBeInTheDocument();
+  await waitFor(() => expect(calls(spy, "/api/engagement")).toBe(1));
+  expect(calls(spy, "/api/gates")).toBe(1);
+  expect(calls(spy, "/api/gate")).toBe(1);
+  expect(calls(spy, "/api/findings")).toBe(1);
+  expect(calls(spy, "/api/audit")).toBe(1);
+  expect(calls(spy, "/api/report")).toBe(1);
+});
+
+test("going Overview -> Findings -> Overview reuses the data instead of refetching", async () => {
+  const spy = mockApi();
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  fireEvent.click(screen.getByRole("button", { name: "Findings" }));
+  await screen.findByRole("table");
+  fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+  await screen.findByText("Approval required");
+  expect(calls(spy, "/api/findings")).toBe(1);
+  expect(calls(spy, "/api/audit")).toBe(1);
+});
+
+test("Refresh data swaps the Overview data in place without a loading flash", async () => {
+  let n = 0;
+  mockApi({
+    "/api/findings": () =>
+      json([{ ...finding, finding: { ...finding.finding, title: n++ === 0 ? "First title" : "Second title" } }]),
+  });
+  render(<App />);
+  await screen.findByText("First title");
+  const heading = screen.getByRole("heading", { level: 2, name: "Top findings" });
+  fireEvent.click(screen.getByRole("button", { name: "Refresh data" }));
+  expect(screen.getByText("First title")).toBeInTheDocument();
+  expect(await screen.findByText("Second title")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 2, name: "Top findings" })).toBe(heading);
+});
+
+test("deciding a gate on the Overview updates the bell and the hero", async () => {
+  let decided = false;
+  mockApi({
+    "/api/gates": () => json(decided ? [] : [gate]),
+    "/api/gates/g1/approve": () => {
+      decided = true;
+      return json({ ok: true });
+    },
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: "Pending approvals: 1" });
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  expect(await screen.findByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
+  expect(await screen.findByText("No actions awaiting approval")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Review approvals" })).not.toBeInTheDocument();
 });

@@ -1,61 +1,62 @@
 import { useEffect, useRef, useState } from "react";
-import { GateDecisionError, decideGate, getGates } from "../api";
+import { GateDecisionError, decideGate } from "../api";
 import type { Gate, GateDecision } from "../api";
+import { Button } from "../components/Button";
+import { EmptyState } from "../components/EmptyState";
+import { ErrorState } from "../components/ErrorState";
+import { GateCard } from "../components/GateCard";
+import { ListCard } from "../components/ListCard";
+import { Skeleton } from "../components/Skeleton";
 import { ToastStack, useToasts } from "../components/Toast";
-
-type State =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "ready"; gates: Gate[] };
+import { useStaleResource } from "../data/resources";
 
 export interface GatesProps {
-  /** Called after a decision is recorded (or found already recorded), so a sibling audit view can refresh. */
+  /** Called after a decision is recorded (or found already recorded), so sibling views can refresh. */
   onDecided?: () => void;
+  /** `page` is the Approval gates screen; `compact` is the Overview "Approval required" list card. */
+  variant?: "page" | "compact";
+  /** Bump to refetch the list; the cards and toasts stay on screen until the new list arrives. */
+  version?: number;
+  /** The compact card's "See all" and "N more" controls. Omitted: no such controls are drawn. */
+  onSeeAll?: () => void;
 }
 
-export function Gates({ onDecided }: GatesProps = {}) {
-  const [state, setState] = useState<State>({ status: "loading" });
-  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+/** How many gates the compact card shows before it links to the rest. */
+const COMPACT_LIMIT = 3;
+
+export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: GatesProps = {}) {
+  const res = useStaleResource("gates", version);
+  // Gates decided in this view, hidden at once and kept hidden even if a refetch still lists them.
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
+  const [deciding, setDeciding] = useState<ReadonlyMap<string, GateDecision>>(new Map());
   const { toasts, notify, dismiss } = useToasts();
   const inFlight = useRef<Set<string>>(new Set());
   const live = useRef(true);
 
-  function load() {
-    setState({ status: "loading" });
-    getGates().then(
-      (gates) => live.current && setState({ status: "ready", gates }),
-      () => live.current && setState({ status: "error" }),
-    );
-  }
-
   useEffect(() => {
     live.current = true;
-    load();
     return () => {
       live.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function setBusyFor(id: string, on: boolean) {
-    setBusy((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(id);
+  function setDecidingFor(id: string, decision: GateDecision | null) {
+    setDeciding((prev) => {
+      const next = new Map(prev);
+      if (decision) next.set(id, decision);
       else next.delete(id);
       return next;
     });
   }
 
   function removeGate(id: string) {
-    setState((s) =>
-      s.status === "ready" ? { status: "ready", gates: s.gates.filter((g) => g.id !== id) } : s,
-    );
+    setRemoved((prev) => new Set(prev).add(id));
   }
 
   async function decide(gate: Gate, decision: GateDecision) {
-    if (inFlight.current.has(gate.id) || busy.has(gate.id)) return;
+    if (inFlight.current.has(gate.id) || deciding.has(gate.id)) return;
     inFlight.current.add(gate.id);
-    setBusyFor(gate.id, true);
+    setDecidingFor(gate.id, decision);
     const verb = decision === "approve" ? "Approved" : "Denied";
     try {
       await decideGate(gate.id, decision);
@@ -86,11 +87,25 @@ export function Gates({ onDecided }: GatesProps = {}) {
       }
     } finally {
       inFlight.current.delete(gate.id);
-      if (live.current) setBusyFor(gate.id, false);
+      if (live.current) setDecidingFor(gate.id, null);
     }
   }
 
-  if (state.status === "loading") {
+  const compact = variant === "compact";
+
+  if (res.status === "loading") {
+    if (compact) {
+      return (
+        <section className="card list-card" role="status">
+          <div className="skeleton-stack">
+            <Skeleton h={22} w="45%" />
+            <Skeleton h={96} r={20} />
+            <Skeleton h={96} r={20} />
+          </div>
+          <p className="loading-caption">Loading approval gates…</p>
+        </section>
+      );
+    }
     return (
       <section className="panel glass" role="status">
         <div className="phead">
@@ -100,21 +115,73 @@ export function Gates({ onDecided }: GatesProps = {}) {
     );
   }
 
-  if (state.status === "error") {
+  if (res.status === "error") {
+    if (compact) {
+      return (
+        <section className="card list-card">
+          <ErrorState
+            title="Could not load approval gates"
+            detail="check that the Ascent backend is running"
+            onRetry={res.retry}
+          />
+        </section>
+      );
+    }
     return (
       <section className="panel glass" role="alert">
         <div className="phead">
           <span className="ptitle">Could not load approval gates</span>
           <span className="count">check that the Ascent backend is running</span>
-          <button type="button" className="deny" onClick={load}>
+          <Button variant="secondary" size="sm" onClick={res.retry}>
             Retry
-          </button>
+          </Button>
         </div>
       </section>
     );
   }
 
-  const { gates } = state;
+  const gates = res.data.filter((g) => !removed.has(g.id));
+  const card = (g: Gate) => (
+    <GateCard
+      key={g.id}
+      gate={g}
+      variant={variant}
+      deciding={deciding.get(g.id)}
+      onDecide={(d) => decide(g, d)}
+    />
+  );
+
+  if (compact) {
+    const shown = gates.slice(0, COMPACT_LIMIT);
+    const more = gates.length - shown.length;
+    return (
+      <>
+        <ListCard
+          title="Approval required"
+          count={`${gates.length} pending`}
+          seeAll={onSeeAll ? { label: "approval gates", onClick: onSeeAll } : undefined}
+        >
+          {gates.length === 0 ? (
+            <EmptyState title="No actions awaiting approval" />
+          ) : (
+            <div className="gate-list">{shown.map(card)}</div>
+          )}
+          {more > 0 ? (
+            onSeeAll ? (
+              <div className="list-more">
+                <Button variant="text" onClick={onSeeAll}>
+                  {more} more in Approval gates
+                </Button>
+              </div>
+            ) : (
+              <p className="list-more">{more} more in Approval gates</p>
+            )
+          ) : null}
+        </ListCard>
+        <ToastStack toasts={toasts} onDismiss={dismiss} />
+      </>
+    );
+  }
 
   return (
     <>
@@ -128,58 +195,7 @@ export function Gates({ onDecided }: GatesProps = {}) {
             {gates.length} pending
           </span>
         </h3>
-        {gates.length === 0 ? (
-          <div className="note">No actions awaiting approval</div>
-        ) : (
-          gates.map((g) => {
-            const inScope = g.in_scope === true;
-            const working = busy.has(g.id);
-            return (
-              <div className="gcard" key={g.id}>
-                <div className="t">
-                  {g.title}
-                  {g.detect_only === true && <span className="badge-detect">DETECT-ONLY</span>}
-                </div>
-                <div className="why">{g.why}</div>
-                <div className="why">
-                  Target: <span className="loc">{g.target}</span>
-                </div>
-                <div className="cmd">{g.command}</div>
-                {typeof g.expected_evidence === "string" && g.expected_evidence !== "" && (
-                  <div className="why">
-                    <b>Expected evidence:</b> <span>{g.expected_evidence}</span>
-                  </div>
-                )}
-                {typeof g.why_it_might_fail === "string" && g.why_it_might_fail !== "" && (
-                  <div className="why">
-                    <b>Why it might fail:</b> <span>{g.why_it_might_fail}</span>
-                  </div>
-                )}
-                {inScope ? (
-                  <div className="scope-ok">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
-                      <path d="M20 6 9 17l-5-5" />
-                    </svg>{" "}
-                    In scope
-                  </div>
-                ) : (
-                  <div className="scope-bad">Out of scope: approval is blocked</div>
-                )}
-                <div className="acts">
-                  <button className="approve" disabled={!inScope || working} onClick={() => decide(g, "approve")}>
-                    Approve
-                  </button>
-                  <button className="deny" disabled={working} onClick={() => decide(g, "deny")}>
-                    Deny
-                  </button>
-                </div>
-                <div className="note">
-                  Every decision is written to the audit log. Approving records consent; it does not run the command.
-                </div>
-              </div>
-            );
-          })
-        )}
+        {gates.length === 0 ? <div className="note">No actions awaiting approval</div> : gates.map(card)}
       </section>
 
       <ToastStack toasts={toasts} onDismiss={dismiss} />

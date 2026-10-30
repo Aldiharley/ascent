@@ -1,85 +1,15 @@
-import { useEffect, useState } from "react";
-import { getAudit } from "../api";
-import type { AuditEntry, AuditLog } from "../api";
+import { AuditEntryRow } from "../components/AuditEntryRow";
+import { useStaleResource } from "../data/resources";
 
-type State =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "ready"; log: AuditLog };
-
-const HASH_CHARS = 12;
-
-function shortHash(h: string | undefined): string {
-  return h ? h.slice(0, HASH_CHARS) : "";
+export interface AuditProps {
+  /** Bump to refetch; the previous entries stay on screen until the new ones arrive. */
+  version?: number;
 }
 
-function EntryRow({ entry }: { entry: AuditEntry }) {
-  const hash = shortHash(entry.entry_hash);
-  if (entry.type === "gate_decision") {
-    return (
-      <div className="ev">
-        <span className="tick human" aria-hidden="true" />
-        <div className="m">
-          <b>Human decision</b> · gate {entry.gate_id ?? "?"} → {entry.decision ?? "?"}
-          <div className="h">{entry.ts ?? ""}</div>
-          {hash ? <div className="h">{hash}</div> : null}
-        </div>
-      </div>
-    );
-  }
-  if (entry.type === "gate_evaluation") {
-    return (
-      <div className="ev">
-        <span className="tick" aria-hidden="true" />
-        <div className="m">
-          <b>Policy gate</b> · {entry.decision ?? "?"} (exit {entry.exit_code ?? "?"})
-          <div className="h">{entry.ts ?? ""}</div>
-          {hash ? <div className="h">{hash}</div> : null}
-        </div>
-      </div>
-    );
-  }
-  if (entry.type === "gate_execution") {
-    return (
-      <div className="ev">
-        <span className="tick human" aria-hidden="true" />
-        <div className="m">
-          <b>Verification run</b> · gate {entry.gate_id ?? "?"} → {entry.outcome ?? "?"}
-          <div className="h">{entry.ts ?? ""}</div>
-          {hash ? <div className="h">{hash}</div> : null}
-        </div>
-      </div>
-    );
-  }
-  const conf = typeof entry.confidence === "number" ? ` (${entry.confidence.toFixed(2)})` : "";
-  return (
-    <div className="ev">
-      <span className="tick" aria-hidden="true" />
-      <div className="m">
-        <b>Triage</b> · finding {entry.finding_id ?? "?"} → {entry.verdict ?? "?"}
-        {conf}
-        <div className="h">{entry.ts ?? ""}</div>
-        {hash ? <div className="h">{hash}</div> : null}
-      </div>
-    </div>
-  );
-}
+export function Audit({ version = 0 }: AuditProps = {}) {
+  const res = useStaleResource("audit", version);
 
-export function Audit() {
-  const [state, setState] = useState<State>({ status: "loading" });
-
-  useEffect(() => {
-    let live = true;
-    getAudit().then(
-      (log) => live && setState({ status: "ready", log }),
-      () => live && setState({ status: "error" }),
-    );
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  if (state.status === "loading") {
+  if (res.status === "loading") {
     return (
       <section className="panel glass" role="status">
         <div className="phead">
@@ -89,7 +19,7 @@ export function Audit() {
     );
   }
 
-  if (state.status === "error") {
+  if (res.status === "error") {
     return (
       <section className="panel glass" role="alert">
         <div className="phead">
@@ -100,7 +30,7 @@ export function Audit() {
     );
   }
 
-  const { entries, chain_ok } = state.log;
+  const { entries, chain_ok } = res.data;
 
   return (
     <section className="audit glass">
@@ -117,9 +47,9 @@ export function Audit() {
       {entries.length === 0 ? (
         <div className="note">No audit entries yet</div>
       ) : (
-        <div className="feed">
+        <div className="feed feed--page">
           {entries.map((e, i) => (
-            <EntryRow key={e.entry_hash ?? i} entry={e} />
+            <AuditEntryRow key={e.entry_hash ?? i} entry={e} />
           ))}
         </div>
       )}

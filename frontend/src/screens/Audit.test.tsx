@@ -117,6 +117,35 @@ test("empty state when there are no entries", async () => {
   expect(await screen.findByText(/No audit entries yet/i)).toBeInTheDocument();
 });
 
+test("a new version refetches and swaps the entries in place, without a loading flash", async () => {
+  const log = (id: string) => json({ entries: [{ type: "gate_decision", gate_id: id, decision: "approved", entry_hash: id }], chain_ok: true });
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(log("g1")).mockResolvedValueOnce(log("g2"));
+  const { rerender } = render(<Audit version={0} />);
+  expect(await screen.findByText(/gate g1 → approved/)).toBeInTheDocument();
+  rerender(<Audit version={1} />);
+  expect(screen.getByText(/gate g1 → approved/)).toBeInTheDocument();
+  expect(screen.queryByText(/Loading audit log/)).toBeNull();
+  expect(await screen.findByText(/gate g2 → approved/)).toBeInTheDocument();
+});
+
+test("the timeline uses the shared audit rows in log order", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    json({
+      entries: [
+        { type: "gate_decision", gate_id: "g1", decision: "approved", entry_hash: "a" },
+        { type: "gate_execution", gate_id: "g1", outcome: "ran", entry_hash: "b" },
+      ],
+      chain_ok: true,
+    }),
+  );
+  const { container } = render(<Audit />);
+  await screen.findByText(/Human decision/);
+  const rows = [...container.querySelectorAll(".feed--page .audit-row")];
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveTextContent("Human decision");
+  expect(rows[1]).toHaveTextContent("Verification run");
+});
+
 test("error state when the request fails", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(json({}, 500));
   render(<Audit />);

@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
-import { getReport } from "../api";
+import { useStaleResource } from "../data/resources";
 
 // The markdown contains text derived from scanned targets (titles, URLs), so it
 // is attacker-controlled. Safety rules, all enforced here:
@@ -22,24 +21,8 @@ const components: Components = {
   ),
 };
 
-type State =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "ready"; markdown: string };
-
-export function Report() {
-  const [state, setState] = useState<State>({ status: "loading" });
-
-  useEffect(() => {
-    let live = true;
-    getReport().then(
-      (markdown) => live && setState({ status: "ready", markdown }),
-      () => live && setState({ status: "error" }),
-    );
-    return () => {
-      live = false;
-    };
-  }, []);
+export function Report({ version = 0 }: { version?: number } = {}) {
+  const state = useStaleResource("report", version);
 
   if (state.status === "loading") {
     return (
@@ -62,7 +45,8 @@ export function Report() {
     );
   }
 
-  if (state.markdown.trim() === "") {
+  const markdown = state.data;
+  if (markdown.trim() === "") {
     return (
       <section className="panel glass">
         <div className="phead">
@@ -77,7 +61,7 @@ export function Report() {
     <section className="panel glass">
       <div className="report">
         <ReactMarkdown components={components}>
-          {state.markdown}
+          {markdown}
         </ReactMarkdown>
       </div>
     </section>

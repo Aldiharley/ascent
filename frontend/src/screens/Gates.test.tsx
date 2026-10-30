@@ -361,6 +361,75 @@ test("a detect-only gate shows the badge, expected evidence and failure note alo
   expect(screen.getByRole("button", { name: /deny/i })).toBeEnabled();
 });
 
+test("the consent sentence stays under every Approve button", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate(), gate({ id: "g2", title: "Two" })]));
+  render(<Gates />);
+  await screen.findByText("Confirm SSRF");
+  expect(
+    screen.getAllByText("Every decision is written to the audit log. Approving records consent; it does not run the command."),
+  ).toHaveLength(2);
+});
+
+test("the busy button shows a spinner and keeps its label", async () => {
+  let resolve!: (r: Response) => void;
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockReturnValueOnce(new Promise<Response>((r) => (resolve = r)));
+  render(<Gates />);
+  const approve = await screen.findByRole("button", { name: "Approve" });
+  fireEvent.click(approve);
+  await waitFor(() => expect(approve).toBeDisabled());
+  expect(approve.querySelector(".spinner")).not.toBeNull();
+  expect(screen.getByRole("button", { name: "Deny" }).querySelector(".spinner")).toBeNull();
+  resolve(json({ ok: true }));
+  await screen.findByText(/No actions awaiting approval/i);
+});
+
+test("the toast dismiss button removes the toast at once", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockResolvedValueOnce(json({ ok: true }));
+  render(<Gates />);
+  fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+  expect(await screen.findByText(/recorded in the audit log/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss notification" }));
+  expect(screen.queryByText(/recorded in the audit log/i)).not.toBeInTheDocument();
+});
+
+test("a new version refetches the list and keeps the cards and toasts on screen meanwhile", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate(), gate({ id: "g2", title: "Confirm XSS" })]))
+    .mockResolvedValueOnce(json({ ok: true }))
+    .mockResolvedValueOnce(json([gate({ id: "g2", title: "Confirm XSS" }), gate({ id: "g3", title: "Confirm CSRF" })]));
+  const { rerender } = render(<Gates version={0} />);
+  await screen.findByText("Confirm SSRF");
+  fireEvent.click(screen.getAllByRole("button", { name: /approve/i })[0]);
+  await screen.findByText(/recorded in the audit log/i);
+  rerender(<Gates version={1} />);
+  // No loading flash: the toast and the remaining card are still there.
+  expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
+  expect(screen.getByText("Confirm XSS")).toBeInTheDocument();
+  expect(await screen.findByText("Confirm CSRF")).toBeInTheDocument();
+  expect(screen.queryByText("Confirm SSRF")).not.toBeInTheDocument();
+  expect(screen.getByText(/recorded in the audit log/i)).toBeInTheDocument();
+});
+
+test("a decided gate stays hidden even if a slow refetch still lists it", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockResolvedValueOnce(json({ ok: true }))
+    .mockResolvedValueOnce(json([gate()])); // stale server view
+  const { rerender } = render(<Gates version={0} />);
+  fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+  await screen.findByText(/No actions awaiting approval/i);
+  rerender(<Gates version={1} />);
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 20)); // let the refetch land
+  });
+  expect(screen.queryByText("Confirm SSRF")).not.toBeInTheDocument();
+  expect(screen.getByText(/No actions awaiting approval/i)).toBeInTheDocument();
+});
+
 test("a gate without detect-only metadata renders no badge and neither line", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate()]));
   render(<Gates />);
@@ -370,6 +439,101 @@ test("a gate without detect-only metadata renders no badge and neither line", as
   expect(screen.queryByText(/Why it might fail/i)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /approve/i })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /deny/i })).toBeInTheDocument();
+});
+
+// ---- compact variant (Overview "Approval required" card) ----
+
+test("compact: a list card titled 'Approval required' with a pending count and See all", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate(), gate({ id: "g2", title: "Two" })]));
+  const onSeeAll = vi.fn();
+  render(<Gates variant="compact" onSeeAll={onSeeAll} />);
+  expect(await screen.findByRole("heading", { level: 2, name: "Approval required" })).toBeInTheDocument();
+  expect(screen.getByText("2 pending")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "See all approval gates" }));
+  expect(onSeeAll).toHaveBeenCalledTimes(1);
+});
+
+test("compact: no See all control when nothing can navigate", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate()]));
+  render(<Gates variant="compact" />);
+  await screen.findByText("Confirm SSRF");
+  expect(screen.queryByRole("button", { name: /see all/i })).toBeNull();
+});
+
+test("compact: evidence and failure notes sit in a <details>, the command and consent note stay visible", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    json([gate({ detect_only: true, expected_evidence: "ev", why_it_might_fail: "wf", command: "nuclei -u x" })]),
+  );
+  render(<Gates variant="compact" />);
+  await screen.findByText("Confirm SSRF");
+  const details = screen.getByText("More context").closest("details") as HTMLElement;
+  expect(details).not.toBeNull();
+  expect(details).toContainElement(screen.getByText("Expected evidence:"));
+  expect(details).toContainElement(screen.getByText("Why it might fail:"));
+  expect(details).toHaveClass("gdetails");
+  // Consent needs the full command and the sentence, outside the fold.
+  expect(details).not.toContainElement(screen.getByText("nuclei -u x"));
+  const note = screen.getByText(
+    "Every decision is written to the audit log. Approving records consent; it does not run the command.",
+  );
+  expect(details).not.toContainElement(note);
+  expect(screen.getByText("DETECT-ONLY")).toBeInTheDocument();
+});
+
+test("compact: a gate with no evidence metadata has no 'More context' fold", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate()]));
+  render(<Gates variant="compact" />);
+  await screen.findByText("Confirm SSRF");
+  expect(screen.queryByText("More context")).toBeNull();
+});
+
+test("the page variant shows the evidence inline, not in a <details>", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json([gate({ expected_evidence: "ev" })]));
+  const { container } = render(<Gates />);
+  await screen.findByText("ev");
+  expect(container.querySelector("details")).toBeNull();
+});
+
+test("compact: shows the first 3 gates and links to the rest", async () => {
+  const gates = ["a", "b", "c", "d", "e"].map((id) => gate({ id, title: `Gate ${id}` }));
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(gates));
+  const onSeeAll = vi.fn();
+  render(<Gates variant="compact" onSeeAll={onSeeAll} />);
+  await screen.findByText("Gate a");
+  expect(screen.getByText("5 pending")).toBeInTheDocument();
+  expect(screen.getByText("Gate c")).toBeInTheDocument();
+  expect(screen.queryByText("Gate d")).toBeNull();
+  expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(3);
+  fireEvent.click(screen.getByRole("button", { name: "2 more in Approval gates" }));
+  expect(onSeeAll).toHaveBeenCalledTimes(1);
+});
+
+test("compact: approving a visible gate pulls the next one into view and calls onDecided", async () => {
+  const gates = ["a", "b", "c", "d"].map((id) => gate({ id, title: `Gate ${id}` }));
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(gates)).mockResolvedValueOnce(json({ ok: true }));
+  const onDecided = vi.fn();
+  render(<Gates variant="compact" onDecided={onDecided} />);
+  await screen.findByText("Gate a");
+  expect(screen.queryByText("Gate d")).toBeNull();
+  fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]);
+  expect(await screen.findByText("Gate d")).toBeInTheDocument();
+  expect(onDecided).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText("Gate a")).toBeNull();
+});
+
+test("compact: empty state and a Retry on failure", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json({}, 500)).mockResolvedValueOnce(json([]));
+  render(<Gates variant="compact" />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load approval gates");
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("No actions awaiting approval")).toBeInTheDocument();
+  expect(screen.getByText("0 pending")).toBeInTheDocument();
+});
+
+test("compact: loading is announced as a status", () => {
+  vi.spyOn(globalThis, "fetch").mockReturnValue(new Promise<Response>(() => {}));
+  render(<Gates variant="compact" />);
+  expect(screen.getByRole("status")).toHaveTextContent("Loading approval gates…");
 });
 
 test("empty or non-true detect-only metadata renders nothing; HTML in it stays literal", async () => {

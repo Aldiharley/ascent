@@ -71,3 +71,15 @@ test("error state when the request fails", async () => {
   render(<Report />);
   expect(await screen.findByRole("alert")).toHaveTextContent(/could not load/i);
 });
+
+test("a new version refetches and swaps the report in place, without a loading flash", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json({ markdown: "## First body" }))
+    .mockResolvedValueOnce(json({ markdown: "## Second body" }));
+  const { rerender } = render(<Report version={0} />);
+  await screen.findByText("First body");
+  rerender(<Report version={1} />);
+  expect(screen.getByText("First body")).toBeInTheDocument();
+  expect(screen.queryByText("Loading report…")).toBeNull();
+  expect(await screen.findByText("Second body")).toBeInTheDocument();
+});

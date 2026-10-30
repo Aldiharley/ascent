@@ -1,14 +1,15 @@
 import { useCallback, useRef, useState } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { PolicyGate } from "./components/PolicyGate";
 import { Shell, navTitle } from "./components/Shell";
 import type { NavId, ShellPolicy } from "./components/Shell";
 import { RESOURCE_KEYS, useResource } from "./data/resources";
 import type { ResourceKey } from "./data/resources";
+import type { Verdict } from "./api";
 import { Audit } from "./screens/Audit";
 import { Findings } from "./screens/Findings";
 import { Gates } from "./screens/Gates";
 import { NewScan } from "./screens/NewScan";
+import { Overview } from "./screens/Overview";
 import { Report } from "./screens/Report";
 
 const NO_ENGAGEMENT = "no engagement loaded";
@@ -77,6 +78,9 @@ export default function App() {
   }, []);
   // The search query lives here so it survives navigation (Findings and Overview filter by it).
   const [query, setQuery] = useState("");
+  // The verdict the Findings table is narrowed to (set by the Overview KPI tiles); kept across
+  // navigation like the query.
+  const [verdictFilter, setVerdictFilter] = useState<Verdict | "ALL">("ALL");
 
   const engagement = useEngagementStatus(versions.engagement);
   const pending = usePendingGates(versions.gates);
@@ -111,7 +115,11 @@ export default function App() {
       return (
         <Shell {...shell}>
           <ErrorBoundary key="findings">
-            <Findings key={versions.findings} />
+            <Findings
+              version={versions.findings}
+              verdictFilter={verdictFilter}
+              onClearFilter={() => setVerdictFilter("ALL")}
+            />
           </ErrorBoundary>
         </Shell>
       );
@@ -119,7 +127,7 @@ export default function App() {
       return (
         <Shell {...shell}>
           <ErrorBoundary key="gates">
-            <Gates onDecided={onDecided} />
+            <Gates version={versions.gates} onDecided={onDecided} />
           </ErrorBoundary>
         </Shell>
       );
@@ -127,7 +135,7 @@ export default function App() {
       return (
         <Shell {...shell}>
           <ErrorBoundary key="report">
-            <Report key={versions.report} />
+            <Report version={versions.report} />
           </ErrorBoundary>
         </Shell>
       );
@@ -135,24 +143,25 @@ export default function App() {
       return (
         <Shell {...shell}>
           <ErrorBoundary key="audit">
-            <Audit key={versions.audit} />
+            <Audit version={versions.audit} />
           </ErrorBoundary>
         </Shell>
       );
     default:
       return (
         <Shell {...shell}>
-          <ErrorBoundary key="overview-gate">
-            <PolicyGate key={versions.gate} />
-          </ErrorBoundary>
-          <ErrorBoundary key="overview-findings">
-            <Findings key={versions.findings} />
-          </ErrorBoundary>
-          <ErrorBoundary key="overview-gates">
-            <Gates onDecided={onDecided} />
-          </ErrorBoundary>
-          <ErrorBoundary key="overview-audit">
-            <Audit key={versions.audit} />
+          <ErrorBoundary key="overview">
+            <Overview
+              versions={versions}
+              query={query}
+              onClearQuery={() => setQuery("")}
+              onNavigate={setActive}
+              onOpenFindings={(filter) => {
+                setVerdictFilter(filter);
+                setActive("findings");
+              }}
+              onDecided={onDecided}
+            />
           </ErrorBoundary>
         </Shell>
       );

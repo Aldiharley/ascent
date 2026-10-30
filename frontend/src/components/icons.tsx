@@ -234,5 +234,17 @@ export const IconCopy = glyph(
   </>,
 );
 
+/** Three dots (an incomplete scan). */
+export const IconEllipsis = glyph("IconEllipsis", <path d="M6 12h.01M12 12h.01M18 12h.01" strokeWidth="3" />);
+
+/** Shield with three dots (no policy verdict yet). */
+export const IconShieldDots = glyph(
+  "IconShieldDots",
+  <>
+    <path d="M12 3 4.5 6v5.6c0 4.6 3.1 8 7.5 9.4 4.4-1.4 7.5-4.8 7.5-9.4V6z" />
+    <path d="M8.5 12h.01M12 12h.01M15.5 12h.01" strokeWidth="3" />
+  </>,
+);
+
 /** Down chevron. */
 export const IconChevronDown = glyph("IconChevronDown", <path d="m6 9 6 6 6-6" />);

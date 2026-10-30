@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { Findings } from "./Findings";
 
@@ -146,6 +146,78 @@ test("shows an empty state for []", async () => {
   expect(await screen.findByText("No findings yet")).toBeInTheDocument();
   expect(screen.queryByRole("table")).not.toBeInTheDocument();
   expect(within(kpi("Findings")).getByText("0", { selector: ".n" })).toBeInTheDocument();
+});
+
+const three = () => [
+  item({ finding: { id: "a", title: "Real one" }, verdict: "TRUE_POSITIVE" }),
+  item({ finding: { id: "b", title: "Maybe two" }, verdict: "ABSTAIN", confidence: 0.4 }),
+  item({ finding: { id: "c", title: "Noise three" }, verdict: "LIKELY_FALSE_POSITIVE", confidence: 0.7 }),
+];
+
+test("a verdict filter (from the Overview tiles) narrows the rows but not the KPI counts", async () => {
+  mockJson(three());
+  render(<Findings verdictFilter="ABSTAIN" />);
+  await screen.findByText("Maybe two");
+  const table = screen.getByRole("table");
+  expect(within(table).queryByText("Real one")).toBeNull();
+  expect(within(table).queryByText("Noise three")).toBeNull();
+  expect(within(kpi("Findings")).getByText("3", { selector: ".n" })).toBeInTheDocument();
+});
+
+test("a narrowed table says so and offers Show all, which the parent handles", async () => {
+  mockJson(three());
+  const onClearFilter = vi.fn();
+  const { rerender } = render(<Findings verdictFilter="ABSTAIN" onClearFilter={onClearFilter} />);
+  await screen.findByText("Maybe two");
+  expect(screen.getByText("Showing only: Needs human")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+  expect(onClearFilter).toHaveBeenCalledTimes(1);
+  // Unfiltered: no note, no button.
+  rerender(<Findings verdictFilter="ALL" onClearFilter={onClearFilter} />);
+  expect(screen.queryByText(/Showing only/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "Show all" })).toBeNull();
+});
+
+test("without a handler a narrowed table still says so but draws no inert button", async () => {
+  mockJson(three());
+  render(<Findings verdictFilter="LIKELY_FALSE_POSITIVE" />);
+  await screen.findByText("Noise three");
+  expect(screen.getByText("Showing only: Likely noise")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Show all" })).toBeNull();
+});
+
+test("filter ALL (or none) shows every row", async () => {
+  mockJson(three());
+  const { rerender } = render(<Findings verdictFilter="ALL" />);
+  await screen.findByText("Real one");
+  expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(4); // header + 3
+  rerender(<Findings />);
+  expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(4);
+});
+
+test("an unknown filter value is treated as ALL", async () => {
+  mockJson(three());
+  render(<Findings verdictFilter={"constructor" as never} />);
+  await screen.findByText("Real one");
+  expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(4);
+});
+
+test("a filter with no matching rows says so instead of showing an empty table", async () => {
+  mockJson([item({ finding: { id: "a", title: "Real one" }, verdict: "TRUE_POSITIVE" })]);
+  render(<Findings verdictFilter="LIKELY_FALSE_POSITIVE" />);
+  expect(await screen.findByText("No findings match this filter")).toBeInTheDocument();
+  expect(screen.queryByRole("table")).toBeNull();
+});
+
+test("a new version refetches and swaps the rows in place", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(new Response(JSON.stringify([item({ finding: { id: "a", title: "Old row" } })])))
+    .mockResolvedValueOnce(new Response(JSON.stringify([item({ finding: { id: "b", title: "New row" } })])));
+  const { rerender } = render(<Findings version={0} />);
+  await screen.findByText("Old row");
+  rerender(<Findings version={1} />);
+  expect(screen.getByText("Old row")).toBeInTheDocument(); // no loading flash
+  expect(await screen.findByText("New row")).toBeInTheDocument();
 });
 
 test("renders attacker-controlled titles as literal text (no HTML injection)", async () => {

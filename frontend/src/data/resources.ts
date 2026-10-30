@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAudit,
   getEngagement,
@@ -58,6 +58,10 @@ const cache = new Map<string, Entry>();
 
 const idOf = (key: ResourceKey, version: number) => `${key}@${version}`;
 
+// Mounted consumers listen for a Retry of their `key@version`: a failure evicts the entry, so
+// every consumer that was showing it needs to ask again, not only the one whose button was clicked.
+const retryListeners = new Set<(id: string) => void>();
+
 /** Test hook: forget every cached request (called from `src/test/setup.ts` after each test). */
 export function __resetResourceCache(): void {
   cache.clear();
@@ -114,10 +118,21 @@ export function useResource<K extends ResourceKey>(
     };
   }, [key, version, id, attempt]);
 
+  useEffect(() => {
+    const onRetry = (retried: string) => {
+      if (retried !== id) return;
+      setLocal(null);
+      setAttempt((n) => n + 1);
+    };
+    retryListeners.add(onRetry);
+    return () => {
+      retryListeners.delete(onRetry);
+    };
+  }, [id]);
+
   const retry = useCallback(() => {
     cache.delete(id);
-    setLocal(null);
-    setAttempt((n) => n + 1);
+    for (const listener of [...retryListeners]) listener(id);
   }, [id]);
 
   // Prefer the shared cache (ready on the very first render of a remount), else this hook's own
@@ -129,4 +144,22 @@ export function useResource<K extends ResourceKey>(
   const result = cached ?? (local?.id === id ? local.result : undefined);
   if (!result) return { status: "loading" };
   return result.ok ? { status: "ready", data: result.data } : { status: "error", retry };
+}
+
+/**
+ * `useResource` for views that stay on screen across a refresh: while a newer version loads it keeps
+ * returning the previous payload (as `ready`), so Refresh swaps data in place instead of flashing a
+ * skeleton and a decision toast or a scroll position survives. A first load is still `loading`, and
+ * a failure is reported as an error, after which there is nothing stale left to show.
+ */
+export function useStaleResource<K extends ResourceKey>(
+  key: K,
+  version = 0,
+): Resource<ResourceMap[K]> {
+  const res = useResource(key, version);
+  const last = useRef<{ data: ResourceMap[K] } | null>(null);
+  if (res.status === "ready") last.current = { data: res.data };
+  else if (res.status === "error") last.current = null;
+  if (res.status === "loading" && last.current) return { status: "ready", data: last.current.data };
+  return res;
 }

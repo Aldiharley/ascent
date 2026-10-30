@@ -8,7 +8,7 @@
 .grid > *{min-width:0}
 @media (max-width:1279px){
   .col-4{grid-column:span 6}
-  .col-4:last-child{grid-column:1 / -1}
+  .col-4.col-last{grid-column:1 / -1}   /* the third list card spans the row */
 }
 @media (max-width:1023px){
   .col-3{grid-column:span 6}
@@ -44,7 +44,7 @@
 @media (max-width:640px){
   .hero{min-height:0;padding:24px 20px}
   .hero .mascot--hero{width:120px;height:120px;left:auto;right:12px;bottom:auto;top:-20px}
-  .hero-greet,.hero-eng{padding-right:110px}
+  .hero-greet,.hero-eng,.hero-sum{padding-right:110px}   /* spec: first two lines; the summary would touch the mascot too */
   .hero-text{max-width:none}
   .hero-cta{flex-direction:column}
   .hero-cta .btn{width:100%}
@@ -202,6 +202,81 @@
 .audit-node svg{width:16px;height:16px;stroke:currentColor;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}
 .audit-meta{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;font:var(--t-mono-sm);color:var(--ink-3)}
 .audit-hash{padding:1px 8px;border-radius:var(--r-xs);background:var(--surface-sunken);font:var(--t-mono-sm)}
+
+/* ---------- bits shared by the Overview cards ---------- */
+.loading-caption{font:var(--t-small);color:var(--ink-2);margin:var(--s-3) 0 0}
+.skeleton-stack{display:flex;flex-direction:column;gap:var(--s-3)}
+.list-plain{list-style:none;margin:0;padding:0}
+.list-more{margin:var(--s-2) 0 0;font:var(--t-small);color:var(--ink-2);text-align:center}
+.gate-list{display:flex;flex-direction:column;gap:var(--s-3)}
+.chart-empty{margin:var(--s-2) 0 0;font:var(--t-small);color:var(--ink-2);text-align:center}
+.chart-card .bar-svg{height:240px}
+.donut-segs{filter:drop-shadow(0 6px 10px rgba(31,45,58,.18))}
+.donut-total{font:var(--t-kpi);fill:var(--ink);font-variant-numeric:tabular-nums}
+.donut-caption{font:var(--t-micro);fill:var(--ink-2)}
+.hero{margin-top:48px}            /* the mascot's head rises 48px above the banner */
+@media (max-width:640px){.hero{margin-top:24px}}
+.banner--loading{display:flex;align-items:center}
+
+/* ---------- policy gate card extras (4.4) ---------- */
+.policy{display:flex;flex-direction:column;gap:var(--s-4)}
+.policy-head{display:flex;align-items:center;gap:var(--s-4);flex-wrap:wrap}
+.policy-title-col{flex:1;min-width:200px}
+.policy-title-col .card-title{margin:0}
+.policy-headline{margin:2px 0 0}
+.policy-meta-col{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap;margin-left:auto}
+@media (max-width:640px){.policy-meta-col{margin-left:0;flex-basis:100%}}
+.policy-meta{font:var(--t-mono-sm);color:var(--ink-2)}
+.policy .tag{background:rgba(255,255,255,.70)}
+.policy .stat{flex:1 1 120px}
+.policy-why{display:flex;gap:var(--s-3);align-items:flex-start;padding:12px 14px;border-radius:14px;
+  background:rgba(255,255,255,.65);font:var(--t-small);color:var(--ink-2)}
+.policy-why svg,.policy-note svg{width:18px;height:18px;flex:none;stroke:currentColor;stroke-width:2;fill:none;
+  stroke-linecap:round;stroke-linejoin:round}
+.policy-why svg{margin-top:1px}
+.policy code{font:var(--t-mono);background:rgba(255,255,255,.7);border-radius:6px;padding:1px 6px}
+.policy-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s-2)}
+.policy-list li{display:flex;flex-wrap:wrap;align-items:center;gap:6px var(--s-3);padding:10px 14px;
+  border-radius:14px;background:var(--surface-raised);box-shadow:0 4px 10px -8px rgba(20,35,50,.30)}
+.policy-title{font:var(--t-h3);color:var(--ink)}
+.policy-reason{font:var(--t-small);color:var(--ink-2);margin-left:auto}
+@media (max-width:640px){.policy-reason{margin-left:0;flex-basis:100%}}
+.policy-note{display:flex;gap:var(--s-2);align-items:center;margin:0;font:var(--t-small);color:var(--ink-2)}
+
+/* ---------- gate card extras (4.5) ---------- */
+.gcard-head{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap}
+.gcard-head .ibadge{width:40px;height:40px;border-radius:14px}
+.gcard-head .ibadge svg{width:20px;height:20px}
+.gcard--compact .gcard-head .ibadge{width:32px;height:32px;border-radius:11px}
+.gcard--compact .gcard-head .ibadge svg{width:18px;height:18px}
+.gcard-title{margin:0;flex:1 1 150px;min-width:0;overflow-wrap:anywhere}   /* the DETECT-ONLY badge wraps below a long title */
+.gcard p{margin:0}
+.gcard-label{font:var(--t-micro);text-transform:uppercase;letter-spacing:var(--tracking-caps);color:var(--ink-2)}
+.tag--wrap{height:auto;min-height:24px;padding:3px 8px;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.gcard .scope-ok svg{width:14px;height:14px;stroke:currentColor;stroke-width:2.6;fill:none}
+.gcard .acts .btn{height:44px}
+.gcard--compact .acts .btn{height:40px}
+.gcard .acts .deny{padding:0 20px}
+.gcard .note svg{width:16px;height:16px;flex:none;margin-top:2px;stroke:currentColor;stroke-width:2;fill:none;
+  stroke-linecap:round;stroke-linejoin:round}
+.gdetails{display:flex;flex-direction:column;gap:var(--s-2)}
+.gdetails[open] summary{margin-bottom:var(--s-1)}
+
+/* ---------- audit row extras (3.6) ---------- */
+.audit-node--triage{background:var(--badge-teal)}
+.audit-node--decision{background:var(--badge-lav)}
+.audit-node--policy{background:var(--badge-sand)}
+.audit-node--run{background:var(--badge-ice)}
+.audit-body{flex:1;min-width:0}
+.audit-line{font:var(--t-body);color:var(--ink);overflow-wrap:anywhere}
+.audit-ts{color:var(--ink-3)}
+.audit-row--page::before{ /* the 2px rail through the disc centres */
+  content:"";position:absolute;left:13px;top:32px;bottom:calc(-1 * var(--s-3));width:2px;background:var(--border-soft)}
+.audit-row--page:last-child::before{display:none}
+.audit-row--compact{gap:var(--s-2)}
+.audit-row--compact .audit-node{width:24px;height:24px}
+.audit-row--compact .audit-node svg{width:14px;height:14px}
+.feed--compact{gap:var(--s-2)}
 
 /* Reduced motion (spec 1.9). Deliberately the last rule set loaded: components.css and screens.css
    define the animations and transitions this must override. Keep it a single block, at the end. */
