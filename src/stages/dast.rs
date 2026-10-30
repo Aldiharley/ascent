@@ -19,6 +19,11 @@ const STANDARD_TAGS: &str = "tech,misconfig,exposure,headers,cors,cookie,session
 
 /// `-ni`: no interactsh, so no out-of-band traffic to a third-party OAST server.
 /// `-duc`: no update check (no egress beyond the target).
+/// `-nmhe`: never skip a host after `-max-host-error` errors. nuclei skips it silently
+/// (nothing printed under `-silent`), so a handful of failing templates would lose
+/// every later check against an in-scope host without a trace.
+/// `-pt http`: http-protocol templates only (the `-dast` fuzzing templates are http).
+/// network/dns/ssl/javascript/... templates can address hosts other than the input.
 pub fn common_nuclei_args() -> Vec<String> {
     [
         "-silent",
@@ -31,6 +36,9 @@ pub fn common_nuclei_args() -> Vec<String> {
         "10",
         "-ni",
         "-duc",
+        "-nmhe",
+        "-pt",
+        "http",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -39,7 +47,8 @@ pub fn common_nuclei_args() -> Vec<String> {
 
 /// The profile's nuclei passes. Every pass of every profile excludes
 /// [`ALWAYS_EXCLUDED`] and disables redirects (`-dr`, so a redirect can never take
-/// nuclei off scope); nothing here comes from engagement config.
+/// nuclei off scope); nothing here comes from engagement config. Only the active
+/// profile (the opt-in "may change state" one) runs `intrusive` templates.
 pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
     let pass = |tags: &str, extra_etags: &str| -> Vec<String> {
         vec![
@@ -52,7 +61,7 @@ pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
     };
     match profile {
         DastProfile::Passive => vec![pass(PASSIVE_TAGS, "intrusive,fuzz")],
-        DastProfile::Standard => vec![pass(STANDARD_TAGS, "fuzz")],
+        DastProfile::Standard => vec![pass(STANDARD_TAGS, "intrusive,fuzz")],
         DastProfile::Active => vec![
             pass(STANDARD_TAGS, "fuzz"),
             vec![
@@ -622,16 +631,51 @@ mod tests {
         assert_eq!(st.len(), 1);
         let tags = &st[0][1];
         assert!(tags.contains("sqli") && tags.contains("xss"), "{tags}");
-        let etags = &st[0][3];
-        for t in ["dos", "brute-force", "default-login", "fuzz"] {
-            assert!(etags.contains(t), "{etags}");
-        }
-        assert!(!etags.contains("intrusive"), "{etags}");
 
         let a = nuclei_passes(DastProfile::Active);
         assert_eq!(a.len(), 2);
         assert_eq!(a[1][0], "-dast");
         assert!(joined(&a[1]).contains("dos,brute-force,default-login"));
+    }
+
+    fn etags_of(pass: &[String]) -> &str {
+        let i = pass.iter().position(|a| a == "-etags").expect("-etags present");
+        &pass[i + 1]
+    }
+
+    #[test]
+    fn etags_per_profile_standard_excludes_intrusive_active_keeps_it() {
+        let p = nuclei_passes(DastProfile::Passive);
+        assert_eq!(etags_of(&p[0]), "dos,brute-force,default-login,intrusive,fuzz");
+        // standard is non-destructive: intrusive templates (RCE/file-write chains) never run
+        let st = nuclei_passes(DastProfile::Standard);
+        assert_eq!(etags_of(&st[0]), "dos,brute-force,default-login,intrusive,fuzz");
+        // active is the opt-in "may change state" profile: intrusive runs there only
+        let a = nuclei_passes(DastProfile::Active);
+        assert_eq!(etags_of(&a[0]), "dos,brute-force,default-login,fuzz");
+        assert_eq!(etags_of(&a[1]), "dos,brute-force,default-login");
+    }
+
+    #[test]
+    fn nuclei_never_skips_a_host_and_runs_http_templates_only() {
+        let c = common_nuclei_args();
+        assert!(c.contains(&"-nmhe".to_string()), "{c:?}");
+        assert!(c.windows(2).any(|w| w[0] == "-pt" && w[1] == "http"), "{c:?}");
+        assert!(!c.iter().any(|a| a == "-mhe" || a == "-max-host-error"), "{c:?}");
+        // ...and every nuclei scan call of every profile carries them
+        for prof in [DastProfile::Passive, DastProfile::Standard, DastProfile::Active] {
+            let f = Fake::new();
+            let mut e = eng();
+            e.dast.profile = prof;
+            run_dast(&e, &f, None, true).unwrap();
+            let calls = f.calls.borrow();
+            let scans: Vec<_> = calls.iter().filter(|c| c.0 == "nuclei").collect();
+            assert_eq!(scans.len(), nuclei_passes(prof).len(), "{prof:?}");
+            for c in scans {
+                assert!(c.1.contains(&"-nmhe".to_string()), "{prof:?} {:?}", c.1);
+                assert!(c.1.windows(2).any(|w| w[0] == "-pt" && w[1] == "http"), "{prof:?} {:?}", c.1);
+            }
+        }
     }
 
     #[test]
