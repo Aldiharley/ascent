@@ -1,5 +1,9 @@
 use crate::runner::Runner;
 use std::collections::BTreeSet;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
 /// Parses a strict `MAJOR.MINOR.PATCH` token; any non-numeric part rejects it.
@@ -24,30 +28,63 @@ pub fn ensure_nuclei_version(runner: &dyn Runner) -> Result<(), Box<dyn std::err
     }
 }
 
+/// A temporary URL list that is deleted when dropped (also on error or panic).
+struct ListFile(PathBuf);
+impl ListFile {
+    fn create(lines: &[String]) -> std::io::Result<Self> {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "ascent-nuclei-{}-{nanos}-{}.txt",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)?;
+        let file = ListFile(p);
+        f.write_all((lines.join("\n") + "\n").as_bytes())?;
+        Ok(file)
+    }
+}
+impl Drop for ListFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Runs nuclei with the caller's flags and returns its raw JSON rows. `args` are
-/// passed verbatim, followed by one `-u` per URL.
+/// passed verbatim, followed by `-l <file>` listing the URLs (one `-u` per URL would
+/// overflow Windows' 32K command line on a real app).
 pub fn scan_rows(
     runner: &dyn Runner,
     urls: &[String],
     args: &[String],
 ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    // Targets and `-u` args are derived in one pass so every URL nuclei scans has its
-    // host scope-checked; URLs without a host are never scanned.
+    // Targets and the URL list are derived in one pass so every URL nuclei scans has
+    // its host scope-checked; URLs without a host are never scanned.
     let mut hosts: BTreeSet<String> = BTreeSet::new();
-    let mut args: Vec<String> = args.to_vec();
+    let mut listed: Vec<String> = Vec::new();
     for u in urls {
         if let Some(h) = Url::parse(u)
             .ok()
             .and_then(|p| p.host_str().map(String::from))
         {
             hosts.insert(h);
-            args.push("-u".into());
-            args.push(u.clone());
+            listed.push(u.clone());
         }
     }
     if hosts.is_empty() {
         return Ok(vec![]);
     }
+    let list = ListFile::create(&listed)?;
+    let mut args: Vec<String> = args.to_vec();
+    args.push("-l".into());
+    args.push(list.0.to_string_lossy().into_owned());
     let hv: Vec<String> = hosts.into_iter().collect();
     runner.run_json("nuclei", &args, &hv)
 }
@@ -94,25 +131,41 @@ mod tests {
     }
 
     #[test]
-    fn caller_args_pass_verbatim_before_the_url_list() {
+    fn caller_args_pass_verbatim_then_a_list_file() {
         let rec = Rec::default();
         let mut args = jsonl();
         args.extend(["-tags".into(), "xss".into()]);
         scan_rows(&rec, &["https://app.example.com/".to_string()], &args).unwrap();
         let calls = rec.calls.borrow();
         let (_, got, targets) = &calls[0];
-        assert_eq!(
-            got,
-            &vec![
-                "-silent",
-                "-jsonl",
-                "-tags",
-                "xss",
-                "-u",
-                "https://app.example.com/"
-            ]
-        );
+        assert_eq!(got.len(), 6, "{got:?}");
+        assert_eq!(&got[..5], &["-silent", "-jsonl", "-tags", "xss", "-l"]);
+        assert!(!got.iter().any(|a| a == "-u"), "{got:?}");
         assert_eq!(targets, &vec!["app.example.com".to_string()]);
+        assert_eq!(rec.lists.borrow()[0], vec!["https://app.example.com/"]);
+        assert!(!std::path::Path::new(&got[5]).exists(), "list file left behind");
+    }
+
+    #[test]
+    fn a_long_surface_goes_through_one_list_file() {
+        let rec = Rec::default();
+        let urls: Vec<String> = (0..3000).map(|i| format!("https://app.example.com/p/{i}?q=1")).collect();
+        scan_rows(&rec, &urls, &jsonl()).unwrap();
+        let calls = rec.calls.borrow();
+        let (_, got, _) = &calls[0];
+        assert!(got.iter().map(String::len).sum::<usize>() < 1024, "command line grows with the surface");
+        assert_eq!(rec.lists.borrow()[0], urls);
+    }
+
+    #[test]
+    fn list_file_is_removed_when_nuclei_fails_and_names_are_unique() {
+        let rec = Rec { fail: true, ..Default::default() };
+        assert!(scan_rows(&rec, &["https://app.example.com/".to_string()], &jsonl()).is_err());
+        assert!(scan_rows(&rec, &["https://app.example.com/".to_string()], &jsonl()).is_err());
+        let calls = rec.calls.borrow();
+        let (a, b) = (calls[0].1.last().unwrap(), calls[1].1.last().unwrap());
+        assert_ne!(a, b);
+        assert!(!std::path::Path::new(a).exists() && !std::path::Path::new(b).exists());
     }
 
     use std::cell::RefCell;
@@ -120,6 +173,9 @@ mod tests {
     #[derive(Default)]
     struct Rec {
         calls: RefCell<Vec<Call>>,
+        /// The `-l` file's lines, read while the call runs.
+        lists: RefCell<Vec<Vec<String>>>,
+        fail: bool,
     }
     impl Runner for Rec {
         fn run_json(
@@ -131,6 +187,13 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push((t.to_string(), a.to_vec(), g.to_vec()));
+            if let Some(w) = a.windows(2).find(|w| w[0] == "-l") {
+                let text = std::fs::read_to_string(&w[1]).unwrap();
+                self.lists.borrow_mut().push(text.lines().map(String::from).collect());
+            }
+            if self.fail {
+                return Err("nuclei crashed".into());
+            }
             Ok(vec![])
         }
         fn run_text(
@@ -157,7 +220,7 @@ mod tests {
         assert_eq!(tool, "nuclei");
         assert_eq!(targets, &vec!["app.example.com".to_string()]);
         assert!(!args.iter().any(|a| a.contains("evil.com")));
-        assert!(args.contains(&"https://app.example.com/".to_string()));
+        assert_eq!(rec.lists.borrow()[0], vec!["https://app.example.com/"]);
     }
 
     #[test]

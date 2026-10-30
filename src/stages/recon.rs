@@ -24,12 +24,15 @@ pub fn is_subfinder_candidate(host: &str) -> bool {
 }
 
 /// Probes `host` (and, when `use_subfinder`, its discovered subdomains) with httpx
-/// and returns the live URLs. Every host passed to a tool is also a scope target.
+/// and returns `(live URLs, dropped)`. A name `in_scope` refuses (off scope, or
+/// invalid such as `_dmarc.example.com`) is dropped and counted, never probed, and
+/// never aborts the run. Every host passed to a tool is also a scope target.
 pub fn recon(
     runner: &dyn Runner,
     host: &str,
     use_subfinder: bool,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    in_scope: &dyn Fn(&str) -> bool,
+) -> Result<(Vec<String>, usize), Box<dyn std::error::Error>> {
     let mut hosts: BTreeSet<String> = BTreeSet::new();
     if use_subfinder {
         let subs = runner.run_json(
@@ -43,6 +46,12 @@ pub fn recon(
         );
     }
     hosts.insert(host.into());
+    let total = hosts.len();
+    hosts.retain(|h| in_scope(h));
+    let dropped = total - hosts.len();
+    if hosts.is_empty() {
+        return Ok((vec![], dropped));
+    }
     let mut args = vec!["-silent".into(), "-json".into()];
     for h in &hosts {
         args.push("-u".into());
@@ -54,7 +63,7 @@ pub fn recon(
         .iter()
         .filter_map(|r| r["url"].as_str().map(String::from))
         .collect();
-    Ok(urls.into_iter().collect())
+    Ok((urls.into_iter().collect(), dropped))
 }
 
 /// Probes the declared `urls` with httpx (no auth header, no redirect following)
@@ -162,9 +171,65 @@ mod tests {
     #[test]
     fn recon_live_urls() {
         assert_eq!(
-            recon(&Fake, "example.com", true).unwrap(),
-            vec!["https://app.example.com".to_string()]
+            recon(&Fake, "example.com", true, &|_| true).unwrap(),
+            (vec!["https://app.example.com".to_string()], 0)
         );
+    }
+
+    /// subfinder reports an in-scope name, an invalid one and an off-scope one.
+    #[derive(Default)]
+    struct SubRec {
+        calls: RefCell<Vec<Call>>,
+    }
+    impl Runner for SubRec {
+        fn run_json(
+            &self,
+            t: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            self.calls
+                .borrow_mut()
+                .push((t.to_string(), a.to_vec(), g.to_vec()));
+            Ok(match t {
+                "subfinder" => vec![
+                    json!({"host":"app.example.com"}),
+                    json!({"host":"_dmarc.example.com"}),
+                    json!({"host":"evil.test"}),
+                ],
+                _ => vec![],
+            })
+        }
+        fn run_text(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn subfinder_names_are_scope_filtered_before_httpx() {
+        let eng = crate::scope::Engagement {
+            name: "t".into(),
+            hosts: vec!["example.com".into()],
+            ..Default::default()
+        };
+        let guard = crate::scope::ScopeGuard::new(&eng);
+        let rec = SubRec::default();
+        let (_, dropped) = recon(&rec, "example.com", true, &|h| guard.in_scope(h)).unwrap();
+        assert_eq!(dropped, 2);
+        let calls = rec.calls.borrow();
+        let (tool, args, targets) = &calls[1];
+        assert_eq!(tool, "httpx");
+        assert_eq!(
+            targets,
+            &vec!["app.example.com".to_string(), "example.com".to_string()]
+        );
+        assert!(args.contains(&"app.example.com".to_string()));
+        assert!(!args.iter().any(|a| a.contains("_dmarc") || a.contains("evil.test")), "{args:?}");
     }
 
     #[test]
@@ -210,7 +275,7 @@ mod tests {
     #[test]
     fn recon_without_subfinder_never_calls_it_and_still_probes_host() {
         let rec = Rec::default();
-        let out = recon(&rec, "localhost", false).unwrap();
+        let (out, _) = recon(&rec, "localhost", false, &|_| true).unwrap();
         assert_eq!(out, vec!["http://localhost:3000".to_string()]);
         let calls = rec.calls.borrow();
         assert!(calls.iter().all(|(t, _, _)| t != "subfinder"));
@@ -318,7 +383,7 @@ mod tests {
     #[test]
     fn recon_with_subfinder_calls_it_scope_checked() {
         let rec = Rec::default();
-        recon(&rec, "example.com", true).unwrap();
+        recon(&rec, "example.com", true, &|_| true).unwrap();
         let calls = rec.calls.borrow();
         assert_eq!(calls[0].0, "subfinder");
         assert_eq!(calls[0].2, vec!["example.com".to_string()]);

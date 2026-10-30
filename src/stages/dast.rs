@@ -17,6 +17,8 @@ pub const ALWAYS_EXCLUDED: &str = "dos,brute-force,default-login";
 const PASSIVE_TAGS: &str = "tech,misconfig,exposure,headers,cors,cookie,session";
 const STANDARD_TAGS: &str = "tech,misconfig,exposure,headers,cors,cookie,session,cve,sqli,xss,auth-bypass,jwt,idor,csrf,redirect,ssrf,lfi";
 
+/// `-ni`: no interactsh, so no out-of-band traffic to a third-party OAST server.
+/// `-duc`: no update check (no egress beyond the target).
 pub fn common_nuclei_args() -> Vec<String> {
     [
         "-silent",
@@ -27,6 +29,8 @@ pub fn common_nuclei_args() -> Vec<String> {
         "10",
         "-timeout",
         "10",
+        "-ni",
+        "-duc",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -34,7 +38,8 @@ pub fn common_nuclei_args() -> Vec<String> {
 }
 
 /// The profile's nuclei passes. Every pass of every profile excludes
-/// [`ALWAYS_EXCLUDED`]; nothing here comes from engagement config.
+/// [`ALWAYS_EXCLUDED`] and disables redirects (`-dr`, so a redirect can never take
+/// nuclei off scope); nothing here comes from engagement config.
 pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
     let pass = |tags: &str, extra_etags: &str| -> Vec<String> {
         vec![
@@ -42,6 +47,7 @@ pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
             tags.into(),
             "-etags".into(),
             format!("{ALWAYS_EXCLUDED},{extra_etags}"),
+            "-dr".into(),
         ]
     };
     match profile {
@@ -49,7 +55,12 @@ pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
         DastProfile::Standard => vec![pass(STANDARD_TAGS, "fuzz")],
         DastProfile::Active => vec![
             pass(STANDARD_TAGS, "fuzz"),
-            vec!["-dast".into(), "-etags".into(), ALWAYS_EXCLUDED.into()],
+            vec![
+                "-dast".into(),
+                "-etags".into(),
+                ALWAYS_EXCLUDED.into(),
+                "-dr".into(),
+            ],
         ],
     }
 }
@@ -191,7 +202,7 @@ const CATEGORIES: &[Category] = &[
         name: "Server-side request forgery",
         tags: &["ssrf"],
         min: Some(DastProfile::Standard),
-        note: None,
+        note: Some("blind/out-of-band SSRF not tested (interactsh disabled)"),
     },
     Category {
         id: "lfi",
@@ -379,10 +390,11 @@ pub fn run_dast(
     let (live_urls, dead_urls) = probe_urls(runner, &declared).map_err(scrubbed)?;
     let (live_urls, dead_urls) = if live { (live_urls, dead_urls) } else { (declared, vec![]) };
     let mut seed: BTreeSet<String> = live_urls.iter().cloned().collect();
+    let mut recon_dropped = 0;
     for h in &eng.hosts {
-        for u in recon(runner, h, is_subfinder_candidate(h)).map_err(scrubbed)? {
-            seed.insert(u);
-        }
+        let (urls, d) = recon(runner, h, is_subfinder_candidate(h), &|n| guard.in_scope(n)).map_err(scrubbed)?;
+        seed.extend(urls);
+        recon_dropped += d;
     }
     // An off-scope seed (e.g. an httpx redirect target) is dropped and counted, never crawled.
     let (seed, seed_dropped) = filter_in_scope(seed.into_iter().collect(), &|u| guard.in_scope(u));
@@ -391,7 +403,7 @@ pub fn run_dast(
     let seeds: BTreeSet<&String> = seed.iter().collect();
     let crawled_n = crawled.iter().filter(|u| !seeds.contains(u)).count();
     let (surface, crawl_dropped) = filter_in_scope(crawled, &|u| guard.in_scope(u));
-    let dropped = url_dropped + seed_dropped + crawl_dropped;
+    let dropped = url_dropped + recon_dropped + seed_dropped + crawl_dropped;
     let mut rows = Vec::new();
     if !surface.is_empty() {
         for pass in nuclei_passes(eng.dast.profile) {
@@ -449,6 +461,10 @@ mod tests {
         dead: Vec<&'static str>,
         /// `httpx -version` output.
         httpx_version: &'static str,
+        /// Names subfinder reports for example.com.
+        subs: Vec<&'static str>,
+        /// The URL list file (`-l`) of each nuclei call, read while it exists.
+        nuclei_lists: RefCell<Vec<Vec<String>>>,
     }
     impl Fake {
         fn new() -> Self {
@@ -459,6 +475,8 @@ mod tests {
                 nuclei_twice: false,
                 dead: vec![],
                 httpx_version: "projectdiscovery.io\n[INF] Current Version: v1.12.0",
+                subs: vec![],
+                nuclei_lists: RefCell::new(vec![]),
             }
         }
         fn count(&self, tool: &str) -> usize {
@@ -476,7 +494,7 @@ mod tests {
                 .borrow_mut()
                 .push((tool.into(), args.to_vec(), targets.to_vec()));
             Ok(match tool {
-                "subfinder" => vec![],
+                "subfinder" => self.subs.iter().map(|h| json!({ "host": h })).collect(),
                 "httpx" => {
                     // A `-u` URL is a liveness probe (echoed back unless dead); a bare
                     // host is recon (only example.com answers).
@@ -502,6 +520,12 @@ mod tests {
                     katana_row("https://example.com/a"),
                 ],
                 "nuclei" => {
+                    if let Some(w) = args.windows(2).find(|w| w[0] == "-l") {
+                        let text = std::fs::read_to_string(&w[1]).unwrap();
+                        self.nuclei_lists
+                            .borrow_mut()
+                            .push(text.lines().map(String::from).collect());
+                    }
                     if let Some(e) = self.nuclei_err {
                         return Err(e.into());
                     }
@@ -588,6 +612,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn nuclei_never_uses_interactsh_update_checks_or_redirects() {
+        let c = common_nuclei_args();
+        assert!(c.contains(&"-ni".to_string()), "{c:?}");
+        assert!(c.contains(&"-duc".to_string()), "{c:?}");
+        for prof in [DastProfile::Passive, DastProfile::Standard, DastProfile::Active] {
+            for pass in nuclei_passes(prof) {
+                assert!(pass.contains(&"-dr".to_string()), "{prof:?} {pass:?}");
+                assert!(!pass.iter().any(|a| a == "-fr" || a == "-fhr"), "{pass:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ssrf_is_limited_because_interactsh_is_disabled() {
+        for prof in [DastProfile::Standard, DastProfile::Active] {
+            let c = coverage(prof, false, 1, false, &[]);
+            assert_eq!(cat(&c, "ssrf")["status"], "limited", "{prof:?}");
+            assert!(
+                cat(&c, "ssrf")["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("blind/out-of-band SSRF not tested (interactsh disabled)"),
+                "{prof:?} {}",
+                cat(&c, "ssrf")
+            );
+        }
+        // never claimed when nothing ran
+        let p = coverage(DastProfile::Passive, false, 1, false, &[]);
+        assert_eq!(cat(&p, "ssrf")["status"], "not_tested");
     }
 
     #[test]
@@ -699,7 +755,7 @@ mod tests {
         assert_eq!(s["authenticated"], true);
 
         let a = coverage(DastProfile::Active, false, 1, false, &[]);
-        for id in ["sqli", "xss", "lfi", "ssrf", "redirect"] {
+        for id in ["sqli", "xss", "lfi", "redirect"] {
             assert_eq!(
                 cat(&a, id)["reason"],
                 "templates plus parameter fuzzing",
@@ -791,15 +847,12 @@ mod tests {
         assert_eq!(out.summary.auth_header, "Authorization");
         assert!(out.summary.authenticated);
         assert_eq!(out.summary.profile, "standard");
-        let nuclei_args = f
-            .calls
-            .borrow()
-            .iter()
-            .find(|c| c.0 == "nuclei")
-            .unwrap()
-            .1
-            .clone();
-        assert!(nuclei_args.contains(&"http://localhost:3000/rest/products".to_string()));
+        let lists = f.nuclei_lists.borrow();
+        assert!(!lists.is_empty());
+        for l in lists.iter() {
+            assert!(l.contains(&"http://localhost:3000/rest/products".to_string()), "{l:?}");
+            assert!(!l.iter().any(|u| u.contains("github.com")), "{l:?}");
+        }
         assert_eq!(out.findings.len(), 1);
         assert!(out.findings[0].evidence.contains("***"));
         assert!(!out.findings[0].evidence.contains("s3cr3t"));
@@ -908,6 +961,21 @@ mod tests {
         assert_eq!(probe.2, vec!["localhost".to_string()]);
         let katana = calls.iter().find(|c| c.0 == "katana").unwrap();
         assert!(!katana.1.contains(&"http://localhost:3000/".to_string()), "{:?}", katana.1);
+    }
+
+    #[test]
+    fn run_dast_drops_and_counts_invalid_subfinder_names_without_aborting() {
+        let mut f = Fake::new();
+        f.subs = vec!["_dmarc.example.com", "www.example.com"];
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(out.summary.out_of_scope_dropped, 2); // _dmarc + github.com from the crawl
+        let calls = f.calls.borrow();
+        let recon = calls
+            .iter()
+            .find(|c| c.0 == "httpx" && c.2.contains(&"example.com".to_string()))
+            .unwrap();
+        assert!(recon.2.contains(&"www.example.com".to_string()), "{:?}", recon.2);
+        assert!(!recon.1.iter().any(|a| a.contains("_dmarc")), "{:?}", recon.1);
     }
 
     #[test]
