@@ -212,6 +212,7 @@ mod tests {
             source: String::new(),
             starts: "x".into(),
             ends: "y".into(),
+            ..Default::default()
         }
     }
 
@@ -540,6 +541,7 @@ mod tests {
             source: source.to_string_lossy().into(),
             starts: "x".into(),
             ends: "y".into(),
+            ..Default::default()
         }
     }
 

@@ -8,13 +8,108 @@
 //! IDNA-encoded hosts, extra slashes, ...) yields an empty host and is refused.
 
 use ipnet::IpNet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr};
 use url::{Host, Url};
 
-#[derive(Debug, Deserialize, Clone)]
+/// How aggressive the DAST track may be. Ordered: Passive < Standard < Active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DastProfile {
+    Passive,
+    #[default]
+    Standard,
+    Active,
+}
+
+impl DastProfile {
+    // Consumed by the DAST stage (later task).
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DastProfile::Passive => "passive",
+            DastProfile::Standard => "standard",
+            DastProfile::Active => "active",
+        }
+    }
+}
+
+/// DAST auth: the header NAME and the NAME of the environment variable that
+/// holds its value. The value itself is never part of the engagement file.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DastAuth {
+    pub header: String,
+    pub value_env: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DastConfig {
+    #[serde(default)]
+    pub profile: DastProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<DastAuth>,
+}
+
+fn is_header_token(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
+}
+
+fn is_env_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && (b[0].is_ascii_uppercase() || b[0] == b'_')
+        && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+pub fn validate_dast(d: &DastConfig) -> Result<(), String> {
+    if let Some(a) = &d.auth {
+        if !is_header_token(&a.header) {
+            return Err(format!("dast.auth.header {:?} is not a valid HTTP header name", a.header));
+        }
+        if !is_env_name(&a.value_env) {
+            return Err(format!(
+                "dast.auth.value_env {:?} must look like ASCENT_DAST_AUTH ([A-Z_][A-Z0-9_]*)",
+                a.value_env
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `Ok(None)` without auth; `Ok(Some((header_name, value)))` with it. Fails
+/// closed: a configured but unset/empty/multi-line value is an error, and no
+/// error message ever contains the value itself.
+// Consumed by the DAST stage (later task); the `dashboard` binary includes this
+// module but never calls it.
+#[allow(dead_code)]
+pub fn resolve_auth(
+    d: &DastConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<(String, String)>, String> {
+    let Some(a) = &d.auth else { return Ok(None) };
+    validate_dast(d)?;
+    let v = env(&a.value_env).unwrap_or_default();
+    if v.trim().is_empty() {
+        return Err(format!(
+            "dast.auth is configured but environment variable {} is unset or empty; refusing to scan unauthenticated",
+            a.value_env
+        ));
+    }
+    if v.contains('\r') || v.contains('\n') {
+        return Err(format!(
+            "environment variable {} contains a line break; refusing to send it as a header",
+            a.value_env
+        ));
+    }
+    Ok(Some((a.header.clone(), v)))
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Engagement {
     pub name: String,
     #[serde(default)]
@@ -32,6 +127,9 @@ pub struct Engagement {
     /// ISO-8601 with timezone. Stored but not enforced in the MVP.
     #[allow(dead_code)]
     pub ends: String,
+    /// DAST track settings (profile, optional auth header).
+    #[serde(default)]
+    pub dast: DastConfig,
 }
 
 #[derive(Debug)]
@@ -45,7 +143,9 @@ impl std::error::Error for OutOfScope {}
 
 pub fn load_engagement(path: &str) -> Result<Engagement, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
-    Ok(serde_yaml_ng::from_str(&text)?)
+    let e: Engagement = serde_yaml_ng::from_str(&text)?;
+    validate_dast(&e.dast)?;
+    Ok(e)
 }
 
 /// Validate a bare host (no port, no brackets). Returns the canonical
@@ -278,6 +378,7 @@ mod tests {
             source: String::new(),
             starts: "2026-01-01T00:00:00Z".into(),
             ends: "2030-01-01T00:00:00Z".into(),
+            ..Default::default()
         }
     }
     #[test]
@@ -319,6 +420,7 @@ mod tests {
             source: String::new(),
             starts: "2026-01-01T00:00:00Z".into(),
             ends: "2030-01-01T00:00:00Z".into(),
+            ..Default::default()
         }
     }
 
@@ -412,6 +514,7 @@ mod tests {
             source: String::new(),
             starts: "2026-01-01T00:00:00Z".into(),
             ends: "2030-01-01T00:00:00Z".into(),
+            ..Default::default()
         };
         let g = ScopeGuard::new(&e);
         for t in ["", ".", "*", "example.com", "localhost", "1.2.3.4"] {
@@ -587,6 +690,80 @@ mod tests {
         }
     }
 
+    const BASE: &str = "name: t\nstarts: 'a'\nends: 'b'\n";
+
+    #[test]
+    fn dast_defaults_to_standard_without_auth() {
+        let e: Engagement = serde_yaml_ng::from_str(BASE).unwrap();
+        assert_eq!(e.dast.profile, DastProfile::Standard);
+        assert!(e.dast.auth.is_none());
+    }
+    #[test]
+    fn dast_block_parses() {
+        let y = format!("{BASE}dast:\n  profile: active\n  auth:\n    header: Authorization\n    value_env: ASCENT_DAST_AUTH\n");
+        let e: Engagement = serde_yaml_ng::from_str(&y).unwrap();
+        assert_eq!(e.dast.profile, DastProfile::Active);
+        assert_eq!(e.dast.auth.as_ref().unwrap().header, "Authorization");
+        assert!(validate_dast(&e.dast).is_ok());
+    }
+    #[test]
+    fn unknown_keys_are_rejected_everywhere() {
+        for bad in [
+            format!("{BASE}host: [x.com]\n"), // typo for hosts
+            format!("{BASE}dast:\n  profle: active\n"),
+            format!("{BASE}dast:\n  auth:\n    header: X\n    value: secret\n"),
+            format!("{BASE}dast:\n  profile: aggressive\n"),
+        ] {
+            assert!(serde_yaml_ng::from_str::<Engagement>(&bad).is_err(), "accepted {bad:?}");
+        }
+    }
+    #[test]
+    fn validate_dast_checks_names() {
+        let mk = |h: &str, v: &str| DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth { header: h.into(), value_env: v.into() }),
+        };
+        assert!(validate_dast(&mk("Authorization", "ASCENT_DAST_AUTH")).is_ok());
+        assert!(validate_dast(&mk("Cookie", "_X1")).is_ok());
+        for (h, v) in [("", "A"), ("Bad Header", "A"), ("X:Y", "A"), ("X", ""), ("X", "lower"), ("X", "1A"), ("X", "A-B")] {
+            assert!(validate_dast(&mk(h, v)).is_err(), "accepted header={h:?} env={v:?}");
+        }
+    }
+    #[test]
+    fn resolve_auth_reads_env_and_fails_closed() {
+        let d = DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth { header: "Authorization".into(), value_env: "TOK".into() }),
+        };
+        let got = resolve_auth(&d, &|k| (k == "TOK").then(|| "Bearer abc".to_string())).unwrap();
+        assert_eq!(got, Some(("Authorization".into(), "Bearer abc".into())));
+        assert!(resolve_auth(&d, &|_| None).unwrap_err().contains("TOK"));
+        assert!(resolve_auth(&d, &|_| Some(String::new())).is_err());
+        assert!(resolve_auth(&d, &|_| Some("a\r\nX-Injected: 1".into())).is_err());
+        assert_eq!(resolve_auth(&DastConfig::default(), &|_| None).unwrap(), None);
+    }
+    #[test]
+    fn resolve_auth_error_never_contains_the_value() {
+        let d = DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth { header: "Authorization".into(), value_env: "TOK".into() }),
+        };
+        let e = resolve_auth(&d, &|_| Some("Bearer s3cr3t\nmore".into())).unwrap_err();
+        assert!(!e.contains("s3cr3t"), "{e}");
+    }
+    #[test]
+    fn load_engagement_rejects_invalid_dast_auth() {
+        let p = std::env::temp_dir().join(format!("ascent_scope_baddast_{}.yaml", std::process::id()));
+        std::fs::write(
+            &p,
+            format!("{BASE}dast:\n  auth:\n    header: \"Bad Header\"\n    value_env: TOK\n"),
+        )
+        .unwrap();
+        let r = load_engagement(p.to_str().unwrap());
+        let _ = std::fs::remove_file(&p);
+        assert!(r.is_err());
+    }
+
     #[test]
     fn classified_target_is_actually_in_scope_for_its_own_engagement() {
         // The core invariant: anything classify_target accepts, a ScopeGuard built
@@ -607,6 +784,7 @@ mod tests {
                 source: String::new(),
                 starts: "2026-01-01T00:00:00Z".into(),
                 ends: "2030-01-01T00:00:00Z".into(),
+                ..Default::default()
             };
             match kind {
                 "hosts" => e.hosts.push(stored.clone()),

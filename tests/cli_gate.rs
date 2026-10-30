@@ -129,6 +129,19 @@ fn missing_engagement_exits_2() {
     assert_eq!(code(&o), 2);
 }
 #[test]
+fn unknown_engagement_key_exits_2_and_writes_nothing() {
+    let d = tmp();
+    let out = d.join("out");
+    let eng = write(
+        &d,
+        "eng.yaml",
+        "name: t\nhost: [x.com]\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\n",
+    );
+    let o = ascent(&["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--dry-run"]);
+    assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(!out.join("queue.json").exists(), "nothing ran");
+}
+#[test]
 fn bad_source_exits_2() {
     let d = tmp();
     let out = d.join("out");
