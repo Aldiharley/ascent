@@ -147,11 +147,11 @@ pub fn sends_off_target(template: &str) -> bool {
 
 /// Top-level template sections that are not http. nuclei types a template by its
 /// FIRST protocol, so `-pt http` still lists a template that starts with `http:` and
-/// then dials something in a `javascript:`/`network:`/`ssl:`/... section; `flow:`
-/// orchestrates several protocols. Neither `@Host` nor the trace log's `address`
-/// (derived from the input) shows where those sections connect.
-const NON_HTTP_SECTIONS: [&str; 11] = [
-    "javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file", "flow",
+/// then dials something in a `javascript:`/`network:`/`ssl:`/... section. Neither
+/// `@Host` nor the trace log's `address` (derived from the input) shows where those
+/// sections connect. (`flow:` is not one: see [`flow_loads_modules`].)
+const NON_HTTP_SECTIONS: [&str; 10] = [
+    "javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file",
 ];
 
 /// True when a template has a top-level (column-0) non-http protocol section.
@@ -161,6 +161,26 @@ pub fn has_non_http_protocol(template: &str) -> bool {
             .iter()
             .any(|k| line.strip_prefix(k).is_some_and(|rest| rest.starts_with(':')))
     })
+}
+
+/// True when a template's top-level `flow:` value (the whole block, multi-line `|`
+/// scalars included) contains `require(` (any case): flow is JavaScript, and a
+/// loaded nuclei module (`nuclei/net`, ...) could dial a host the trace log never
+/// shows. A flow without it can only orchestrate the template's own sections, which
+/// are all http once [`has_non_http_protocol`] has passed, and every http request
+/// is in the trace-log audit.
+pub fn flow_loads_modules(template: &str) -> bool {
+    let mut in_flow = false;
+    for line in template.lines() {
+        let top_level = !line.is_empty() && !line.starts_with([' ', '\t', '\r']);
+        if top_level {
+            in_flow = line.strip_prefix("flow").is_some_and(|r| r.starts_with(':'));
+        }
+        if in_flow && line.to_ascii_lowercase().contains("require(") {
+            return true;
+        }
+    }
+    false
 }
 
 /// A listed template path resolved under the listing's directory (nuclei prints
@@ -205,8 +225,9 @@ pub fn parse_template_listing(out: &str) -> Result<Vec<PathBuf>, Box<dyn std::er
 }
 
 /// The installed http templates Ascent never runs: those that send a request off
-/// the target ([`sends_off_target`]) and those with a non-http protocol section
-/// ([`has_non_http_protocol`]). Lists the templates once (no targets, no network).
+/// the target ([`sends_off_target`]), those with a non-http protocol section
+/// ([`has_non_http_protocol`]) and those whose flow loads a JS module
+/// ([`flow_loads_modules`]). Lists the templates once (no targets, no network).
 /// A listed template that cannot be read is an error: Ascent cannot tell what it
 /// sends, nor be sure the path it would exclude is the one nuclei loads.
 fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -220,7 +241,7 @@ fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std
     for p in listed {
         let bytes = std::fs::read(&p).map_err(|_| TEMPLATE_UNREADABLE)?;
         let text = String::from_utf8_lossy(&bytes);
-        if sends_off_target(&text) || has_non_http_protocol(&text) {
+        if sends_off_target(&text) || has_non_http_protocol(&text) || flow_loads_modules(&text) {
             off.insert(p);
         }
     }
@@ -256,6 +277,22 @@ fn address_host(address: &str) -> String {
     host.to_ascii_lowercase()
 }
 
+/// The host of a trace line's `input` (the URL nuclei requested; for an
+/// `@Host`-rewritten request nuclei puts the rewritten URL there), lower-cased.
+/// Lenient: a URL that does not parse has its scheme stripped, its authority cut
+/// at the first `/`, `?` or `#`, and any userinfo before the last `@` dropped,
+/// then the `host:port` / `[v6]:port` rules of [`address_host`] apply.
+fn input_host(input: &str) -> String {
+    let s = input.trim();
+    if let Some(h) = url::Url::parse(s).ok().and_then(|u| u.host_str().map(String::from)) {
+        return h.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    }
+    let rest = s.find("://").map_or(s, |i| &s[i + 3..]);
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    address_host(host_port)
+}
+
 /// What the nuclei trace logs (`-tlog`: one JSON object per request sent, with
 /// `address` = `host:port` and `error` = `none` or the cause) say about the requests.
 #[derive(Default)]
@@ -270,9 +307,9 @@ struct TraceAudit {
 
 impl TraceAudit {
     /// Streams one trace log (it can be tens of MB) and returns how many request lines
-    /// it held. A request line is a JSON object with an `address`, `template` or
-    /// `type` key; one without a string `address` is recorded as `(no address)`
-    /// (off scope), never skipped. Any other line is skipped.
+    /// it held. A request line is a JSON object with an `address`, `input`,
+    /// `template` or `type` key; it is never skipped (see [`Self::record`]). Any
+    /// other line is skipped.
     fn read(&mut self, path: &Path, guard: &ScopeGuard, secret: Option<&str>) -> std::io::Result<usize> {
         use std::io::BufRead;
         let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
@@ -286,44 +323,42 @@ impl TraceAudit {
             let Ok(Value::Object(o)) = serde_json::from_slice::<Value>(&buf) else {
                 continue;
             };
-            let error = o.get("error").and_then(Value::as_str).unwrap_or("");
-            match o.get("address").and_then(Value::as_str) {
-                Some(address) => self.record(address, error, guard, secret),
-                None if ["address", "template", "type"].iter().any(|k| o.contains_key(*k)) => {
-                    self.record_no_address(error)
-                }
-                None => continue,
+            if !["address", "input", "template", "type"].iter().any(|k| o.contains_key(*k)) {
+                continue;
             }
+            let s = |k: &str| o.get(k).and_then(Value::as_str);
+            self.record(s("address"), s("input"), s("error").unwrap_or(""), guard, secret);
             n += 1;
         }
         Ok(n)
     }
 
-    /// A request line with no usable destination: never assumed to be in scope.
-    fn record_no_address(&mut self, error: &str) {
-        self.sent += 1;
-        if !(error.is_empty() || error == "none") {
-            self.errors += 1;
-        }
-        self.off_scope_count += 1;
-        self.off_scope.insert("(no address)".into());
-    }
-
-    fn record(&mut self, address: &str, error: &str, guard: &ScopeGuard, secret: Option<&str>) {
+    /// One request. Its host is the `address` nuclei dialled; when that is missing
+    /// or empty (raw/unsafe requests log `""`), the host of the `input` URL nuclei
+    /// requested. With neither, it is `(no address)`: never assumed in scope.
+    fn record(
+        &mut self,
+        address: Option<&str>,
+        input: Option<&str>,
+        error: &str,
+        guard: &ScopeGuard,
+        secret: Option<&str>,
+    ) {
         self.sent += 1;
         let failed = !(error.is_empty() || error == "none");
         if failed {
             self.errors += 1;
         }
-        // Scrubbed first, so nothing derived from it can carry the auth value.
-        let host = address_host(&scrub_text(address, secret));
+        // Scrubbed first, so nothing derived from them can carry the auth value.
+        let address = address.map(|a| scrub_text(a, secret)).unwrap_or_default();
+        let host = if address.trim().is_empty() {
+            input_host(&scrub_text(input.unwrap_or(""), secret))
+        } else {
+            address_host(&address)
+        };
         if host.is_empty() {
-            // A request that went out with no recorded destination is never assumed
-            // to have stayed in scope; a failed one with none was never sent.
-            if !failed {
-                self.off_scope_count += 1;
-                self.off_scope.insert("(no address)".into());
-            }
+            self.off_scope_count += 1;
+            self.off_scope.insert("(no address)".into());
             return;
         }
         if guard.in_scope(&host) {
@@ -621,7 +656,7 @@ fn dedupe_rows(rows: Vec<Value>) -> Vec<Value> {
 }
 
 const EXCLUDED_WHY: &str =
-    "Ascent cannot scope-check (an @Host naming another host, or a non-http or flow section)";
+    "Ascent cannot scope-check (an @Host naming another host, a non-http section, or a flow that loads modules)";
 
 /// The report section, as a list: the dashboard's markdown renderer has no GFM tables.
 pub fn coverage_markdown(cov: &Value) -> String {
@@ -882,10 +917,16 @@ pub(crate) mod test_support {
         listing(&fixture_templates(), &["http/benign.yaml"])
     }
 
-    /// One nuclei v3 `-tlog` trace line.
+    /// One nuclei v3 `-tlog` trace line (with an empty `input`, so only `address`
+    /// can name the host).
     pub fn trace_line(address: &str, error: &str) -> String {
+        trace_line_with_input(address, "", error)
+    }
+
+    /// One nuclei v3 `-tlog` trace line with the URL nuclei requested.
+    pub fn trace_line_with_input(address: &str, input: &str, error: &str) -> String {
         serde_json::json!({"template": "http/benign.yaml", "type": "http",
-            "input": "http://x/", "address": address, "error": error})
+            "input": input, "address": address, "error": error})
         .to_string()
     }
 
@@ -1760,9 +1801,9 @@ mod tests {
 
     #[test]
     fn non_http_protocol_sections_are_classified() {
-        for key in [
-            "javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file", "flow",
-        ] {
+        // `flow:` alone is not a non-http section (its http requests are audited)
+        assert!(!has_non_http_protocol("id: x\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n"));
+        for key in ["javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file"] {
             let t = format!("id: x\nhttp:\n  - method: GET\n    path: ['{{{{BaseURL}}}}']\n\n{key}:\n  - x: 1\n");
             assert!(has_non_http_protocol(&t), "{key}");
             // CRLF too
@@ -1775,6 +1816,25 @@ mod tests {
         assert!(!has_non_http_protocol("id: x\nrequests:\n  - method: GET\n"));
         // a key that only starts with a protocol name is not that protocol
         assert!(!has_non_http_protocol("id: x\ncodename: y\nhttp:\n  - method: GET\n"));
+    }
+
+    #[test]
+    fn a_flow_is_excluded_only_when_it_loads_modules() {
+        // inline flow, http only
+        assert!(!flow_loads_modules("id: x\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n"));
+        // no flow at all; `require(` elsewhere (a payload) does not count
+        assert!(!flow_loads_modules("id: x\nhttp:\n  - body: 'require(\"child_process\")'\n"));
+        assert!(!flow_loads_modules(
+            "id: x\nflow: http(1)\n\nhttp:\n  - body: 'require(\"child_process\")'\n"
+        ));
+        // inline require, any case
+        assert!(flow_loads_modules("id: x\nflow: REQUIRE(\"nuclei/net\") && http(1)\nhttp: []\n"));
+        // multi-line block scalar: require on a later line, blank lines inside, CRLF
+        let block = "id: x\nflow: |\n  http(1);\n\n  let n = Require('nuclei/net');\nhttp:\n  - method: GET\n";
+        assert!(flow_loads_modules(block));
+        assert!(flow_loads_modules(&block.replace('\n', "\r\n")));
+        // the block ends at the next top-level key
+        assert!(!flow_loads_modules("flow: |\n  http(1);\nhttp:\n  - x: 'require(1)'\n"));
     }
 
     #[test]
@@ -1800,6 +1860,12 @@ mod tests {
                 "http/off-localhost.yaml",
                 // http first, then a javascript section: typed http, still excluded
                 "http/multi-protocol.yaml",
+                // a flow of http requests only: kept (its requests are audited)
+                "http/flow-http.yaml",
+                // a flow that loads a JS module: excluded
+                "http/flow-require.yaml",
+                // a flow over http and javascript sections: excluded (javascript)
+                "http/flow-js.yaml",
             ],
         );
         let mut e = eng();
@@ -1816,6 +1882,8 @@ mod tests {
             dir.join("http").join("cves").join("off-target.yaml"),
             dir.join("http").join("off-localhost.yaml"),
             dir.join("http").join("multi-protocol.yaml"),
+            dir.join("http").join("flow-require.yaml"),
+            dir.join("http").join("flow-js.yaml"),
         ]
         .into_iter()
         .collect();
@@ -1832,13 +1900,13 @@ mod tests {
             let p = c.1.windows(2).find(|w| w[0] == "-et").unwrap()[1].clone();
             assert!(!std::path::Path::new(&p).exists(), "{p} left behind");
         }
-        assert_eq!(out.summary.templates_excluded, 3);
-        assert_eq!(out.coverage["templates_excluded"], 3);
+        assert_eq!(out.summary.templates_excluded, 5);
+        assert_eq!(out.coverage["templates_excluded"], 5);
         let md = coverage_markdown(&out.coverage);
         assert!(
             md.contains(
-                "3 templates excluded: they may send requests Ascent cannot scope-check \
-                 (an @Host naming another host, or a non-http or flow section)"
+                "5 templates excluded: they may send requests Ascent cannot scope-check \
+                 (an @Host naming another host, a non-http section, or a flow that loads modules)"
             ),
             "{md}"
         );
@@ -1873,23 +1941,21 @@ mod tests {
         let r = crate::runner::ToolRunner::new(ScopeGuard::new(&Engagement::default()), false);
         let off = off_target_templates(&r).unwrap();
         // Why each one is excluded (a template can match several reasons).
-        let (mut host, mut section, mut flow_only) = (0, 0, 0);
+        let (mut host, mut section, mut flow) = (0, 0, 0);
         for p in &off {
             let t = std::fs::read_to_string(p).unwrap_or_default();
-            let non_flow = NON_HTTP_SECTIONS
-                .iter()
-                .filter(|k| **k != "flow")
-                .any(|k| t.lines().any(|l| l.strip_prefix(k).is_some_and(|r| r.starts_with(':'))));
             if sends_off_target(&t) {
                 host += 1;
-            } else if non_flow {
+            } else if has_non_http_protocol(&t) {
                 section += 1;
             } else {
-                flow_only += 1;
+                assert!(flow_loads_modules(&t), "{}", p.display());
+                flow += 1;
             }
         }
         eprintln!(
-            "{} excluded templates: {host} @Host off-target, {section} with a non-http section, {flow_only} http-only flow",
+            "{} excluded templates: {host} @Host off-target, {section} with a non-http section, \
+             {flow} http-only with a flow that loads modules",
             off.len()
         );
         let tl: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"].iter().map(|s| s.to_string()).collect();
@@ -1954,7 +2020,7 @@ mod tests {
         let mut f = Fake::new();
         f.trace_lines = Some(vec![
             trace_line("localhost:3000", "none"),
-            json!({"template": "http/x.yaml", "type": "http", "input": "x", "error": "none"}).to_string(),
+            json!({"template": "http/x.yaml", "type": "http", "input": "", "error": "none"}).to_string(),
             json!({"type": "http", "address": 3000}).to_string(),
         ]);
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
@@ -2013,12 +2079,53 @@ mod tests {
     }
 
     #[test]
-    fn a_successful_request_with_no_address_is_never_assumed_in_scope() {
+    fn a_request_with_neither_address_nor_input_host_is_never_assumed_in_scope() {
         let mut f = Fake::new();
         f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line("", "none"), trace_line("", "dial failed")]);
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_requests, vec!["(no address)"]);
-        assert_eq!(out.summary.off_scope_request_count, 1);
+        // fail closed: with no host anywhere, a failed request counts too
+        assert_eq!(out.summary.off_scope_request_count, 2);
+    }
+
+    #[test]
+    fn an_empty_address_falls_back_to_the_input_host() {
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![
+            // a real nuclei v3.11.1 line from a live run (raw/unsafe template)
+            r#"{"template":"http/cves/2021/CVE-2021-34429.yaml","type":"http","input":"http://127.0.0.1:3000/%u002e/WEB-INF/web.xml","address":"","error":"none"}"#.to_string(),
+            // no address key at all, input names the host
+            json!({"template": "t", "type": "http", "input": "http://localhost:3000/x"}).to_string(),
+            trace_line_with_input("", "http://evil.test/x", "none"),
+            trace_line_with_input("", "", "none"),
+            // userinfo never hides the real host
+            trace_line_with_input("", "http://127.0.0.1@userinfo.evil.test/", "none"),
+            // an address, when present, wins over the input
+            trace_line_with_input("127.0.0.1:3000", "http://ignored.evil.test/", "none"),
+        ]);
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(
+            out.summary.out_of_scope_requests,
+            vec!["(no address)", "evil.test", "userinfo.evil.test"]
+        );
+        assert_eq!(out.summary.off_scope_request_count, 3);
+        assert_eq!(out.summary.requests_sent, 6);
+    }
+
+    #[test]
+    fn input_host_parses_leniently() {
+        assert_eq!(input_host("http://127.0.0.1:3000/%u002e/WEB-INF/web.xml"), "127.0.0.1");
+        assert_eq!(input_host("http://127.0.0.1@evil.test/"), "evil.test");
+        assert_eq!(input_host("https://Example.COM/a?b#c"), "example.com");
+        assert_eq!(input_host("http://[::1]:3000/x"), "::1");
+        // not a valid URL: scheme stripped, authority up to / ? #, userinfo dropped
+        assert_eq!(input_host("http://user@evil.test:8080/x y"), "evil.test");
+        assert_eq!(input_host("http://a b@evil.test/"), "evil.test");
+        assert_eq!(input_host("evil.test:443/x"), "evil.test");
+        assert_eq!(input_host("[::1]:3000?q"), "::1");
+        assert_eq!(input_host(""), "");
+        assert_eq!(input_host("http://"), "");
+        assert_eq!(input_host("http:///"), "");
     }
 
     #[test]

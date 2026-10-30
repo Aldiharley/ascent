@@ -246,7 +246,7 @@ fn clean_trace_passes_exit_0() {
     assert!(
         report.contains(
             "1 template excluded: it may send requests Ascent cannot scope-check \
-             (an @Host naming another host, or a non-http or flow section)"
+             (an @Host naming another host, a non-http section, or a flow that loads modules)"
         ),
         "{report}"
     );
