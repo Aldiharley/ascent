@@ -1,6 +1,15 @@
 use crate::runner::Runner;
+use serde_json::Value;
 use std::collections::BTreeSet;
 use url::Url;
+
+/// The URL of one katana `-jsonl` row: `request.endpoint` (katana v1.x), else a
+/// legacy top-level `endpoint`.
+fn endpoint_of(r: &Value) -> Option<&str> {
+    r.pointer("/request/endpoint")
+        .or_else(|| r.get("endpoint"))
+        .and_then(Value::as_str)
+}
 
 pub fn enumerate_surface(
     runner: &dyn Runner,
@@ -15,9 +24,15 @@ pub fn enumerate_surface(
     let mut hosts: BTreeSet<String> = BTreeSet::new();
     // `-fs fqdn`: crawl only the exact hostnames given (katana defaults to the whole
     // registered domain, which would contact, and send auth to, out-of-scope siblings).
+    // `-jc` parses endpoints out of JavaScript (an SPA exposes nothing else), `-rl 50`
+    // caps requests per second and `-dr` keeps katana from following redirects.
     let mut args: Vec<String> = vec![
         "-silent".into(),
         "-jsonl".into(),
+        "-jc".into(),
+        "-rl".into(),
+        "50".into(),
+        "-dr".into(),
         "-fs".into(),
         "fqdn".into(),
     ];
@@ -39,11 +54,13 @@ pub fn enumerate_surface(
     args.extend(extra.iter().cloned());
     let hv: Vec<String> = hosts.into_iter().collect();
     let rows = runner.run_json("katana", &args, &hv)?;
-    for r in rows {
-        if let Some(e) = r["endpoint"].as_str() {
-            set.insert(e.to_string());
-        }
+    let found: Vec<&str> = rows.iter().filter_map(endpoint_of).collect();
+    // Rows that all lack a URL mean katana's output format changed: fail closed
+    // rather than report an empty crawl.
+    if !rows.is_empty() && found.is_empty() {
+        return Err("katana output format not recognised".into());
     }
+    set.extend(found.into_iter().map(String::from));
     Ok(set.into_iter().collect())
 }
 
@@ -52,7 +69,16 @@ mod tests {
     use super::*;
     use crate::runner::Runner;
     use serde_json::{json, Value};
-    struct Fake;
+
+    /// One row of real katana v1.7 `-jsonl` output: the URL is nested under `request`.
+    fn katana_row(endpoint: &str) -> Value {
+        json!({"timestamp":"2026-10-31T00:00:00.000000+00:00",
+            "request":{"method":"GET","endpoint":endpoint,"raw":"GET / HTTP/1.1\r\n\r\n"},
+            "response":{"status_code":200}})
+    }
+
+    /// katana answers with the given rows.
+    struct Fake(Vec<Value>);
     impl Runner for Fake {
         fn run_json(
             &self,
@@ -60,7 +86,7 @@ mod tests {
             _a: &[String],
             _g: &[String],
         ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-            Ok(vec![json!({"endpoint":"https://app.example.com/login"})])
+            Ok(self.0.clone())
         }
         fn run_text(
             &self,
@@ -73,9 +99,41 @@ mod tests {
     }
     #[test]
     fn merges_endpoints() {
-        let out = enumerate_surface(&Fake, &["https://app.example.com".into()], &[]).unwrap();
+        let f = Fake(vec![katana_row("https://app.example.com/login")]);
+        let out = enumerate_surface(&f, &["https://app.example.com".into()], &[]).unwrap();
         assert!(out.contains(&"https://app.example.com/login".to_string()));
         assert!(out.contains(&"https://app.example.com".to_string()));
+    }
+
+    #[test]
+    fn legacy_top_level_endpoint_row_still_parses() {
+        let f = Fake(vec![json!({"endpoint":"https://app.example.com/old"})]);
+        let out = enumerate_surface(&f, &["https://app.example.com".into()], &[]).unwrap();
+        assert!(out.contains(&"https://app.example.com/old".to_string()));
+    }
+
+    #[test]
+    fn unrecognised_katana_output_fails_closed() {
+        let f = Fake(vec![json!({"url":"https://app.example.com/x"}), json!({"request":{}})]);
+        let e = enumerate_surface(&f, &["https://app.example.com".into()], &[]).unwrap_err();
+        assert_eq!(e.to_string(), "katana output format not recognised");
+        // no rows at all is a normal empty crawl, not format drift
+        let out = enumerate_surface(&Fake(vec![]), &["https://app.example.com".into()], &[]).unwrap();
+        assert_eq!(out, vec!["https://app.example.com".to_string()]);
+    }
+
+    #[test]
+    fn katana_parses_js_is_rate_limited_and_does_not_follow_redirects() {
+        let rec = Rec::default();
+        enumerate_surface(&rec, &["https://app.example.com".to_string()], &[]).unwrap();
+        let calls = rec.calls.borrow();
+        let args = &calls[0].1;
+        let u = args.iter().position(|a| a == "-u").unwrap();
+        let before = &args[..u];
+        assert!(before.contains(&"-jc".to_string()), "{args:?}");
+        assert!(before.contains(&"-dr".to_string()), "{args:?}");
+        let rl = before.iter().position(|a| a == "-rl").expect("-rl present");
+        assert_eq!(args[rl + 1], "50");
     }
 
     use std::cell::RefCell;

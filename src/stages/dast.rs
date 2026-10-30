@@ -428,6 +428,13 @@ mod tests {
 
     const SECRET: &str = "Bearer s3cr3t";
 
+    /// One row of real katana v1.7 `-jsonl` output.
+    fn katana_row(endpoint: &str) -> Value {
+        json!({"timestamp":"2026-10-31T00:00:00.000000+00:00",
+            "request":{"method":"GET","endpoint":endpoint,"raw":"GET / HTTP/1.1\r\n\r\n"},
+            "response":{"status_code":200}})
+    }
+
     type Call = (String, Vec<String>, Vec<String>);
 
     /// Recording fake: canned output per tool, optional nuclei failure.
@@ -490,9 +497,9 @@ mod tests {
                     v
                 }
                 "katana" => vec![
-                    json!({"endpoint":"https://github.com/x"}),
-                    json!({"endpoint":"http://localhost:3000/rest/products"}),
-                    json!({"endpoint":"https://example.com/a"}),
+                    katana_row("https://github.com/x"),
+                    katana_row("http://localhost:3000/rest/products"),
+                    katana_row("https://example.com/a"),
                 ],
                 "nuclei" => {
                     if let Some(e) = self.nuclei_err {

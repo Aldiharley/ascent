@@ -271,7 +271,10 @@ mod tests {
             Ok(match tool {
                 "subfinder" => vec![json!({"host":"app.example.com"})],
                 "httpx" => vec![json!({"url":"https://app.example.com"})],
-                "katana" => vec![json!({"endpoint":"https://app.example.com/login"})],
+                // real katana v1.7 shape: the URL is nested under `request`
+                "katana" => vec![json!({"timestamp":"2026-10-31T00:00:00.000000+00:00",
+                    "request":{"method":"GET","endpoint":"https://app.example.com/login","raw":"GET /login HTTP/1.1"},
+                    "response":{"status_code":200}})],
                 "nuclei" => vec![
                     json!({"template-id":"sqli","info":{"name":"SQLi","severity":"high"},
                     "matched-at":"https://app.example.com/login"}),
