@@ -1,0 +1,32 @@
+# Example: gate a pull request on Ascent's policy and publish SARIF to GitHub
+# code scanning. Assumes opengrep, gitleaks and trivy are installed on the runner
+# and that `engagement.yaml` scopes only what this repository owns.
+name: ascent
+on: [pull_request]
+permissions:
+  contents: read
+  security-events: write      # required by upload-sarif
+jobs:
+  ascent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Ascent
+        run: cargo build --release
+      - name: Scan, triage and gate
+        id: ascent
+        # exit 0 pass/conditional, 1 policy fail, 2 config error,
+        # 3 incomplete scan, 4 audit-chain integrity failure
+        run: ./target/release/ascent run --engagement engagement.yaml --source . --out out --policy ascent-policy.yaml
+      - name: Upload SARIF (even when the gate fails)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: out/ascent.sarif
+          category: ascent
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascent-out
+          path: out/

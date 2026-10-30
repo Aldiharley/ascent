@@ -123,6 +123,30 @@ Invariants:
 
 Requirements: `ascent verify` needs nuclei installed and a reachable, in-scope target. `--propose` only produces gates after a real scan that found nuclei DAST findings; with no such findings, `gates.json` gets no new gates. With no approved gates, `verify` runs nothing and reports all zeros.
 
+## Policy gate and CI
+
+`ascent run … --policy ascent-policy.yaml` evaluates a policy after triage and
+exits with a CI-friendly code; `ascent gate --policy … --out out` evaluates an
+existing output directory. Every run also writes native SARIF 2.1.0
+(`out/ascent.sarif` for code findings, `out/ascent-dast.sarif` for URL findings;
+regenerate with `ascent sarif`). See `samples/ascent-policy.example.yaml` and
+`docs/ci/github-actions.yml`.
+
+| Exit | Meaning |
+|---|---|
+| 0 | PASS, or CONDITIONAL (warnings only) — or no policy given |
+| 1 | FAIL (or CONDITIONAL with `--fail-on-warn`) |
+| 2 | Usage or configuration error (bad engagement, malformed policy) |
+| 3 | INCOMPLETE: a scanner or stage failed, or it was a dry run — never a pass |
+| 4 | The audit hash chain failed verification |
+
+The verdict is written to `out/gate.json` and chained into `audit.jsonl`
+(`gate_evaluation`). A finding Crux triages as LIKELY_FALSE_POSITIVE is demoted
+to a warning, never silently passed. Findings carry a stable `ascent/v1`
+fingerprint (no line numbers; secrets keyed on rule + path only — Ascent never
+stores a secret or a hash of one). Runtime errors now exit 3 (previously 1), so
+1 always means "policy failed".
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
