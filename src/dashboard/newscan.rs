@@ -8,7 +8,7 @@
 //! widens what Ascent is allowed to touch, and it never runs anything: it writes
 //! a scope file that the pipeline (and its approval gates) still gate at run time.
 
-use crate::scope::classify_target;
+use crate::scope::{classify_target, validate_dast, DastAuth, DastConfig, DastProfile};
 use serde::{Deserialize, Serialize};
 
 /// The POSTed New Scan form.
@@ -22,6 +22,15 @@ pub struct NewScanRequest {
     /// Optional source root that enables the white-box SAST track.
     #[serde(default)]
     pub source: String,
+    /// `""` (= standard), `passive`, `standard` or `active`.
+    #[serde(default)]
+    pub dast_profile: String,
+    /// Name of the HTTP header used for authenticated DAST (never its value).
+    #[serde(default)]
+    pub auth_header: String,
+    /// Name of the environment variable that holds the header value.
+    #[serde(default)]
+    pub auth_env: String,
 }
 
 /// A validated engagement ready to be written to disk.
@@ -33,6 +42,10 @@ pub struct Prepared {
     pub cidrs: Vec<String>,
     pub urls: Vec<String>,
     pub source: String,
+    /// The effective DAST profile (`passive|standard|active`).
+    pub dast_profile: String,
+    /// The auth header NAME, or empty when DAST runs unauthenticated.
+    pub auth_header: String,
     pub yaml: String,
 }
 
@@ -50,6 +63,8 @@ pub enum PrepareError {
     NoTargets,
     /// A non-empty source path that does not exist as a directory.
     SourceNotFound(String),
+    /// Unknown DAST profile, or a half-specified / malformed auth header + env.
+    BadDast(String),
     /// The validated engagement could not be serialized (should not happen).
     Internal(String),
 }
@@ -89,6 +104,38 @@ struct EngagementFile<'a> {
     source: &'a str,
     starts: &'a str,
     ends: &'a str,
+    dast: &'a DastConfig,
+}
+
+/// Build and validate the DAST block from the form's three string fields.
+fn build_dast(req: &NewScanRequest) -> Result<DastConfig, PrepareError> {
+    let profile = match req.dast_profile.trim() {
+        "" | "standard" => DastProfile::Standard,
+        "passive" => DastProfile::Passive,
+        "active" => DastProfile::Active,
+        other => {
+            return Err(PrepareError::BadDast(format!(
+                "unknown DAST profile {other:?} (use passive, standard or active)"
+            )))
+        }
+    };
+    let header = req.auth_header.trim();
+    let env = req.auth_env.trim();
+    let auth = match (header.is_empty(), env.is_empty()) {
+        (true, true) => None,
+        (false, false) => Some(DastAuth {
+            header: header.to_string(),
+            value_env: env.to_string(),
+        }),
+        _ => {
+            return Err(PrepareError::BadDast(
+                "set both the auth header name and the environment variable name, or neither".into(),
+            ))
+        }
+    };
+    let cfg = DastConfig { profile, auth };
+    validate_dast(&cfg).map_err(PrepareError::BadDast)?;
+    Ok(cfg)
 }
 
 const HEADER: &str = "\
@@ -146,6 +193,8 @@ pub fn prepare(
         return Err(PrepareError::SourceNotFound(source));
     }
 
+    let dast = build_dast(req)?;
+
     let body = EngagementFile {
         name,
         hosts: &hosts,
@@ -154,6 +203,7 @@ pub fn prepare(
         source: &source,
         starts,
         ends,
+        dast: &dast,
     };
     let yaml = serde_yaml_ng::to_string(&body).map_err(|e| PrepareError::Internal(e.to_string()))?;
     let yaml = format!("{HEADER}{yaml}");
@@ -165,6 +215,8 @@ pub fn prepare(
         cidrs,
         urls,
         source,
+        dast_profile: dast.profile.as_str().to_string(),
+        auth_header: dast.auth.map(|a| a.header).unwrap_or_default(),
         yaml,
     })
 }
@@ -181,6 +233,66 @@ mod tests {
             name: name.into(),
             targets: targets.iter().map(|s| s.to_string()).collect(),
             source: source.into(),
+            dast_profile: String::new(),
+            auth_header: String::new(),
+            auth_env: String::new(),
+        }
+    }
+
+    fn req_dast(profile: &str, header: &str, env: &str) -> NewScanRequest {
+        NewScanRequest {
+            dast_profile: profile.into(),
+            auth_header: header.into(),
+            auth_env: env.into(),
+            ..req("Acme", &["example.com"], "")
+        }
+    }
+
+    fn parse(p: &Prepared) -> crate::scope::Engagement {
+        serde_yaml_ng::from_str(&p.yaml).expect("generated engagement must parse")
+    }
+
+    #[test]
+    fn omitted_dast_fields_default_to_standard_without_auth() {
+        let p = prep(&req("Acme", &["example.com"], "")).unwrap();
+        assert_eq!(p.dast_profile, "standard");
+        assert_eq!(p.auth_header, "");
+        let e = parse(&p);
+        assert_eq!(e.dast.profile, crate::scope::DastProfile::Standard);
+        assert!(e.dast.auth.is_none());
+        assert!(!p.yaml.contains("auth:"));
+    }
+
+    #[test]
+    fn active_profile_is_written_and_round_trips() {
+        let p = prep(&req_dast("active", "", "")).unwrap();
+        assert_eq!(p.dast_profile, "active");
+        assert!(p.yaml.contains("profile: active"));
+        assert_eq!(parse(&p).dast.profile, crate::scope::DastProfile::Active);
+    }
+
+    #[test]
+    fn auth_names_are_written_and_round_trip() {
+        let p = prep(&req_dast("passive", " Authorization ", " ASCENT_DAST_AUTH ")).unwrap();
+        assert_eq!(p.auth_header, "Authorization");
+        let a = parse(&p).dast.auth.expect("auth present");
+        assert_eq!(a.header, "Authorization");
+        assert_eq!(a.value_env, "ASCENT_DAST_AUTH");
+    }
+
+    #[test]
+    fn invalid_dast_input_is_bad_dast() {
+        for (profile, header, env) in [
+            ("standard", "Bad Header", "ASCENT_DAST_AUTH"),
+            ("standard", "Authorization", "lower_case"),
+            ("standard", "Authorization", ""),
+            ("standard", "", "ASCENT_DAST_AUTH"),
+            ("aggressive", "", ""),
+        ] {
+            assert!(
+                matches!(prep(&req_dast(profile, header, env)), Err(PrepareError::BadDast(_))),
+                "{profile:?} {header:?} {env:?}"
+            );
         }
     }
 

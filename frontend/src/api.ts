@@ -215,6 +215,10 @@ export interface NewScanInput {
   name: string;
   targets: string[];
   source?: string;
+  dast_profile?: "passive" | "standard" | "active";
+  /** Header NAME only; the value lives in the env var named by `auth_env`. */
+  auth_header?: string;
+  auth_env?: string;
 }
 
 export interface CreatedEngagement {
@@ -223,6 +227,7 @@ export interface CreatedEngagement {
   path: string;
   scope: { hosts: string[]; cidrs: string[]; urls: string[] };
   source: string;
+  dast: { profile: string; auth_header: string };
   run_command: string;
 }
 

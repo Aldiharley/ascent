@@ -135,6 +135,12 @@ async fn create_engagement(
                 Json(json!({ "ok": false, "error": format!("source path not found: {p}"), "field": "source" })),
             ))
         }
+        Err(E::BadDast(m)) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "ok": false, "error": m, "field": "dast" })),
+            ))
+        }
         Err(E::RejectedTargets(bad)) => {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -188,6 +194,10 @@ async fn create_engagement(
             "urls": prepared.urls,
         },
         "source": prepared.source,
+        "dast": {
+            "profile": prepared.dast_profile,
+            "auth_header": prepared.auth_header,
+        },
         "run_command": run_command,
     })))
 }
@@ -1072,6 +1082,68 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["ok"], false);
         assert_eq!(v["rejected"], json!(["evil.com/path", "exa mple.com"]));
+        assert!(!dir.join("engagements").join("acme.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn create_with_dast_profile_and_auth_names() {
+        let dir = tmp();
+        let resp = app_newscan(&dir)
+            .oneshot(api_post_json(
+                "/api/engagements",
+                json!({
+                    "name": "Acme", "targets": ["example.com"],
+                    "dast_profile": "active",
+                    "auth_header": "Authorization", "auth_env": "ASCENT_DAST_AUTH",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["dast"]["profile"], "active");
+        assert_eq!(v["dast"]["auth_header"], "Authorization");
+        let eng = scope::load_engagement(
+            dir.join("engagements").join("acme.yaml").to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(eng.dast.profile, scope::DastProfile::Active);
+        assert_eq!(eng.dast.auth.unwrap().value_env, "ASCENT_DAST_AUTH");
+    }
+
+    #[tokio::test]
+    async fn create_without_dast_fields_is_standard() {
+        let dir = tmp();
+        let resp = app_newscan(&dir)
+            .oneshot(api_post_json(
+                "/api/engagements",
+                json!({ "name": "Acme", "targets": ["example.com"] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["dast"]["profile"], "standard");
+        assert_eq!(v["dast"]["auth_header"], "");
+    }
+
+    #[tokio::test]
+    async fn create_bad_dast_env_is_422_and_writes_nothing() {
+        let dir = tmp();
+        let resp = app_newscan(&dir)
+            .oneshot(api_post_json(
+                "/api/engagements",
+                json!({
+                    "name": "Acme", "targets": ["example.com"],
+                    "auth_header": "Authorization", "auth_env": "not-valid",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["field"], "dast");
         assert!(!dir.join("engagements").join("acme.yaml").exists());
     }
 

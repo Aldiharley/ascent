@@ -1,6 +1,20 @@
 import { useState } from "react";
 import { CreateEngagementError, createEngagement } from "../api";
-import type { CreatedEngagement } from "../api";
+import type { CreatedEngagement, NewScanInput } from "../api";
+
+type DastProfile = NonNullable<NewScanInput["dast_profile"]>;
+
+const PROFILE_OPTIONS: { value: DastProfile; label: string }[] = [
+  { value: "passive", label: "Passive — non-intrusive checks only" },
+  {
+    value: "standard",
+    label: "Standard — known-vulnerability and injection templates (default)",
+  },
+  {
+    value: "active",
+    label: "Active — adds parameter fuzzing; only for targets you may actively test",
+  },
+];
 
 export interface NewScanProps {
   /** Called after an engagement is created, so the shell can refresh the topbar. */
@@ -25,6 +39,9 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
   const [name, setName] = useState("");
   const [targetsText, setTargetsText] = useState("");
   const [source, setSource] = useState("");
+  const [profile, setProfile] = useState<DastProfile>("standard");
+  const [authHeader, setAuthHeader] = useState("");
+  const [authEnv, setAuthEnv] = useState("");
   const [submit, setSubmit] = useState<Submit>({ status: "idle" });
   const [copied, setCopied] = useState(false);
 
@@ -37,6 +54,9 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
         name,
         targets: parseTargets(targetsText),
         source: source.trim(),
+        dast_profile: profile,
+        auth_header: authHeader.trim(),
+        auth_env: authEnv.trim(),
       });
       setSubmit({ status: "created", result });
       onCreated?.();
@@ -115,6 +135,50 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
           />
         </div>
 
+        <div className="fld">
+          <label htmlFor="ns-profile">DAST profile</label>
+          <select
+            id="ns-profile"
+            value={profile}
+            onChange={(e) => setProfile(e.target.value as DastProfile)}
+          >
+            {PROFILE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="fld">
+          <label htmlFor="ns-auth-header">Auth header name</label>
+          <input
+            id="ns-auth-header"
+            value={authHeader}
+            onChange={(e) => setAuthHeader(e.target.value)}
+            placeholder="e.g. Authorization"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </div>
+
+        <div className="fld">
+          <label htmlFor="ns-auth-env">Env var holding its value</label>
+          <input
+            id="ns-auth-env"
+            value={authEnv}
+            onChange={(e) => setAuthEnv(e.target.value)}
+            placeholder="e.g. ASCENT_DAST_AUTH"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <span className="hint">
+            For authenticated scanning, name the header and the environment variable that holds its
+            value (for example Authorization and ASCENT_DAST_AUTH). Ascent never stores the value;
+            set the variable in the terminal that runs the scan.
+          </span>
+        </div>
+
         <div className="note" style={{ textAlign: "left" }}>
           Creating a scan writes a scope file. Running it is a separate, explicit step, and every
           exploit action still requires your approval in the gates.
@@ -152,6 +216,12 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
                 <b>SAST source:</b> <span className="loc">{submit.result.source}</span>
               </div>
             )}
+            <div className="scope-list">
+              <span>{`Profile: ${submit.result.dast.profile}`}</span>
+              {submit.result.dast.auth_header !== "" && (
+                <span>{`Auth header: ${submit.result.dast.auth_header}`}</span>
+              )}
+            </div>
             <div>
               <div className="hint" style={{ marginBottom: 6 }}>
                 Run it from your terminal:
