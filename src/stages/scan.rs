@@ -1,5 +1,3 @@
-use crate::models::Finding;
-use crate::normalise::normalise_nuclei;
 use crate::runner::Runner;
 use std::collections::BTreeSet;
 use url::Url;
@@ -26,19 +24,17 @@ pub fn ensure_nuclei_version(runner: &dyn Runner) -> Result<(), Box<dyn std::err
     }
 }
 
-pub fn scan(
+/// Runs nuclei with the caller's flags and returns its raw JSON rows. `args` are
+/// passed verbatim, followed by one `-u` per URL.
+pub fn scan_rows(
     runner: &dyn Runner,
     urls: &[String],
-) -> Result<Vec<Finding>, Box<dyn std::error::Error>> {
+    args: &[String],
+) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
     // Targets and `-u` args are derived in one pass so every URL nuclei scans has its
     // host scope-checked; URLs without a host are never scanned.
     let mut hosts: BTreeSet<String> = BTreeSet::new();
-    let mut args: Vec<String> = vec![
-        "-silent".into(),
-        "-jsonl".into(),
-        "-tags".into(),
-        "cve,exposure,misconfig,tech".into(),
-    ];
+    let mut args: Vec<String> = args.to_vec();
     for u in urls {
         if let Some(h) = Url::parse(u)
             .ok()
@@ -53,12 +49,13 @@ pub fn scan(
         return Ok(vec![]);
     }
     let hv: Vec<String> = hosts.into_iter().collect();
-    Ok(normalise_nuclei(&runner.run_json("nuclei", &args, &hv)?))
+    runner.run_json("nuclei", &args, &hv)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalise::normalise_nuclei;
     use crate::runner::Runner;
     use serde_json::{json, Value};
     struct Fake;
@@ -83,11 +80,39 @@ mod tests {
             Ok(String::new())
         }
     }
+    fn jsonl() -> Vec<String> {
+        vec!["-silent".into(), "-jsonl".into()]
+    }
+
     #[test]
-    fn scan_returns_findings() {
-        let out = scan(&Fake, &["https://app.example.com/".into()]).unwrap();
+    fn scan_rows_returns_raw_rows() {
+        let rows = scan_rows(&Fake, &["https://app.example.com/".into()], &jsonl()).unwrap();
+        assert_eq!(rows[0]["template-id"], "CVE-1");
+        let out = normalise_nuclei(&rows);
         assert_eq!(out[0].tool, "nuclei");
         assert_eq!(out[0].severity, "HIGH");
+    }
+
+    #[test]
+    fn caller_args_pass_verbatim_before_the_url_list() {
+        let rec = Rec::default();
+        let mut args = jsonl();
+        args.extend(["-tags".into(), "xss".into()]);
+        scan_rows(&rec, &["https://app.example.com/".to_string()], &args).unwrap();
+        let calls = rec.calls.borrow();
+        let (_, got, targets) = &calls[0];
+        assert_eq!(
+            got,
+            &vec![
+                "-silent",
+                "-jsonl",
+                "-tags",
+                "xss",
+                "-u",
+                "https://app.example.com/"
+            ]
+        );
+        assert_eq!(targets, &vec!["app.example.com".to_string()]);
     }
 
     use std::cell::RefCell;
@@ -125,7 +150,7 @@ mod tests {
             "https://app.example.com/".to_string(),
             "evil.com:8080/x".to_string(),
         ];
-        scan(&rec, &urls).unwrap();
+        scan_rows(&rec, &urls, &jsonl()).unwrap();
         let calls = rec.calls.borrow();
         assert_eq!(calls.len(), 1);
         let (tool, args, targets) = &calls[0];
@@ -139,7 +164,7 @@ mod tests {
     fn all_host_less_input_does_not_call_runner() {
         let rec = Rec::default();
         let urls = vec!["evil.com/x".to_string(), "evil.com:8080/x".to_string()];
-        let out = scan(&rec, &urls).unwrap();
+        let out = scan_rows(&rec, &urls, &jsonl()).unwrap();
         assert!(out.is_empty());
         assert!(rec.calls.borrow().is_empty());
     }

@@ -5,6 +5,7 @@ use url::Url;
 pub fn enumerate_surface(
     runner: &dyn Runner,
     urls: &[String],
+    extra: &[String],
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     if urls.is_empty() {
         return Ok(vec![]);
@@ -27,6 +28,8 @@ pub fn enumerate_surface(
     if hosts.is_empty() {
         return Ok(set.into_iter().collect());
     }
+    // Caller-supplied flags (e.g. an auth header) follow the `-u` list.
+    args.extend(extra.iter().cloned());
     let hv: Vec<String> = hosts.into_iter().collect();
     let rows = runner.run_json("katana", &args, &hv)?;
     for r in rows {
@@ -63,7 +66,7 @@ mod tests {
     }
     #[test]
     fn merges_endpoints() {
-        let out = enumerate_surface(&Fake, &["https://app.example.com".into()]).unwrap();
+        let out = enumerate_surface(&Fake, &["https://app.example.com".into()], &[]).unwrap();
         assert!(out.contains(&"https://app.example.com/login".to_string()));
         assert!(out.contains(&"https://app.example.com".to_string()));
     }
@@ -103,7 +106,7 @@ mod tests {
             "evil.com:8080".to_string(),
             "https://app.example.com".to_string(),
         ];
-        let out = enumerate_surface(&rec, &urls).unwrap();
+        let out = enumerate_surface(&rec, &urls, &[]).unwrap();
         let calls = rec.calls.borrow();
         assert_eq!(calls.len(), 1);
         let (tool, args, targets) = &calls[0];
@@ -115,10 +118,22 @@ mod tests {
     }
 
     #[test]
+    fn extra_args_reach_katana() {
+        let rec = Rec::default();
+        let extra = vec!["-H".to_string(), "X-Test: 1".to_string()];
+        enumerate_surface(&rec, &["https://app.example.com".to_string()], &extra).unwrap();
+        let calls = rec.calls.borrow();
+        let (tool, args, targets) = &calls[0];
+        assert_eq!(tool, "katana");
+        assert!(args.ends_with(&extra), "{args:?}");
+        assert_eq!(targets, &vec!["app.example.com".to_string()]);
+    }
+
+    #[test]
     fn all_host_less_input_does_not_call_runner() {
         let rec = Rec::default();
         let urls = vec!["evil.com".to_string(), "evil.com:8080".to_string()];
-        let out = enumerate_surface(&rec, &urls).unwrap();
+        let out = enumerate_surface(&rec, &urls, &["-H".into(), "X-Test: 1".into()]).unwrap();
         assert!(rec.calls.borrow().is_empty());
         assert_eq!(
             out,

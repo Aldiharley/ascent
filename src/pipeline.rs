@@ -7,8 +7,9 @@ use crate::stages::{
     enumerate::enumerate_surface,
     recon::{ensure_httpx_identity, recon},
     sast::{is_within, sast},
-    scan::{ensure_nuclei_version, scan},
+    scan::{ensure_nuclei_version, scan_rows},
 };
+use crate::normalise::normalise_nuclei;
 use crate::triage::{write_atomic, TriageEngine};
 use std::path::Path;
 
@@ -124,13 +125,22 @@ pub fn run_pipeline(
         ensure_httpx_identity(runner)?;
     }
     let mut urls = if !root.is_empty() {
-        recon(runner, &root)?
+        recon(runner, &root, true)?
     } else {
         eng.urls.clone()
     };
-    urls = enumerate_surface(runner, &urls)?;
+    urls = enumerate_surface(runner, &urls, &[])?;
     let mut findings = if !urls.is_empty() {
-        scan(runner, &urls)?
+        normalise_nuclei(&scan_rows(
+            runner,
+            &urls,
+            &[
+                "-silent".into(),
+                "-jsonl".into(),
+                "-tags".into(),
+                "cve,exposure,misconfig,tech".into(),
+            ],
+        )?)
     } else {
         vec![]
     };
