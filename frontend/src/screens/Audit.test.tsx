@@ -73,6 +73,33 @@ test("renders a gate_decision entry as a human decision", async () => {
   expect(screen.queryByText(/Triage/)).toBeNull();
 });
 
+test("renders a gate_evaluation entry as the policy gate verdict", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    json({
+      entries: [
+        { type: "gate_evaluation", decision: "FAIL", exit_code: 1, ts: "t", prev_hash: "a", entry_hash: "b" },
+      ],
+      chain_ok: true,
+    }),
+  );
+  render(<Audit />);
+  expect(await screen.findByText(/Policy gate/)).toBeInTheDocument();
+  expect(screen.getByText(/FAIL \(exit 1\)/)).toBeInTheDocument();
+  expect(screen.queryByText(/Triage/)).toBeNull();
+});
+
+test("renders a gate_execution entry with its outcome", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    json({
+      entries: [{ type: "gate_execution", gate_id: "g9", outcome: "ran", ts: "t", entry_hash: "b" }],
+      chain_ok: true,
+    }),
+  );
+  render(<Audit />);
+  expect(await screen.findByText(/Verification run/)).toBeInTheDocument();
+  expect(screen.getByText(/gate g9 → ran/)).toBeInTheDocument();
+});
+
 test("shows an alarming FAIL badge when the chain is broken", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(
     json({ entries: [{ ts: "t", verdict: "TRUE_POSITIVE", finding_id: "n1" }], chain_ok: false }),

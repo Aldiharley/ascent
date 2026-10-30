@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getEngagement } from "./api";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PolicyGate } from "./components/PolicyGate";
 import { Shell } from "./components/Shell";
 import type { NavId } from "./components/Shell";
 import { Audit } from "./screens/Audit";
@@ -97,6 +98,9 @@ export default function App() {
             </>
           }
         >
+          <ErrorBoundary key="overview-gate">
+            <PolicyGate />
+          </ErrorBoundary>
           <ErrorBoundary key="overview-findings">
             <Findings />
           </ErrorBoundary>

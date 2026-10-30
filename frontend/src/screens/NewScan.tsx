@@ -166,6 +166,10 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
                   {copied ? "Copied" : "Copy"}
                 </button>
               </div>
+              <div className="hint" style={{ marginTop: 6 }}>
+                Add <code>--policy samples/ascent-policy.example.yaml</code> to gate the run: the command then exits 1 when the
+                policy fails, ready for CI.
+              </div>
             </div>
             <div className="note" style={{ textAlign: "left" }}>
               The console now reflects this engagement. Findings, gates and the report fill in once

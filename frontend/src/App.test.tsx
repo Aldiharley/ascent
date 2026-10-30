@@ -28,6 +28,7 @@ function mockApi(overrides: Record<string, () => Response | Promise<Response>> =
     "/api/findings": () => json([finding]),
     "/api/gates": () => json([gate]),
     "/api/audit": () => json({ entries: [], chain_ok: true }),
+    "/api/gate": () => json(null),
     "/api/report": () => json({ markdown: "## Report body" }),
     "/api/engagement": () => json({ name: "ascent-local-lab" }),
     ...overrides,

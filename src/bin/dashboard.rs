@@ -24,7 +24,7 @@ mod scope;
 
 use dashboard::gates::{decide_gate, DecideError};
 use dashboard::newscan;
-use dashboard::read::{read_audit, read_engagement, read_findings, read_report};
+use dashboard::read::{read_audit, read_engagement, read_findings, read_gate, read_report};
 use gatesio::read_pending_gates;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -205,6 +205,11 @@ async fn report(State(s): State<Shared>) -> Json<Value> {
     Json(json!({ "markdown": read_report(&s.out_dir) }))
 }
 
+/// The last policy verdict. Read-only: the dashboard never evaluates or runs.
+async fn gate_verdict(State(s): State<Shared>) -> Json<Value> {
+    Json(read_gate(&s.out_dir))
+}
+
 async fn gates(State(s): State<Shared>) -> Json<Vec<Value>> {
     Json(read_pending_gates(&s.out_dir))
 }
@@ -279,6 +284,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/findings", get(findings))
         .route("/api/audit", get(audit))
         .route("/api/report", get(report))
+        .route("/api/gate", get(gate_verdict))
         .route("/api/gates", get(gates))
         .route("/api/gates/:id/:decision", post(decide))
         .fallback_service(ServeDir::new(dist_dir_from(
@@ -565,6 +571,34 @@ mod tests {
         let resp = app_for(&dir).oneshot(api_get("/api/report")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["markdown"], "# Report\n");
+    }
+
+    #[tokio::test]
+    async fn gate_route_returns_gate_json_or_null() {
+        let dir = tmp();
+        let resp = app_for(&dir).oneshot(api_get("/api/gate")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await, Value::Null);
+        std::fs::write(dir.join("gate.json"), r#"{"decision":"PASS","exit_code":0}"#).unwrap();
+        let resp = app_for(&dir).oneshot(api_get("/api/gate")).await.unwrap();
+        assert_eq!(body_json(resp).await["decision"], "PASS");
+    }
+
+    #[tokio::test]
+    async fn gate_route_is_read_only() {
+        let dir = tmp();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/gate")
+            .header("host", "127.0.0.1:8787")
+            .header("origin", "http://127.0.0.1:8787")
+            .header("x-ascent", "1")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app_for(&dir).oneshot(req).await.unwrap().status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
     }
 
     #[tokio::test]

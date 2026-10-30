@@ -149,7 +149,30 @@ export interface GateAuditEntry {
   entry_hash?: string;
 }
 
-export type AuditEntry = TriageAuditEntry | GateAuditEntry;
+export interface GateEvaluationAuditEntry {
+  ts?: string;
+  type: "gate_evaluation";
+  decision?: string;
+  exit_code?: number;
+  policy_hash?: string;
+  prev_hash?: string;
+  entry_hash?: string;
+}
+
+export interface GateExecutionAuditEntry {
+  ts?: string;
+  type: "gate_execution";
+  gate_id?: string;
+  outcome?: string;
+  prev_hash?: string;
+  entry_hash?: string;
+}
+
+export type AuditEntry =
+  | TriageAuditEntry
+  | GateAuditEntry
+  | GateEvaluationAuditEntry
+  | GateExecutionAuditEntry;
 
 export interface AuditLog {
   entries: AuditEntry[];
@@ -237,4 +260,70 @@ export async function createEngagement(input: NewScanInput): Promise<CreatedEnga
     throw new CreateEngagementError(res.status, "create returned an unexpected payload");
   }
   return body as unknown as CreatedEngagement;
+}
+
+// GET /api/gate: the last policy verdict (out/gate.json), or null when no
+// policy has been evaluated. Strings can originate from scanned targets:
+// render as React text only.
+export type GateDecisionKind = "PASS" | "CONDITIONAL" | "FAIL" | "INCOMPLETE";
+
+export interface GateEntryView {
+  fingerprint: string;
+  rule_id: string;
+  severity: string;
+  category: string;
+  title: string;
+  locus: string;
+  reason: string;
+}
+
+export interface GateReport {
+  policy: { name: string; hash: string };
+  decision: GateDecisionKind;
+  exit_code: number;
+  complete: boolean;
+  dry_run?: boolean;
+  failed_tools?: string[];
+  counts: { evaluated: number; failed: number; warned: number; demoted_fp: number };
+  failed: GateEntryView[];
+  warned: GateEntryView[];
+  evaluated_at?: string;
+}
+
+const DECISIONS: readonly string[] = ["PASS", "CONDITIONAL", "FAIL", "INCOMPLETE"];
+
+export async function getGate(): Promise<GateReport | null> {
+  const res = await fetch("/api/gate");
+  if (!res.ok) {
+    throw new Error(`GET /api/gate failed: ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  if (body === null) return null;
+  if (!isObject(body) || typeof body.decision !== "string" || !DECISIONS.includes(body.decision)) {
+    throw new Error("GET /api/gate returned an unexpected payload");
+  }
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter(isObject) : []) as unknown as GateEntryView[];
+  const policy = isObject(body.policy) ? body.policy : {};
+  const counts = isObject(body.counts) ? body.counts : {};
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  return {
+    policy: {
+      name: typeof policy.name === "string" ? policy.name : "",
+      hash: typeof policy.hash === "string" ? policy.hash : "",
+    },
+    decision: body.decision as GateDecisionKind,
+    exit_code: num(body.exit_code),
+    complete: body.complete === true,
+    dry_run: body.dry_run === true,
+    failed_tools: Array.isArray(body.failed_tools) ? body.failed_tools.filter((t): t is string => typeof t === "string") : [],
+    counts: {
+      evaluated: num(counts.evaluated),
+      failed: num(counts.failed),
+      warned: num(counts.warned),
+      demoted_fp: num(counts.demoted_fp),
+    },
+    failed: list(body.failed),
+    warned: list(body.warned),
+    evaluated_at: typeof body.evaluated_at === "string" ? body.evaluated_at : undefined,
+  };
 }
