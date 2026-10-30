@@ -70,6 +70,10 @@ pub fn run_pipeline(
     // Reset the triage queue up front so a re-run that yields no findings (or
     // fails before triage writes it) never shows the previous run's findings.
     write_atomic(&Path::new(out_dir).join("queue.json"), b"[]\n")?;
+    // Reset the run status to "incomplete" so a run that dies part-way can never
+    // leave a previous run's "complete" behind for the policy gate to trust.
+    write_run_status(out_dir, &RunStatus { complete: false, dry_run, failed_tools: vec![],
+        skipped_tools: vec![], finished_at: String::new() })?;
     // In dry-run the runner returns empty output, which would always fail the version gate.
     if !dry_run {
         ensure_nuclei_version(runner)?;
@@ -255,6 +259,46 @@ mod tests {
         assert!(s.complete && s.failed_tools.is_empty());
         let st = crate::runstatus::read_run_status(&dir).unwrap();
         assert!(st.complete && !st.dry_run && !st.finished_at.is_empty());
+    }
+
+    /// Every DAST tool call errors (as a crashed scanner now does); version gate passes.
+    struct FailRun;
+    impl Runner for FailRun {
+        fn run_json(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            Err("boom".into())
+        }
+        fn run_text(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok("nuclei v3.10.1".into())
+        }
+    }
+
+    #[test]
+    fn aborted_run_does_not_leave_a_previous_complete_status() {
+        let dir = unique_dir();
+        crate::runstatus::write_run_status(
+            &dir,
+            &crate::runstatus::RunStatus {
+                complete: true,
+                dry_run: false,
+                failed_tools: vec![],
+                skipped_tools: vec![],
+                finished_at: "old".into(),
+            },
+        )
+        .unwrap();
+        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
+        let st = crate::runstatus::read_run_status(&dir).unwrap();
+        assert!(!st.complete, "stale complete=true survived an aborted run");
     }
 
     fn queue(dir: &str) -> Value {
