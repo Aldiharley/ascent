@@ -149,7 +149,30 @@ export interface GateAuditEntry {
   entry_hash?: string;
 }
 
-export type AuditEntry = TriageAuditEntry | GateAuditEntry;
+export interface GateEvaluationAuditEntry {
+  ts?: string;
+  type: "gate_evaluation";
+  decision?: string;
+  exit_code?: number;
+  policy_hash?: string;
+  prev_hash?: string;
+  entry_hash?: string;
+}
+
+export interface GateExecutionAuditEntry {
+  ts?: string;
+  type: "gate_execution";
+  gate_id?: string;
+  outcome?: string;
+  prev_hash?: string;
+  entry_hash?: string;
+}
+
+export type AuditEntry =
+  | TriageAuditEntry
+  | GateAuditEntry
+  | GateEvaluationAuditEntry
+  | GateExecutionAuditEntry;
 
 export interface AuditLog {
   entries: AuditEntry[];
@@ -183,4 +206,128 @@ export async function getEngagement(): Promise<Engagement | null> {
     return null;
   }
   return body as Engagement;
+}
+
+// POST /api/engagements: define a new scan. This only writes a validated scope
+// file; it never starts a scan. The backend requires `X-Ascent: 1` (CSRF) and
+// validates every target with the same scope parser the pipeline enforces.
+export interface NewScanInput {
+  name: string;
+  targets: string[];
+  source?: string;
+}
+
+export interface CreatedEngagement {
+  ok: true;
+  name: string;
+  path: string;
+  scope: { hosts: string[]; cidrs: string[]; urls: string[] };
+  source: string;
+  run_command: string;
+}
+
+/** Thrown on a non-2xx create so the screen can show the message and rejected list. */
+export class CreateEngagementError extends Error {
+  readonly status: number;
+  readonly rejected?: string[];
+  readonly field?: string;
+  constructor(status: number, message: string, extra?: { rejected?: string[]; field?: string }) {
+    super(message);
+    this.name = "CreateEngagementError";
+    this.status = status;
+    this.rejected = extra?.rejected;
+    this.field = extra?.field;
+  }
+}
+
+export async function createEngagement(input: NewScanInput): Promise<CreatedEngagement> {
+  const res = await fetch("/api/engagements", {
+    method: "POST",
+    headers: { "X-Ascent": "1", "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const b = isObject(body) ? body : {};
+    const message = typeof b.error === "string" ? b.error : `create failed: ${res.status}`;
+    const rejected = Array.isArray(b.rejected)
+      ? b.rejected.filter((x): x is string => typeof x === "string")
+      : undefined;
+    const field = typeof b.field === "string" ? b.field : undefined;
+    throw new CreateEngagementError(res.status, message, { rejected, field });
+  }
+  if (!isObject(body) || body.ok !== true) {
+    throw new CreateEngagementError(res.status, "create returned an unexpected payload");
+  }
+  return body as unknown as CreatedEngagement;
+}
+
+// GET /api/gate: the last policy verdict (out/gate.json), or null when no
+// policy has been evaluated. Strings can originate from scanned targets:
+// render as React text only.
+export type GateDecisionKind = "PASS" | "CONDITIONAL" | "FAIL" | "INCOMPLETE";
+
+export interface GateEntryView {
+  fingerprint: string;
+  rule_id: string;
+  severity: string;
+  category: string;
+  title: string;
+  locus: string;
+  reason: string;
+}
+
+export interface GateReport {
+  policy: { name: string; hash: string };
+  decision: GateDecisionKind;
+  exit_code: number;
+  complete: boolean;
+  dry_run?: boolean;
+  failed_tools?: string[];
+  // Analysers that were not installed; one covering a policy category makes the run INCOMPLETE.
+  skipped_tools?: string[];
+  counts: { evaluated: number; failed: number; warned: number; demoted_fp: number };
+  failed: GateEntryView[];
+  warned: GateEntryView[];
+  evaluated_at?: string;
+}
+
+const DECISIONS: readonly string[] = ["PASS", "CONDITIONAL", "FAIL", "INCOMPLETE"];
+
+export async function getGate(): Promise<GateReport | null> {
+  const res = await fetch("/api/gate");
+  if (!res.ok) {
+    throw new Error(`GET /api/gate failed: ${res.status}`);
+  }
+  const body: unknown = await res.json();
+  if (body === null) return null;
+  if (!isObject(body) || typeof body.decision !== "string" || !DECISIONS.includes(body.decision)) {
+    throw new Error("GET /api/gate returned an unexpected payload");
+  }
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter(isObject) : []) as unknown as GateEntryView[];
+  const policy = isObject(body.policy) ? body.policy : {};
+  const counts = isObject(body.counts) ? body.counts : {};
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((t): t is string => typeof t === "string") : []);
+  return {
+    policy: {
+      name: typeof policy.name === "string" ? policy.name : "",
+      hash: typeof policy.hash === "string" ? policy.hash : "",
+    },
+    decision: body.decision as GateDecisionKind,
+    exit_code: num(body.exit_code),
+    complete: body.complete === true,
+    dry_run: body.dry_run === true,
+    failed_tools: strings(body.failed_tools),
+    skipped_tools: strings(body.skipped_tools),
+    counts: {
+      evaluated: num(counts.evaluated),
+      failed: num(counts.failed),
+      warned: num(counts.warned),
+      demoted_fp: num(counts.demoted_fp),
+    },
+    failed: list(body.failed),
+    warned: list(body.warned),
+    evaluated_at: typeof body.evaluated_at === "string" ? body.evaluated_at : undefined,
+  };
 }

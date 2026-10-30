@@ -167,6 +167,48 @@ fn host_of(target: &str) -> String {
     }
 }
 
+/// Classify one raw target string into the engagement-scope list it belongs to.
+///
+/// Returns `(kind, stored)` where `kind` is `"hosts"`, `"cidrs"` or `"urls"` and
+/// `stored` is the canonical text to write into the engagement YAML. Returns
+/// `None` for anything invalid, ambiguous or out-of-form — the caller rejects it
+/// and writes nothing. This applies exactly the same strict parsing as
+/// [`ScopeGuard`] (via [`validate_host`] / [`host_of`]), surfaced so the New Scan
+/// form can refuse a bad target before an engagement is ever created. It never
+/// widens scope: a classified entry is one the guard built from it would accept.
+// Used by the `dashboard` binary (New Scan) and this module's tests; the `ascent`
+// binary links it but does not call it, so allow it to be unused there.
+#[allow(dead_code)]
+pub fn classify_target(raw: &str) -> Option<(&'static str, String)> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    // Whitespace/control anywhere is a parser-differential vector (same rule as host_of).
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    if t.contains("://") {
+        // A URL: accept only if our strict reader yields a real host (and there
+        // is no userinfo, no ambiguity). Store it as typed; the guard re-validates.
+        if host_of(t).is_empty() {
+            return None;
+        }
+        return Some(("urls", t.to_string()));
+    }
+    if t.contains('/') {
+        // A slash with no scheme must be a CIDR; a host+path is ambiguous -> refuse.
+        return t.parse::<IpNet>().ok().map(|_| ("cidrs", t.to_string()));
+    }
+    // A bare hostname or IP literal.
+    let h = validate_host(t);
+    if h.is_empty() {
+        None
+    } else {
+        Some(("hosts", h))
+    }
+}
+
 pub struct ScopeGuard {
     hosts: HashSet<String>,
     nets: Vec<IpNet>,
@@ -491,5 +533,91 @@ mod tests {
     #[test]
     fn load_engagement_errors_on_missing_file() {
         assert!(load_engagement("definitely/not/here.yaml").is_err());
+    }
+
+    #[test]
+    fn classify_buckets_valid_targets() {
+        assert_eq!(
+            classify_target("Example.COM"),
+            Some(("hosts", "example.com".to_string()))
+        );
+        assert_eq!(
+            classify_target("  10.0.0.5 "),
+            Some(("hosts", "10.0.0.5".to_string()))
+        );
+        assert_eq!(
+            classify_target("::1"),
+            Some(("hosts", "::1".to_string()))
+        );
+        assert_eq!(
+            classify_target("10.0.0.0/24"),
+            Some(("cidrs", "10.0.0.0/24".to_string()))
+        );
+        assert_eq!(
+            classify_target("fd00::/64"),
+            Some(("cidrs", "fd00::/64".to_string()))
+        );
+        assert_eq!(
+            classify_target("http://localhost:3000/"),
+            Some(("urls", "http://localhost:3000/".to_string()))
+        );
+    }
+
+    #[test]
+    fn classify_refuses_the_same_targets_the_guard_refuses() {
+        // A sampling of the adversarial inputs: none may classify.
+        for bad in [
+            "",
+            " ",
+            "evil.com/example.com",
+            "http://user:pass@example.com/",
+            "example.com\\@evil.com",
+            "exa mple.com",
+            "exam\tple.com",
+            "*.example.com",
+            "//example.com",
+            "http://",
+            "10.1",
+            "0x0a.0.0.5",
+            "example.com/some/path", // host+path is ambiguous -> refused
+            "not-a-cidr/24",
+            "10.0.0.0/999",
+        ] {
+            assert!(classify_target(bad).is_none(), "classified bad target {bad:?}");
+        }
+    }
+
+    #[test]
+    fn classified_target_is_actually_in_scope_for_its_own_engagement() {
+        // The core invariant: anything classify_target accepts, a ScopeGuard built
+        // from that single entry must consider in scope. No fail-open gap.
+        for raw in [
+            "example.com",
+            "10.0.0.5",
+            "::1",
+            "10.0.0.0/24",
+            "http://localhost:3000/",
+        ] {
+            let (kind, stored) = classify_target(raw).expect("should classify");
+            let mut e = Engagement {
+                name: "t".into(),
+                hosts: vec![],
+                cidrs: vec![],
+                urls: vec![],
+                source: String::new(),
+                starts: "2026-01-01T00:00:00Z".into(),
+                ends: "2030-01-01T00:00:00Z".into(),
+            };
+            match kind {
+                "hosts" => e.hosts.push(stored.clone()),
+                "cidrs" => e.cidrs.push(stored.clone()),
+                "urls" => e.urls.push(stored.clone()),
+                other => panic!("unexpected kind {other}"),
+            }
+            assert!(
+                ScopeGuard::new(&e).in_scope(raw),
+                "{raw:?} classified as {kind} but not in scope"
+            );
+        }
     }
 }

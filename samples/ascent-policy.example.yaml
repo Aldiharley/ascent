@@ -1,0 +1,18 @@
+# Ascent policy (version 1). Evaluated by `ascent run --policy FILE` or
+# `ascent gate --policy FILE`. Unknown keys are an error (exit 2) so a typo can
+# never silently weaken the gate.
+version: 1
+name: default
+fail_on:
+  # A matching finding fails the gate (exit 1).
+  severity: [CRITICAL, HIGH]
+  categories: [SAST, SCA, SECRETS, DAST]
+  cwe: [CWE-798]          # hardcoded credentials fail at any severity
+warn_on:
+  # A matching finding makes the gate CONDITIONAL (exit 0, or 1 with --fail-on-warn).
+  severity: [MEDIUM]
+  cwe: []
+triage:
+  # demote_to_warn: a fail_on match triaged LIKELY_FALSE_POSITIVE becomes a warning.
+  # enforce: it fails like any other. A likely-FP is never silently passed.
+  likely_false_positive: demote_to_warn

@@ -17,13 +17,23 @@ pub fn tool_available(runner: &dyn Runner, tool: &str, version_arg: &str) -> boo
     runner.run_text(tool, &[version_arg.into()], &[]).is_ok()
 }
 
+/// What the SAST track produced, and which analysers did not complete.
+#[derive(Debug, Default)]
+pub struct SastOutcome {
+    pub findings: Vec<Finding>,
+    /// Analysers that were present but errored: the run is INCOMPLETE.
+    pub failed_tools: Vec<String>,
+    /// Analysers not installed: coverage note only.
+    pub skipped_tools: Vec<String>,
+}
+
 /// Runs each available analyser over `source_dir` (always with EMPTY network
 /// targets) and merges the normalised findings. Missing tools are skipped.
 pub fn sast(
     runner: &dyn Runner,
     source_dir: &str,
-) -> Result<Vec<Finding>, Box<dyn std::error::Error>> {
-    let mut findings = Vec::new();
+) -> Result<SastOutcome, Box<dyn std::error::Error>> {
+    let mut o = SastOutcome::default();
     if tool_available(runner, "opengrep", "--version") {
         // opengrep is semgrep-derived but drops `--metrics` (it sends no telemetry by
         // default). `--config auto` needs `--experimental`; `--disable-version-check`
@@ -40,14 +50,21 @@ pub fn sast(
         ];
         // A tool that spawns but then errors must not drop the other analysers' findings.
         match runner.run_json("opengrep", &args, &[]) {
-            Ok(rows) => findings.extend(normalise_opengrep(&rows)),
-            Err(_) => eprintln!("sast: opengrep failed; continuing without its findings"),
+            Ok(rows) => o.findings.extend(normalise_opengrep(&rows)),
+            Err(_) => {
+                eprintln!("sast: opengrep failed; continuing without its findings");
+                o.failed_tools.push("opengrep".into());
+            }
         }
+    } else {
+        o.skipped_tools.push("opengrep".into());
     }
     if tool_available(runner, "gitleaks", "version") {
         let args = vec![
             "detect".into(),
             "--no-git".into(),
+            "--exit-code".into(),
+            "0".into(),
             "--report-format".into(),
             "json".into(),
             "--report-path".into(),
@@ -56,9 +73,14 @@ pub fn sast(
             source_dir.into(),
         ];
         match runner.run_json("gitleaks", &args, &[]) {
-            Ok(rows) => findings.extend(normalise_gitleaks(&rows)),
-            Err(_) => eprintln!("sast: gitleaks failed; continuing without its findings"),
+            Ok(rows) => o.findings.extend(normalise_gitleaks(&rows)),
+            Err(_) => {
+                eprintln!("sast: gitleaks failed; continuing without its findings");
+                o.failed_tools.push("gitleaks".into());
+            }
         }
+    } else {
+        o.skipped_tools.push("gitleaks".into());
     }
     if tool_available(runner, "trivy", "--version") {
         let args = vec![
@@ -69,11 +91,16 @@ pub fn sast(
             source_dir.into(),
         ];
         match runner.run_json("trivy", &args, &[]) {
-            Ok(rows) => findings.extend(normalise_trivy(&rows)),
-            Err(_) => eprintln!("sast: trivy failed; continuing without its findings"),
+            Ok(rows) => o.findings.extend(normalise_trivy(&rows)),
+            Err(_) => {
+                eprintln!("sast: trivy failed; continuing without its findings");
+                o.failed_tools.push("trivy".into());
+            }
         }
+    } else {
+        o.skipped_tools.push("trivy".into());
     }
-    Ok(findings)
+    Ok(o)
 }
 
 #[cfg(test)]
@@ -138,6 +165,8 @@ mod tests {
             calls: RefCell::new(vec![]),
         };
         let out = sast(&f, ".").unwrap();
+        assert_eq!(out.skipped_tools, vec!["gitleaks".to_string()]);
+        let out = out.findings;
         let tools: Vec<&str> = out.iter().map(|x| x.tool.as_str()).collect();
         assert!(tools.contains(&"opengrep") && tools.contains(&"trivy"));
         assert!(!tools.contains(&"gitleaks"), "absent tool must be skipped");
@@ -156,7 +185,7 @@ mod tests {
             fail_json: vec![],
             calls: RefCell::new(vec![]),
         };
-        assert!(sast(&f, ".").unwrap().is_empty());
+        assert!(sast(&f, ".").unwrap().findings.is_empty());
     }
 
     #[test]
@@ -167,7 +196,8 @@ mod tests {
             calls: RefCell::new(vec![]),
         };
         let out = sast(&f, ".").unwrap();
-        let tools: Vec<&str> = out.iter().map(|x| x.tool.as_str()).collect();
+        assert_eq!(out.failed_tools, vec!["opengrep".to_string()]);
+        let tools: Vec<&str> = out.findings.iter().map(|x| x.tool.as_str()).collect();
         assert!(!tools.contains(&"opengrep"));
         assert!(tools.contains(&"gitleaks") && tools.contains(&"trivy"));
     }
@@ -193,6 +223,9 @@ mod tests {
         let gl = args_of("gitleaks");
         let i = gl.iter().position(|a| a == "--report-path").unwrap();
         assert_eq!(gl[i + 1], "-");
+        // gitleaks: findings must not change the exit status (only errors do).
+        let j = gl.iter().position(|a| a == "--exit-code").unwrap();
+        assert_eq!(gl[j + 1], "0");
     }
 
     #[test]

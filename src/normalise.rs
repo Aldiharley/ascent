@@ -198,7 +198,12 @@ pub fn normalise_trivy(rows: &[Value]) -> Vec<Finding> {
                     line: 0,
                     category: "SCA".into(),
                     cwe: cwe_first(&v["CweIDs"]),
-                    evidence: String::new(),
+                    evidence: format!(
+                        "pkg={pkg} installed={} fixed={} purl={}",
+                        v["InstalledVersion"].as_str().unwrap_or(""),
+                        v["FixedVersion"].as_str().filter(|s| !s.is_empty()).unwrap_or("none"),
+                        v["PkgIdentifier"]["PURL"].as_str().unwrap_or(""),
+                    ),
                 });
             }
         }
@@ -229,6 +234,28 @@ mod tests {
 mod sast_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn trivy_keeps_installed_and_fixed_versions() {
+        let rows = vec![json!({"Results":[{"Target":"package-lock.json","Vulnerabilities":[{
+            "VulnerabilityID":"CVE-2021-3749","PkgName":"axios","InstalledVersion":"0.21.1",
+            "FixedVersion":"0.21.2","PkgIdentifier":{"PURL":"pkg:npm/axios@0.21.1"},
+            "Severity":"HIGH","Title":"axios ReDoS"}]}]})];
+        let out = normalise_trivy(&rows);
+        assert_eq!(
+            out[0].evidence,
+            "pkg=axios installed=0.21.1 fixed=0.21.2 purl=pkg:npm/axios@0.21.1"
+        );
+        // id stays version-free so a fingerprint survives an upgrade that keeps the CVE
+        assert!(!out[0].id.contains("0.21.1"), "{}", out[0].id);
+    }
+
+    #[test]
+    fn trivy_without_a_fix_says_none() {
+        let rows = vec![json!({"Results":[{"Target":"go.mod","Vulnerabilities":[{
+            "VulnerabilityID":"CVE-1","PkgName":"x","InstalledVersion":"1.0.0","Severity":"LOW"}]}]})];
+        assert_eq!(normalise_trivy(&rows)[0].evidence, "pkg=x installed=1.0.0 fixed=none purl=");
+    }
 
     #[test]
     fn opengrep_normalises() {

@@ -27,6 +27,30 @@ function EntryRow({ entry }: { entry: AuditEntry }) {
       </div>
     );
   }
+  if (entry.type === "gate_evaluation") {
+    return (
+      <div className="ev">
+        <span className="tick" aria-hidden="true" />
+        <div className="m">
+          <b>Policy gate</b> · {entry.decision ?? "?"} (exit {entry.exit_code ?? "?"})
+          <div className="h">{entry.ts ?? ""}</div>
+          {hash ? <div className="h">{hash}</div> : null}
+        </div>
+      </div>
+    );
+  }
+  if (entry.type === "gate_execution") {
+    return (
+      <div className="ev">
+        <span className="tick human" aria-hidden="true" />
+        <div className="m">
+          <b>Verification run</b> · gate {entry.gate_id ?? "?"} → {entry.outcome ?? "?"}
+          <div className="h">{entry.ts ?? ""}</div>
+          {hash ? <div className="h">{hash}</div> : null}
+        </div>
+      </div>
+    );
+  }
   const conf = typeof entry.confidence === "number" ? ` (${entry.confidence.toFixed(2)})` : "";
   return (
     <div className="ev">

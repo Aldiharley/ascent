@@ -79,6 +79,16 @@ impl Runner for ToolRunner {
             return Ok(vec![]);
         }
         let out = Command::new(tool).args(args).output()?;
+        // A scanner that exits non-zero has FAILED. (gitleaks runs with
+        // `--exit-code 0`, so "leaks found" is never a non-zero exit; opengrep and
+        // trivy exit 0 with findings — verified against opengrep 1.30, gitleaks 8,
+        // trivy 0.6x.) Treating it as an error means a crashed scanner can never
+        // look like "0 findings" to the policy gate.
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+            return Err(format!("{tool} exited with {}: {}", out.status, last.trim()).into());
+        }
         Ok(parse_jsonl(&String::from_utf8_lossy(&out.stdout)))
     }
 }
@@ -128,6 +138,22 @@ mod tests {
         assert!(v.is_empty());
         let t = r.run_text("httpx", &[], &["example.com".into()]).unwrap();
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn run_json_errors_when_the_tool_exits_non_zero() {
+        // `git` is present wherever this repo builds; an unknown flag exits 129.
+        let r = runner(false);
+        let err = r
+            .run_json("git", &["--definitely-not-a-flag".into()], &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("git exited with"), "{err}");
+    }
+
+    #[test]
+    fn run_json_is_ok_on_a_zero_exit() {
+        let r = runner(false);
+        assert!(r.run_json("git", &["--version".into()], &[]).is_ok());
     }
 
     #[test]

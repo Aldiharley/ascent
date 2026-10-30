@@ -1,9 +1,11 @@
+use crate::gate::fingerprint::relative_to;
 use crate::report::to_markdown;
 use crate::runner::Runner;
+use crate::runstatus::{now_ts, write_run_status, RunStatus};
 use crate::scope::Engagement;
 use crate::stages::{
     enumerate::enumerate_surface,
-    recon::recon,
+    recon::{ensure_httpx_identity, recon},
     sast::{is_within, sast},
     scan::{ensure_nuclei_version, scan},
 };
@@ -16,7 +18,33 @@ pub struct Summary {
     pub triaged: usize,
     pub report_path: String,
     pub audit_path: String,
+    /// True only for a non-dry run in which every SAST analyser that is present completed.
+    pub complete: bool,
+    pub failed_tools: Vec<String>,
 }
+
+/// The output directory's audit chain does not verify (CLI exit 4).
+#[derive(Debug)]
+pub struct IntegrityError(pub String);
+impl std::fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for IntegrityError {}
+
+/// A configuration/usage error such as a bad `--source` (CLI exit 2).
+#[derive(Debug)]
+pub struct ConfigError(pub String);
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ConfigError {}
+
+/// Outputs a previous run may have left behind that must never outlive a new run.
+const STALE_OUTPUTS: [&str; 3] = ["gate.json", "ascent.sarif", "ascent-dast.sarif"];
 
 /// Effective SAST source root: the `--source` override if non-empty, else the
 /// engagement's `source`, else none. An override must lie within the engagement's
@@ -25,11 +53,13 @@ pub struct Summary {
 fn resolve_source(
     eng: &Engagement,
     source: Option<&str>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+) -> Result<Option<String>, ConfigError> {
     let raw = match source {
         Some(s) if !s.is_empty() => {
             if !eng.source.is_empty() && !is_within(Path::new(&eng.source), Path::new(s)) {
-                return Err("--source is outside the engagement's authorised source root".into());
+                return Err(ConfigError(
+                    "--source is outside the engagement's authorised source root".into(),
+                ));
             }
             s
         }
@@ -37,11 +67,11 @@ fn resolve_source(
         _ => return Ok(None),
     };
     if raw.starts_with('-') {
-        return Err("source path must not start with '-'".into());
+        return Err(ConfigError("source path must not start with '-'".into()));
     }
     let canon = Path::new(raw)
         .canonicalize()
-        .map_err(|e| format!("source path {raw:?} is not accessible: {e}"))?;
+        .map_err(|e| ConfigError(format!("source path {raw:?} is not accessible: {e}")))?;
     let canon = canon.to_string_lossy().into_owned();
     // Windows canonical paths carry a `\\?\` verbatim prefix many tools mishandle.
     let canon = match canon.strip_prefix(r"\\?\") {
@@ -59,18 +89,40 @@ pub fn run_pipeline(
     dry_run: bool,
     source: Option<&str>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
+    // A tampered audit chain stops the run before anything is reset or written.
+    let (ok, msg) = crux::AuditLog::new(Path::new(out_dir).join("audit.jsonl")).verify();
+    if !ok {
+        return Err(Box::new(IntegrityError(format!(
+            "audit chain failed verification; nothing was run: {msg}"
+        ))));
+    }
     // Resolve and validate the SAST source root first so a bad `--source` fails
     // before any tool runs or any output is written.
     let eff_source = resolve_source(eng, source)?;
     std::fs::create_dir_all(out_dir)?;
+    // A previous run's verdict and SARIF must never outlive this run.
+    for name in STALE_OUTPUTS {
+        match std::fs::remove_file(Path::new(out_dir).join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
     // Reset the triage queue up front so a re-run that yields no findings (or
     // fails before triage writes it) never shows the previous run's findings.
     write_atomic(&Path::new(out_dir).join("queue.json"), b"[]\n")?;
-    // In dry-run the runner returns empty output, which would always fail the version gate.
-    if !dry_run {
+    // Reset the run status to "incomplete" so a run that dies part-way can never
+    // leave a previous run's "complete" behind for the policy gate to trust.
+    write_run_status(out_dir, &RunStatus { complete: false, dry_run, failed_tools: vec![],
+        skipped_tools: vec![], finished_at: String::new() })?;
+    let root = eng.hosts.first().cloned().unwrap_or_default();
+    // In dry-run the runner returns empty output, which would always fail these checks.
+    // nuclei is needed only with DAST scope; httpx only when recon runs.
+    if !dry_run && (!eng.hosts.is_empty() || !eng.urls.is_empty()) {
         ensure_nuclei_version(runner)?;
     }
-    let root = eng.hosts.first().cloned().unwrap_or_default();
+    if !dry_run && !root.is_empty() {
+        ensure_httpx_identity(runner)?;
+    }
     let mut urls = if !root.is_empty() {
         recon(runner, &root)?
     } else {
@@ -83,9 +135,19 @@ pub fn run_pipeline(
         vec![]
     };
     // SAST track (white-box): only when a source root is resolved; never in dry-run.
-    if let Some(src) = eff_source {
+    let mut failed_tools = Vec::new();
+    let mut skipped_tools = Vec::new();
+    if let Some(src) = eff_source.as_deref() {
         if !dry_run {
-            findings.extend(sast(runner, &src)?);
+            let mut o = sast(runner, src)?;
+            // The analysers report absolute paths under `src`: make every finding
+            // source-relative once, here, so the gate and SARIF fingerprint the same path.
+            for f in &mut o.findings {
+                f.file = relative_to(&f.file, src);
+            }
+            findings.extend(o.findings);
+            failed_tools = o.failed_tools;
+            skipped_tools = o.skipped_tools;
         }
     }
     let items = if !findings.is_empty() {
@@ -95,6 +157,10 @@ pub fn run_pipeline(
     };
     let report_path = Path::new(out_dir).join("report.md");
     std::fs::write(&report_path, to_markdown(&items, &eng.name))?;
+    crate::sarif::write_sarif(out_dir, &crate::sarif::item_values(&items), eff_source.as_deref())?;
+    let complete = !dry_run && failed_tools.is_empty();
+    write_run_status(out_dir, &RunStatus { complete, dry_run, failed_tools: failed_tools.clone(),
+        skipped_tools, finished_at: now_ts() })?;
     Ok(Summary {
         urls: urls.len(),
         findings: findings.len(),
@@ -104,6 +170,8 @@ pub fn run_pipeline(
             .join("audit.jsonl")
             .to_string_lossy()
             .into(),
+        complete,
+        failed_tools,
     })
 }
 
@@ -168,11 +236,19 @@ mod tests {
         }
         fn run_text(
             &self,
-            _t: &str,
+            t: &str,
             _a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok("nuclei v3.10.1".into())
+            Ok(version_of(t))
+        }
+    }
+
+    /// `-version` output of the real ProjectDiscovery tools.
+    fn version_of(tool: &str) -> String {
+        match tool {
+            "httpx" => "projectdiscovery.io\n[INF] Current Version: v1.12.0".into(),
+            _ => "nuclei v3.10.1".into(),
         }
     }
 
@@ -223,6 +299,154 @@ mod tests {
         let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
         assert!(s.findings >= 1);
         assert!(std::path::Path::new(&s.report_path).exists());
+    }
+
+    #[test]
+    fn dry_run_writes_an_incomplete_run_status() {
+        let dir = unique_dir();
+        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).unwrap();
+        assert!(!s.complete);
+        let st = crate::runstatus::read_run_status(&dir).unwrap();
+        assert!(!st.complete && st.dry_run);
+    }
+
+    #[test]
+    fn full_run_writes_a_complete_run_status() {
+        let dir = unique_dir();
+        let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
+        assert!(s.complete && s.failed_tools.is_empty());
+        let st = crate::runstatus::read_run_status(&dir).unwrap();
+        assert!(st.complete && !st.dry_run && !st.finished_at.is_empty());
+    }
+
+    #[test]
+    fn pipeline_writes_sarif() {
+        let dir = unique_dir();
+        run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
+        let read = |n: &str| -> Value {
+            serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(&dir).join(n)).unwrap()).unwrap()
+        };
+        assert_eq!(read("ascent.sarif")["version"], "2.1.0");
+        // FakeRun's nuclei finding is a URL finding: it lands in the DAST file
+        assert_eq!(read("ascent-dast.sarif")["runs"][0]["results"].as_array().unwrap().len(), 1);
+    }
+
+    /// Every DAST tool call errors (as a crashed scanner now does); version gate passes.
+    struct FailRun;
+    impl Runner for FailRun {
+        fn run_json(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            Err("boom".into())
+        }
+        fn run_text(
+            &self,
+            t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(version_of(t))
+        }
+    }
+
+    #[test]
+    fn source_only_engagement_needs_no_nuclei() {
+        let src = std::path::PathBuf::from(unique_dir());
+        let out = unique_dir();
+        let mut eng = sast_engagement(&src);
+        eng.urls = vec![];
+        // EmptyRun's run_text returns "": the nuclei version gate would fail if it ran.
+        let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None).unwrap();
+        assert_eq!(s.findings, 0);
+        assert!(s.complete);
+    }
+
+    /// A pip-installed Python `httpx` shadowing ProjectDiscovery httpx on PATH.
+    struct PyHttpxRun;
+    impl Runner for PyHttpxRun {
+        fn run_json(
+            &self,
+            t: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            FakeRun.run_json(t, a, g)
+        }
+        fn run_text(
+            &self,
+            t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(match t {
+                "httpx" => "Usage: httpx [OPTIONS] URL".into(),
+                _ => version_of(t),
+            })
+        }
+    }
+
+    #[test]
+    fn recon_refuses_a_non_projectdiscovery_httpx() {
+        let dir = unique_dir();
+        let e = run_pipeline(&engagement(), &PyHttpxRun, &FakeTri, &dir, false, None).err().unwrap();
+        assert!(e.to_string().contains("not ProjectDiscovery httpx"), "{e}");
+        // dry-run skips the identity check (the runner returns "")
+        assert!(run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).is_ok());
+    }
+
+    #[test]
+    fn aborted_run_does_not_leave_a_previous_complete_status() {
+        let dir = unique_dir();
+        crate::runstatus::write_run_status(
+            &dir,
+            &crate::runstatus::RunStatus {
+                complete: true,
+                dry_run: false,
+                failed_tools: vec![],
+                skipped_tools: vec![],
+                finished_at: "old".into(),
+            },
+        )
+        .unwrap();
+        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
+        let st = crate::runstatus::read_run_status(&dir).unwrap();
+        assert!(!st.complete, "stale complete=true survived an aborted run");
+    }
+
+    #[test]
+    fn stale_gate_and_sarif_never_survive_a_new_run() {
+        let dir = unique_dir();
+        for n in STALE_OUTPUTS {
+            std::fs::write(std::path::Path::new(&dir).join(n), r#"{"decision":"PASS"}"#).unwrap();
+        }
+        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
+        for n in STALE_OUTPUTS {
+            assert!(!std::path::Path::new(&dir).join(n).exists(), "stale {n} survived an aborted run");
+        }
+    }
+
+    #[test]
+    fn tampered_audit_is_an_integrity_error_and_nothing_is_reset() {
+        let dir = unique_dir();
+        seed_stale_queue(&dir);
+        let audit = std::path::Path::new(&dir).join("audit.jsonl");
+        std::fs::write(&audit, "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n").unwrap();
+        let e = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).err().unwrap();
+        assert!(e.downcast_ref::<IntegrityError>().is_some(), "{e}");
+        assert_eq!(queue(&dir)[0]["finding"]["title"], "stale from last run");
+        assert!(!std::path::Path::new(&dir).join("run.json").exists());
+    }
+
+    #[test]
+    fn bad_source_is_a_config_error() {
+        let out = unique_dir();
+        let mut eng = sast_engagement(std::path::Path::new(&out));
+        eng.source = String::new();
+        let e = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, Some("--config=evil")).err().unwrap();
+        assert!(e.downcast_ref::<ConfigError>().is_some(), "{e}");
     }
 
     fn queue(dir: &str) -> Value {
@@ -317,6 +541,109 @@ mod tests {
             starts: "x".into(),
             ends: "y".into(),
         }
+    }
+
+    /// opengrep reports an absolute path under the source root it was given (as the
+    /// real tool does, with the platform's separators); other tools absent.
+    struct AbsSastRun;
+    impl Runner for AbsSastRun {
+        fn run_json(
+            &self,
+            tool: &str,
+            a: &[String],
+            t: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            if tool == "opengrep" {
+                let root = a.last().unwrap();
+                let path = std::path::Path::new(root).join("sub").join("a.rs");
+                return Ok(vec![json!({"results":[{"check_id":"r","path":path.to_string_lossy(),
+                    "start":{"line":1},"extra":{"severity":"ERROR","message":"m","lines":"q(x)"}}]})]);
+            }
+            SastRun.run_json(tool, a, t)
+        }
+        fn run_text(
+            &self,
+            tool: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            SastRun.run_text(tool, a, g)
+        }
+    }
+
+    /// Records the queue entries it produced.
+    #[derive(Default)]
+    struct RecTri(std::cell::RefCell<Vec<Value>>);
+    impl TriageEngine for RecTri {
+        fn triage(
+            &self,
+            f: &[Finding],
+            o: &str,
+        ) -> Result<Vec<TriageItem>, Box<dyn std::error::Error>> {
+            let items = FakeTri.triage(f, o)?;
+            *self.0.borrow_mut() = crate::sarif::item_values(&items);
+            Ok(items)
+        }
+    }
+
+    #[test]
+    fn sast_paths_are_source_relative_and_gate_matches_sarif_fingerprints() {
+        let dir = std::path::PathBuf::from(unique_dir());
+        let eng = sast_engagement(&dir);
+        let tri = RecTri::default();
+        run_pipeline(&eng, &AbsSastRun, &tri, dir.to_str().unwrap(), false, None).unwrap();
+        let items = tri.0.borrow().clone();
+        let sast_item = items.iter().find(|it| it["finding"]["tool"] == "opengrep").unwrap();
+        assert_eq!(sast_item["finding"]["file"], "sub/a.rs");
+        // The gate fingerprint must equal the SARIF partialFingerprints value.
+        let policy = crate::gate::policy::parse_policy(
+            "version: 1\nfail_on:\n  severity: [CRITICAL, HIGH, MEDIUM, LOW, INFO]\n  categories: [SAST]\n",
+        )
+        .unwrap();
+        let st = crate::runstatus::read_run_status(dir.to_str().unwrap()).unwrap();
+        let r = crate::gate::evaluate::evaluate(&items, &policy, Some(&st), false);
+        assert_eq!(r.failed.len(), 1);
+        let sarif: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("ascent.sarif")).unwrap()).unwrap();
+        let res = &sarif["runs"][0]["results"][0];
+        assert_eq!(res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "sub/a.rs");
+        assert_eq!(res["partialFingerprints"]["ascentFindingHash/v1"], r.failed[0].fingerprint.as_str());
+    }
+
+    /// opengrep is installed but crashes; the other analysers work.
+    struct CrashingOpengrepRun;
+    impl Runner for CrashingOpengrepRun {
+        fn run_json(
+            &self,
+            tool: &str,
+            a: &[String],
+            t: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            match tool {
+                "opengrep" => Err("opengrep crashed".into()),
+                _ => FakeRun.run_json(tool, a, t),
+            }
+        }
+        fn run_text(
+            &self,
+            tool: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            FakeRun.run_text(tool, a, g)
+        }
+    }
+
+    #[test]
+    fn failing_sast_tool_makes_the_run_incomplete_and_is_recorded() {
+        let dir = std::path::PathBuf::from(unique_dir());
+        let eng = sast_engagement(&dir);
+        let d = dir.to_str().unwrap();
+        let s = run_pipeline(&eng, &CrashingOpengrepRun, &FakeTri, d, false, None).unwrap();
+        assert!(!s.complete);
+        assert_eq!(s.failed_tools, vec!["opengrep".to_string()]);
+        let st = crate::runstatus::read_run_status(d).unwrap();
+        assert!(!st.complete && !st.dry_run);
+        assert_eq!(st.failed_tools, vec!["opengrep".to_string()]);
     }
 
     #[test]

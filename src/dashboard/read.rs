@@ -37,6 +37,14 @@ pub fn read_report(out_dir: &str) -> String {
     std::fs::read_to_string(Path::new(out_dir).join("report.md")).unwrap_or_default()
 }
 
+/// `<out_dir>/gate.json` (the last policy verdict), or `Null` if missing/invalid.
+pub fn read_gate(out_dir: &str) -> Value {
+    std::fs::read_to_string(Path::new(out_dir).join("gate.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .unwrap_or(Value::Null)
+}
+
 /// The engagement YAML as JSON; `Null` if missing or unparseable.
 pub fn read_engagement(path: &str) -> Value {
     std::fs::read_to_string(path)
@@ -87,6 +95,17 @@ mod tests {
         let f = read_findings(s(&dir));
         assert_eq!(f.len(), 1);
         assert_eq!(f[0]["verdict"], "TRUE_POSITIVE");
+    }
+
+    #[test]
+    fn read_gate_is_null_when_missing_and_json_when_present() {
+        let dir = tmp();
+        let d = dir.to_str().unwrap();
+        assert_eq!(read_gate(d), Value::Null);
+        std::fs::write(dir.join("gate.json"), r#"{"decision":"FAIL","exit_code":1}"#).unwrap();
+        assert_eq!(read_gate(d)["decision"], "FAIL");
+        std::fs::write(dir.join("gate.json"), "garbage").unwrap();
+        assert_eq!(read_gate(d), Value::Null);
     }
 
     #[test]

@@ -19,12 +19,12 @@ test("has no inert placeholder controls", () => {
   expect(screen.queryByText("DL")).not.toBeInTheDocument();
 });
 
-test("keeps the five working rail buttons", () => {
+test("keeps the six working rail buttons", () => {
   render(<Shell />);
-  for (const name of ["Overview", "Findings", "Approval gates", "Report", "Audit"]) {
+  for (const name of ["Overview", "New scan", "Findings", "Approval gates", "Report", "Audit"]) {
     expect(screen.getByRole("button", { name })).toBeInTheDocument();
   }
-  expect(screen.getAllByRole("button")).toHaveLength(5);
+  expect(screen.getAllByRole("button")).toHaveLength(6);
 });
 
 test("status dot is neutral when no engagement is loaded", () => {
