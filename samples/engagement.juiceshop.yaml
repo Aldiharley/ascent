@@ -21,8 +21,10 @@ ends: "2030-01-01T00:00:00Z"
 
 # DAST settings (optional; the default is `profile: standard` with no auth).
 #   passive  - non-intrusive checks only
-#   standard - adds known-vulnerability and injection templates (default)
-#   active   - standard plus a parameter-fuzzing pass; lab targets only
+#   standard - adds known-vulnerability and injection templates, still
+#              non-intrusive (default)
+#   active   - standard plus intrusive templates (may change state) and a
+#              parameter-fuzzing pass; lab targets only
 # dast:
 #   profile: active
 #   # Authenticated scanning: the header NAME and the NAME of an environment

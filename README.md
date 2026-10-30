@@ -36,7 +36,7 @@ Prerequisites: a Rust toolchain, Node.js and npm. Crux is a path dependency, so 
 
    It is fine for it to be empty before the first run. It reads results from `out/` (`ASCENT_OUT` changes that).
 
-3. **Define a scan.** Open New Scan, enter the targets you are authorised to test (for example `127.0.0.0/8` and `http://127.0.0.1:3000/` for a lab such as OWASP Juice Shop running locally; use `127.0.0.1` rather than `localhost`, which ProjectDiscovery tools may not resolve) and optionally a source directory for SAST. Pick a DAST profile (passive, standard or active; the default is standard, and `active` adds parameter fuzzing, so use it only on targets you may actively test). For an authenticated scan you can also give an auth header name and the name of the environment variable that holds its value (never the value itself); see [DAST track](#dast-track). Ascent validates the input and writes an engagement scope file under `engagements/`. This screen only defines scope and settings; it never launches a scan. It shows the exact command to run:
+3. **Define a scan.** Open New Scan, enter the targets you are authorised to test (for example `127.0.0.0/8` and `http://127.0.0.1:3000/` for a lab such as OWASP Juice Shop running locally; use `127.0.0.1` rather than `localhost`, which ProjectDiscovery tools may not resolve) and optionally a source directory for SAST. Pick a DAST profile (passive, standard or active; the default is standard, and `active` adds intrusive templates and parameter fuzzing, so use it only on targets you may actively test). For an authenticated scan you can also give an auth header name and the name of the environment variable that holds its value (never the value itself); see [DAST track](#dast-track). Ascent validates the input and writes an engagement scope file under `engagements/`. This screen only defines scope and settings; it never launches a scan. It shows the exact command to run:
 
    | Scope defined, with the command to copy | Ambiguous targets refused, nothing written |
    |---|---|
@@ -48,7 +48,7 @@ Prerequisites: a Rust toolchain, Node.js and npm. Crux is a path dependency, so 
    cargo run -- run --engagement engagements/<name>.yaml --out out --policy samples/ascent-policy.example.yaml
    ```
 
-   The process exit code follows the verdict (see [Policy gate and CI](#policy-gate-and-ci)). With DAST scope the run also prints a `dast:` line (profile, authenticated or not, and how many URLs were seeded, crawled, dropped as out of scope, scanned and unreachable) and the path of `dast-coverage.json`. The lab must be running: if a declared URL does not answer, or nothing could be scanned, the run is INCOMPLETE (exit 3) and says why.
+   The process exit code follows the verdict (see [Policy gate and CI](#policy-gate-and-ci)). With DAST scope the run also prints a `dast:` line (profile, authenticated or not, and how many URLs were seeded, crawled, dropped as out of scope, scanned and unreachable), a `nuclei:` line (templates excluded, requests sent, failed requests, requests outside scope) and the path of `dast-coverage.json`. The lab must be running: if a declared URL does not answer, nothing could be scanned, most requests to the target failed, or nuclei sent any request outside scope, the run is INCOMPLETE (exit 3) and says why.
 
 5. **Review in the dashboard.** Refresh <http://127.0.0.1:8787> to see the policy verdict, the triaged findings, the report and the audit log.
 
@@ -61,7 +61,7 @@ To try it, start a local lab first (for example OWASP Juice Shop published on `1
 
 ## Safety model
 
-- **Authorised targets only.** Scope is declared up front in the engagement file and every network target is checked against it, fail closed.
+- **Authorised targets only.** Scope is declared up front in the engagement file and every network target is checked against it, fail closed. nuclei templates that address another host are excluded before the scan, and every request nuclei actually sent is audited from its trace log afterwards: any request outside scope makes the run INCOMPLETE (see [Requests outside the target](#requests-outside-the-target)).
 - **Nothing exploits automatically.** The only thing Ascent ever runs against a target after triage is an allow-listed, detect-only `nuclei -id <id> -u <url> -silent -jsonl` re-check, and only after a recorded human approval.
 - **Approval is recorded, tamper-evident and bound to the gate.** Each decision is chained into `audit.jsonl` together with the hash of the gate as approved; an edited gate is refused at execution. A failed chain check makes the CLI exit 4 and the dashboard stop accepting decisions.
 - **The dashboard is local and read-mostly.** It binds to loopback only, shows findings, the policy verdict, the report and the audit log, and records approve/deny decisions. It never launches a scan.
@@ -128,12 +128,24 @@ dast:
 | Profile | nuclei tags | Also excluded | Extra pass |
 |---|---|---|---|
 | `passive` | `tech, misconfig, exposure, headers, cors, cookie, session` | `intrusive, fuzz` | none |
-| `standard` (default) | the passive tags plus `cve, sqli, xss, auth-bypass, jwt, idor, csrf, redirect, ssrf, lfi` | `fuzz` | none |
-| `active` | same as standard | `fuzz` in the first pass | a second `nuclei -dast` pass (parameter-fuzzing templates) over the same surface |
+| `standard` (default) | the passive tags plus `cve, sqli, xss, auth-bypass, jwt, idor, csrf, redirect, ssrf, lfi` | `intrusive, fuzz` | none |
+| `active` | same as standard | `fuzz` in the first pass (`intrusive` templates run) | a second `nuclei -dast` pass (parameter-fuzzing templates) over the same surface |
 
-Every pass of every profile uses `-rate-limit 50` (50 requests per second), `-concurrency 10`, `-timeout 10`, `-ni` (no interactsh, so no out-of-band traffic to a third-party OAST server), `-duc` (no update check) and `-dr` (no redirect following, so a redirect cannot take nuclei off scope), and always excludes the tags `dos`, `brute-force` and `default-login`. These exclusions are fixed in code, and the engagement file cannot change them. A nuclei configuration file of your own (for example `~/.config/nuclei/config.yaml`) is still read by nuclei and could re-include excluded tags, so keep it free of tag settings. The scope-checked URL list reaches nuclei as a temporary file (`-l`), which is deleted afterwards.
+`standard` never runs templates tagged `intrusive` (they attempt state-changing chains such as remote code execution or file writes, for example the MOVEit CVE-2023-34362 template). Only `active`, the opt-in profile for targets you may change, runs them.
 
-`active` sends fuzzing payloads at every parameter it finds, so use it only on targets you are allowed to test actively. Findings from both `active` passes are merged and de-duplicated by template id, matcher name, matched URL and fuzzed parameter, so a template with several matchers yields one finding per matcher. Findings from the fuzzing pass are recorded as tool `nuclei-dast`. They are reported and gated like any other finding, but they are never proposed for detect-only verification, because a single-template re-run cannot reproduce a fuzzed request. When both passes find the same hit, the template-pass copy is kept, so it stays verifiable.
+Every pass of every profile uses `-rate-limit 50` (50 requests per second), `-concurrency 10`, `-timeout 10`, `-ni` (no interactsh, so no out-of-band traffic to a third-party OAST server), `-duc` (no update check), `-dr` (no redirect following, so a redirect cannot take nuclei off scope), `-pt http` (http-protocol templates only; the `-dast` fuzzing templates are http too, while network, DNS, SSL, JavaScript and similar templates can address hosts other than the input) and `-nmhe`. Without `-nmhe`, nuclei skips a host for every later template once it has had 30 errors (`-max-host-error`), and under `-silent` it says nothing: on a live Juice Shop run a few failing templates made nuclei silently skip the target, and the run reported 1 finding instead of hundreds. Every pass also always excludes the tags `dos`, `brute-force` and `default-login`. These exclusions are fixed in code, and the engagement file cannot change them. A nuclei configuration file of your own (for example `~/.config/nuclei/config.yaml`) is still read by nuclei and could re-include excluded tags, so keep it free of tag settings. The scope-checked URL list reaches nuclei as a temporary file (`-l`), which is deleted afterwards.
+
+`active` runs intrusive templates and sends fuzzing payloads at every parameter it finds, so use it only on targets you are allowed to test actively. Findings from both `active` passes are merged and de-duplicated by template id, matcher name, matched URL and fuzzed parameter, so a template with several matchers yields one finding per matcher. Findings from the fuzzing pass are recorded as tool `nuclei-dast`. They are reported and gated like any other finding, but they are never proposed for detect-only verification, because a single-template re-run cannot reproduce a fuzzed request. When both passes find the same hit, the template-pass copy is kept, so it stays verifiable.
+
+### Requests outside the target
+
+The scope guard checks every target Ascent hands to a tool, but a nuclei template can send a request somewhere else: a raw request's `@Host:` annotation redirects it to any host. In templates v10.4.9, 22 templates use it, and 17 of them name another host (token-validation templates calling GitHub, Slack or Stripe APIs, the MOVEit template calling `checkip.amazonaws.com`, a literal `localhost`). Such a request would carry the auth header to a host nobody authorised. Ascent handles this twice:
+
+- **Prevention: off-target templates are excluded.** Before the passes of a live run, Ascent lists the installed http templates once (`nuclei -tl -nc -duc -silent -pt http`, no target, no network), reads each one, and excludes (`-et <file>`, in every pass) any template with an `@Host:` value that is not the target: only `{{Hostname}}` or `{{Host}}` (optionally with a scheme, a numeric port or a path) and `{{BaseURL}}` or `{{RootURL}}` stay in scope. A different port on the target host is still the target, because Ascent's scope is per host or IP. A template file that cannot be read is excluded too. If the listing is not recognised (no `Listing available … templates for <DIR>` banner, an unreadable directory, nothing listed), the run stops with `nuclei template listing not recognised` and never scans unfiltered. The number of excluded templates is in `run.json` (`dast.templates_excluded`), `dast-coverage.json` and the report.
+- **Detection: every request nuclei sent is audited.** Each pass writes nuclei's trace log (`-tlog`, one line per request with its `host:port` and its error, if any) to a private temporary directory, which is deleted afterwards on every path. Ascent reads it after the pass and checks every request's host with the engagement scope guard. Any request outside scope, even a failed one, makes the run INCOMPLETE: `DAST: nuclei sent requests outside scope to: <hosts>` (at most ten names, then "…and N more"). This also catches what the template filter cannot see, such as an absolute URL in a template's `path:`. A missing trace log after a successful pass, or one listing no request at all for the template pass, stops the run with `nuclei trace log missing`.
+- **Failed requests are counted.** `run.json` records `requests_sent`, `request_errors`, `out_of_scope_requests`, `off_scope_request_count` and `failing_hosts`, and the report says how many requests failed (timeouts and connection errors: those checks produced no result). When at least half of at least 20 requests to an in-scope host failed, the run is INCOMPLETE: `DAST: most requests to <host> failed (M of N) — the target was overloaded or went down during the scan`.
+
+The trace log holds no request headers, and any text taken from it is scrubbed of the auth value before it is written anywhere.
 
 ### Authenticated scanning
 
@@ -308,8 +320,11 @@ SAST analysers. A missing analyser for a policy category makes the gate
 INCOMPLETE.
 
 Declared DAST scope that was not tested never passes. A real (non-dry) run with
-DAST scope is INCOMPLETE when no in-scope URL was scanned, or when any URL listed
-under `urls` did not answer the httpx probe. The reasons are printed on stderr
+DAST scope is INCOMPLETE when no in-scope URL was scanned, when any URL listed
+under `urls` did not answer the httpx probe, when nuclei's trace log shows a
+request to any host outside scope (`DAST: nuclei sent requests outside scope
+to: …`), or when at least half of at least 20 requests to an in-scope host failed
+(`DAST: most requests to <host> failed (M of N) — …`). The reasons are printed on stderr
 after `run INCOMPLETE` and stored as `incomplete_reasons` in `run.json` and
 `gate.json`, for example `DAST: declared URL(s) unreachable: http://127.0.0.1:9/`.
 The gate also treats a `run.json` whose DAST summary scanned nothing as
@@ -320,7 +335,7 @@ incomplete, whatever its `complete` field says.
 | 0 | PASS, or CONDITIONAL (warnings only) — or no policy given |
 | 1 | FAIL (or CONDITIONAL with `--fail-on-warn`) |
 | 2 | Usage or configuration error (bad engagement, malformed policy, bad `--source`) |
-| 3 | INCOMPLETE: a scanner or stage failed, a required scanner is missing, a policy category's analyser is not installed, the DAST track scanned no URL, a declared DAST URL did not answer, or it was a dry run — never a pass |
+| 3 | INCOMPLETE: a scanner or stage failed, a required scanner is missing, a policy category's analyser is not installed, the DAST track scanned no URL, a declared DAST URL did not answer, nuclei sent a request outside scope, most requests to an in-scope host failed, the nuclei template listing or trace log was not usable, or it was a dry run — never a pass |
 | 4 | The audit hash chain failed verification (`ascent run` then refuses to start) |
 
 The verdict is written to `out/gate.json` and chained into `audit.jsonl`
