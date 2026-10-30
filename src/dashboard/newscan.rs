@@ -296,6 +296,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bad_dast_error_never_echoes_a_pasted_token() {
+        for (h, e) in [("Bearer s3cr3t-tok", "ASCENT_DAST_AUTH"), ("Authorization", "Bearer s3cr3t-tok")] {
+            match prep(&req_dast("standard", h, e)) {
+                Err(PrepareError::BadDast(m)) => assert!(!m.contains("s3cr3t"), "{m}"),
+                other => panic!("expected BadDast, got {other:?}"),
+            }
+        }
+    }
+
     fn prep(r: &NewScanRequest) -> Result<Prepared, PrepareError> {
         prepare(r, STARTS, ENDS, &|_| true)
     }

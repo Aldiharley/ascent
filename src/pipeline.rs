@@ -106,8 +106,9 @@ pub fn run_pipeline(
     let eff_source = resolve_source(eng, source)?;
     // Resolve the DAST auth header value (env var) before anything is written: a
     // configured-but-missing secret must fail closed rather than scan unauthenticated.
-    // A dry run sends nothing, so it never reads the secret.
-    let auth = if dry_run {
+    // A dry run sends nothing, and a run without DAST scope (source only) sends no
+    // request, so neither reads the secret.
+    let auth = if dry_run || (eng.hosts.is_empty() && eng.urls.is_empty()) {
         None
     } else {
         crate::scope::resolve_auth(&eng.dast, &|k| std::env::var(k).ok()).map_err(ConfigError)?
@@ -960,6 +961,19 @@ mod tests {
         assert!(e.downcast_ref::<ConfigError>().is_some(), "{e}");
         assert!(!Path::new(&dir).join("queue.json").exists());
         assert!(!Path::new(&dir).join("run.json").exists());
+    }
+
+    #[test]
+    fn source_only_run_ignores_dast_auth() {
+        const VAR: &str = "ASCENT_T4_AUTH_UNSET_SAST";
+        std::env::remove_var(VAR);
+        let src = std::path::PathBuf::from(unique_dir());
+        let out = unique_dir();
+        let mut eng = sast_engagement(&src);
+        eng.urls = vec![];
+        eng.dast.auth = Some(crate::scope::DastAuth { header: "Authorization".into(), value_env: VAR.into() });
+        let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None).unwrap();
+        assert!(s.complete && s.dast.is_none());
     }
 
     #[test]

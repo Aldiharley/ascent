@@ -63,24 +63,30 @@ fn is_env_name(s: &str) -> bool {
         && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
 }
 
+/// Errors name the field and the rule only, never the offending text: a token pasted
+/// into a name field must not reach stderr or the dashboard's 422 body.
 pub fn validate_dast(d: &DastConfig) -> Result<(), String> {
     if let Some(a) = &d.auth {
         if !is_header_token(&a.header) {
-            return Err(format!("dast.auth.header {:?} is not a valid HTTP header name", a.header));
+            return Err(
+                "dast.auth.header is not a valid HTTP header name (letters, digits and !#$%&'*+.^_`|~- only)"
+                    .into(),
+            );
         }
         if !is_env_name(&a.value_env) {
-            return Err(format!(
-                "dast.auth.value_env {:?} must look like ASCENT_DAST_AUTH ([A-Z_][A-Z0-9_]*)",
-                a.value_env
-            ));
+            return Err(
+                "dast.auth.value_env must be an environment variable name like ASCENT_DAST_AUTH ([A-Z_][A-Z0-9_]*)"
+                    .into(),
+            );
         }
     }
     Ok(())
 }
 
 /// `Ok(None)` without auth; `Ok(Some((header_name, value)))` with it. Fails
-/// closed: a configured but unset/empty/multi-line value is an error, and no
-/// error message ever contains the value itself.
+/// closed: a configured but unset/empty value, or one containing any control
+/// character other than TAB, is an error, and no error message ever contains the
+/// value itself.
 // Consumed by the DAST stage (later task); the `dashboard` binary includes this
 // module but never calls it.
 #[allow(dead_code)]
@@ -97,9 +103,9 @@ pub fn resolve_auth(
             a.value_env
         ));
     }
-    if v.contains('\r') || v.contains('\n') {
+    if v.chars().any(|c| c.is_control() && c != '\t') {
         return Err(format!(
-            "environment variable {} contains a line break; refusing to send it as a header",
+            "environment variable {} contains a line break or other control character; refusing to send it as a header",
             a.value_env
         ));
     }
@@ -748,6 +754,31 @@ mod tests {
         };
         let e = resolve_auth(&d, &|_| Some("Bearer s3cr3t\nmore".into())).unwrap_err();
         assert!(!e.contains("s3cr3t"), "{e}");
+    }
+    #[test]
+    fn validate_dast_never_echoes_the_offending_string() {
+        // a token pasted into a name field must not reach stderr or a 422 body
+        for (h, v) in [("Bearer s3cr3t-tok", "ASCENT_DAST_AUTH"), ("Authorization", "Bearer s3cr3t-tok")] {
+            let d = DastConfig {
+                profile: DastProfile::Standard,
+                auth: Some(DastAuth { header: h.into(), value_env: v.into() }),
+            };
+            let e = validate_dast(&d).unwrap_err();
+            assert!(!e.contains("s3cr3t"), "{e}");
+            assert!(e.starts_with("dast.auth."), "{e}");
+        }
+    }
+    #[test]
+    fn resolve_auth_rejects_every_control_character_but_tab() {
+        let d = DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth { header: "Authorization".into(), value_env: "TOK".into() }),
+        };
+        for bad in ["s3cr3t\u{0}", "s3cr3t\u{1b}[0m", "s3cr3t\u{7f}", "s3cr3t\u{85}", "a\rb", "a\nb"] {
+            let e = resolve_auth(&d, &|_| Some(bad.to_string())).unwrap_err();
+            assert!(!e.contains("s3cr3t") && e.contains("TOK"), "{e}");
+        }
+        assert!(resolve_auth(&d, &|_| Some("Bearer\tabc".to_string())).unwrap().is_some());
     }
     #[test]
     fn load_engagement_rejects_invalid_dast_auth() {
