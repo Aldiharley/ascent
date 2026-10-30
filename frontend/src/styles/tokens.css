@@ -1,0 +1,158 @@
+/* Ascent Console "Watchdog" theme tokens (spec 2026-10-31-ui-redesign-design.md, section 1.3).
+   Everything else references these names. No raw hex outside this file (and the contrast test). */
+:root{
+  color-scheme: light;
+
+  /* ---------- raw palette ---------- */
+  /* slate (sidebar, hero, ink) */
+  --slate-900:#1f2d3a; --slate-800:#2e4153; --slate-750:#33475b; --slate-700:#3a4f63;
+  --slate-650:#3e5468; --slate-600:#445b70; --slate-550:#4a6276; --slate-500:#5d7488;
+  --slate-400:#71879b; --slate-300:#8fa3b5; --slate-250:#c3d0db; --slate-200:#c9d3da;
+  --slate-175:#d6e0e8; --slate-150:#dbe3e8; --slate-100:#e9eef1; --slate-50:#f2f5f7;
+  /* sea-glass teal */
+  --teal-700:#1f5e57; --teal-650:#276a62; --teal-600:#2f766f; --teal-550:#357f78;
+  --teal-500:#4b9289; --teal-400:#6fb8ae; --teal-300:#8fd3c9; --teal-250:#a9d8cf;
+  --teal-200:#b9dcd5; --teal-150:#d3ebe6; --teal-100:#dcefeb; --teal-50:#e3f1ee;
+  /* sand / cream */
+  --sand-800:#5e460c; --sand-700:#6e5310; --sand-500:#a8832a; --sand-300:#d9c3a0;
+  --sand-200:#eadfca; --sand-150:#f0ddb0; --sand-100:#f3ebdc; --sand-75:#f4ead0;
+  --sand-50:#f6efdf; --cream:#f5efe4;
+  /* frosted ice */
+  --ice-500:#5f8fa8; --ice-300:#9cc6da; --ice-200:#d9e8f0; --ice-100:#eaf2f6;
+  /* lavender */
+  --lav-600:#3f4766; --lav-500:#7f76b8; --lav-400:#a9a1d8; --lav-200:#ccc6e7; --lav-100:#dedaf0;
+  /* blue-grey tile */
+  --bg-tile-200:#c5d1dc; --bg-tile-100:#d5dee6;
+  /* coral (critical / true positive / fail) */
+  --coral-800:#9a2e28; --coral-750:#a3332d; --coral-700:#b0433c; --coral-500:#c25750;
+  --coral-200:#efc9c5; --coral-100:#f6dcd9; --coral-75:#fbeceb; --coral-50:#f8e6e3;
+  /* amber (high) */
+  --amber-700:#8a4614; --amber-500:#c27234; --amber-100:#f7e3d2;
+  /* violet (SAST category only) */
+  --violet-500:#6a63b0;
+  --white:#ffffff;
+
+  /* ---------- semantic: surfaces ---------- */
+  --bg:#dbe3e8;                               /* page canvas */
+  --bg-glow-teal:#cfe5e1; --bg-glow-sand:#ece3d3; --bg-glow-lav:#e2dff0;
+  --surface: rgba(247,249,250,.90);           /* frosted card; effective #f4f7f8 on --bg */
+  --surface-solid:#f4f7f8;                    /* fallback when backdrop-filter unsupported */
+  --surface-raised:#ffffff;                   /* rows, inputs, toasts, nested cards */
+  --surface-sunken:#e9eef1;                   /* tracks, code, segmented-control well */
+  --surface-dark: linear-gradient(180deg,var(--slate-700) 0%,var(--slate-800) 100%); /* sidebar */
+  --surface-dark-2: linear-gradient(160deg,var(--slate-600) 0%,#3d5266 100%);       /* sidebar card */
+  --surface-hero: linear-gradient(120deg,var(--slate-550) 0%,var(--slate-650) 55%,var(--slate-750) 100%);
+  --surface-banner: linear-gradient(100deg,var(--sand-100) 0%,var(--sand-200) 100%);
+  --code-bg:#e3efee; --code-ink:#1d4a52; --code-border:#c4dedb;
+
+  /* ---------- semantic: text ---------- */
+  --ink:var(--slate-900);          /* primary text, any light surface, and the bare page canvas */
+  --ink-2:#4a5d6b;                 /* secondary text: cards, tints, tiles. NOT on bare --bg */
+  --ink-3:#566876;                 /* tertiary/meta: hashes, timestamps, placeholders */
+  --ink-tile:#3b5058;              /* KPI tile sub-lines on every tint */
+  --ink-on-dark:#f2f5f7;           /* sidebar, hero, dark buttons */
+  --ink-on-dark-2:#c3d0db;         /* sidebar secondary */
+  --ink-on-dark-3:#d6e0e8;         /* sidebar policy card secondary, hero sub-line (#d3dee6 ok too) */
+  --link:var(--teal-700);          /* every text link and text-only teal accent */
+
+  /* ---------- semantic: lines and focus ---------- */
+  --border:rgba(31,45,58,.08);     /* card hairline */
+  --border-soft:var(--slate-200);  /* dividers, secondary-button border */
+  --border-input:#748593;          /* input/select boundary: 3.81:1 on white */
+  --focus:var(--teal-600);         /* 3px ring on light surfaces */
+  --focus-on-dark:var(--teal-300); /* 3px ring on sidebar / hero */
+
+  /* ---------- KPI tints (gradient top-left -> bottom-right) ---------- */
+  --tile-teal: linear-gradient(145deg,var(--teal-150) 0%,var(--teal-200) 100%);
+  --tile-bluegrey: linear-gradient(145deg,var(--bg-tile-100) 0%,var(--bg-tile-200) 100%);
+  --tile-ice: radial-gradient(120% 90% at 85% 10%,rgba(255,255,255,.75) 0%,rgba(255,255,255,0) 55%),
+              linear-gradient(145deg,var(--ice-100) 0%,var(--ice-200) 100%);
+  --tile-lav: linear-gradient(145deg,var(--lav-100) 0%,var(--lav-200) 100%);
+  /* matching clay icon-badge gradients */
+  --badge-teal: linear-gradient(145deg,var(--teal-400) 0%,#3f8f86 100%);
+  --badge-bluegrey: linear-gradient(145deg,var(--slate-300) 0%,var(--slate-500) 100%);
+  --badge-ice: linear-gradient(145deg,var(--ice-300) 0%,var(--ice-500) 100%);
+  --badge-lav: linear-gradient(145deg,var(--lav-400) 0%,var(--lav-500) 100%);
+  --badge-sand: linear-gradient(145deg,var(--sand-300) 0%,var(--sand-500) 100%);
+  --badge-coral: linear-gradient(145deg,#d98a84 0%,var(--coral-700) 100%);
+
+  /* ---------- data colours ---------- */
+  /* severity: fill (charts, stripe) / chip bg / chip text */
+  --sev-crit:var(--coral-500); --sev-crit-bg:var(--coral-100); --sev-crit-ink:var(--coral-800);
+  --sev-high:var(--amber-500); --sev-high-bg:var(--amber-100); --sev-high-ink:var(--amber-700);
+  --sev-med:var(--sand-500);   --sev-med-bg:var(--sand-75);    --sev-med-ink:var(--sand-700);
+  --sev-low:var(--teal-500);   --sev-low-bg:var(--teal-100);   --sev-low-ink:#245f57;
+  --sev-info:var(--slate-400); --sev-info-bg:#e1e7ed;          --sev-info-ink:#3d5266;
+  /* verdict */
+  --v-tp:var(--coral-500);  --v-tp-bg:var(--coral-100);  --v-tp-ink:var(--coral-800);
+  --v-hu:var(--sand-500);   --v-hu-bg:var(--sand-75);    --v-hu-ink:var(--sand-700);
+  --v-fp:var(--slate-400);  --v-fp-bg:#e3e8ec;           --v-fp-ink:#46566a;
+  /* category (donut "Category" mode) */
+  --cat-dast:var(--teal-500); --cat-sast:var(--violet-500); --cat-sca:var(--amber-500); --cat-none:var(--slate-400);
+  /* policy decision: solid pill bg / pill text / card tint / headline ink */
+  --p-pass:#2f7d74;       --p-pass-ink:#ffffff;  --p-pass-tint:var(--teal-50);   --p-pass-head:var(--teal-700);
+  --p-cond:var(--sand-150); --p-cond-ink:var(--sand-800); --p-cond-tint:var(--sand-50); --p-cond-head:var(--sand-800);
+  --p-fail:var(--coral-700); --p-fail-ink:#ffffff; --p-fail-tint:var(--coral-50); --p-fail-head:var(--coral-800);
+  --p-inc:#e1e6ea;        --p-inc-ink:#3d4b57;   --p-inc-tint:var(--slate-100);  --p-inc-head:var(--ink);
+  /* status */
+  --ok-bg:var(--teal-100); --ok-ink:var(--teal-700); --ok-border:var(--teal-250);
+  --err-bg:#f8e1de; --err-ink:#8f2a24; --err-border:var(--coral-200);
+  --badge-count-bg:var(--coral-700); --badge-count-ink:#ffffff;
+
+  /* ---------- radii ---------- */
+  --r-xs:8px; --r-sm:12px; --r-md:16px; --r-lg:22px; --r-xl:28px; --r-2xl:32px; --r-pill:999px;
+
+  /* ---------- elevation (clay recipe) ---------- */
+  /* card: top inner highlight + faint bottom inner shade + wide soft drop */
+  --shadow-card:
+    inset 0 1px 0 rgba(255,255,255,.85),
+    inset 0 -1px 0 rgba(31,45,58,.04),
+    0 2px 6px -2px rgba(31,45,58,.10),
+    0 14px 32px -16px rgba(31,45,58,.30);
+  /* clay: moulded, for icon badges, primary buttons, avatar disc, KPI tiles */
+  --shadow-clay:
+    inset 0 2px 3px rgba(255,255,255,.55),
+    inset 0 -3px 6px rgba(20,35,50,.22),
+    0 8px 16px -6px rgba(20,35,50,.35);
+  /* float: sidebar and hero */
+  --shadow-float:
+    inset 0 1px 0 rgba(255,255,255,.10),
+    0 4px 12px -4px rgba(24,38,52,.18),
+    0 28px 56px -24px rgba(24,38,52,.50);
+  --shadow-pressed: inset 0 2px 6px rgba(20,35,50,.20);
+  --shadow-toast: 0 18px 40px -16px rgba(31,45,58,.40), 0 2px 6px rgba(31,45,58,.08);
+  --glyph-shadow: drop-shadow(0 1px 1px rgba(0,0,0,.18));   /* white glyphs inside clay badges */
+  --blur-card: blur(18px) saturate(140%);
+
+  /* ---------- spacing (4px base) ---------- */
+  --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px; --s-8:32px;
+  --s-10:40px; --s-12:48px; --s-16:64px;
+
+  /* ---------- typography ---------- */
+  --font-display:"Nunito",ui-rounded,system-ui,sans-serif;
+  --font-ui:"Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  /* size / line-height / weight / family */
+  --t-page:   800 30px/1.15 var(--font-display);  /* top-bar page title */
+  --t-hero:   800 28px/1.2  var(--font-display);  /* hero greeting */
+  --t-kpi:    800 34px/1    var(--font-display);  /* KPI number, donut centre */
+  --t-report: 800 30px/1.2  var(--font-display);  /* report title */
+  --t-h2:     700 17px/1.3  var(--font-ui);       /* card titles */
+  --t-h3:     700 15px/1.35 var(--font-ui);       /* gate titles, list-row titles */
+  --t-body:   400 14px/1.55 var(--font-ui);
+  --t-body-strong: 600 14px/1.55 var(--font-ui);
+  --t-small:  500 13px/1.45 var(--font-ui);       /* hints, meta, sub-lines */
+  --t-micro:  700 12px/1.3  var(--font-ui);       /* chips, badges, axis labels (floor: 12px) */
+  --t-mono:   400 12.5px/1.5 var(--font-mono);
+  --t-mono-sm:400 12px/1.45 var(--font-mono);     /* hashes */
+  --tracking-tight:-.015em; --tracking-caps:.05em;
+
+  /* ---------- motion ---------- */
+  --ease-out:cubic-bezier(.22,1,.36,1);
+  --ease-in-out:cubic-bezier(.65,0,.35,1);
+  --d-1:120ms; --d-2:200ms; --d-3:320ms; --d-4:480ms; --d-chart:600ms;
+
+  /* ---------- layout ---------- */
+  --sidebar-w:256px; --rail-w:88px; --gutter:24px; --content-max:1184px;
+  --topbar-h:72px; --tabbar-h:64px;
+}
