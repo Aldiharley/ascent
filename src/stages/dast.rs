@@ -238,39 +238,70 @@ fn row_tags(r: &Value) -> Vec<String> {
     }
 }
 
-pub fn coverage(profile: DastProfile, authenticated: bool, rows: &[Value]) -> Value {
+/// What was and was not tested. `scanned` is the number of in-scope URLs nuclei
+/// actually ran against: with zero, nothing was tested whatever the profile says.
+pub fn coverage(
+    profile: DastProfile,
+    authenticated: bool,
+    scanned: usize,
+    rows: &[Value],
+) -> Value {
     let tagsets: Vec<Vec<String>> = rows.iter().map(row_tags).collect();
     let cats: Vec<Value> = CATEGORIES
         .iter()
         .map(|c| {
-            let findings = tagsets
-                .iter()
-                .filter(|ts| ts.iter().any(|t| c.tags.contains(&t.as_str())))
-                .count();
             let (status, reason) = match c.min {
                 None => (
                     "not_tested",
                     "needs load generation; Ascent never floods a target".to_string(),
                 ),
+                Some(_) if scanned == 0 => {
+                    ("not_tested", "no in-scope URLs were scanned".to_string())
+                }
                 Some(min) if min > profile => {
                     ("not_tested", format!("enable the {} profile", min.as_str()))
                 }
                 Some(_) => match c.note {
                     Some(n) => ("limited", n.to_string()),
                     None if profile == DastProfile::Active
-                        && matches!(c.id, "sqli" | "xss") =>
+                        && matches!(c.id, "sqli" | "xss" | "lfi" | "ssrf" | "redirect") =>
                     {
                         ("tested", "templates plus parameter fuzzing".to_string())
                     }
                     None => ("tested", String::new()),
                 },
             };
+            let findings = if status == "not_tested" {
+                0
+            } else {
+                tagsets
+                    .iter()
+                    .filter(|ts| ts.iter().any(|t| c.tags.contains(&t.as_str())))
+                    .count()
+            };
             json!({"id": c.id, "name": c.name, "tags": c.tags, "status": status, "reason": reason, "findings": findings})
         })
         .collect();
-    json!({"profile": profile.as_str(), "authenticated": authenticated, "categories": cats})
+    json!({"profile": profile.as_str(), "authenticated": authenticated, "scanned": scanned, "categories": cats})
 }
 
+/// Active runs two passes that can return the same hit; keep the first of each
+/// (`template-id`, `matched-at`) pair.
+fn dedupe_rows(rows: Vec<Value>) -> Vec<Value> {
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    rows.into_iter()
+        .filter(|r| {
+            let key = (
+                r["template-id"].as_str().unwrap_or("").to_string(),
+                r["matched-at"].as_str().unwrap_or("").to_string(),
+            );
+            seen.insert(key)
+        })
+        .collect()
+}
+
+// Wired into the report in Task 4; remove this allow then.
+#[allow(dead_code)]
 pub fn coverage_markdown(cov: &Value) -> String {
     let mut out = format!(
         "\n## DAST coverage\n\nProfile: `{}` · authenticated: {}\n\n| Category | Status | Findings | Notes |\n|---|---|---|---|\n",
@@ -300,6 +331,8 @@ pub struct DastSummary {
     pub scanned: usize,
 }
 
+// Fields are read by the pipeline in Task 4; remove this allow then.
+#[allow(dead_code)]
 pub struct DastOutcome {
     pub findings: Vec<Finding>,
     pub summary: DastSummary,
@@ -307,6 +340,8 @@ pub struct DastOutcome {
 }
 
 /// `Ok(None)` when the engagement has no hosts and no urls (no DAST scope).
+// Wired into the pipeline in Task 4; remove this allow then.
+#[allow(dead_code)]
 pub fn run_dast(
     eng: &Engagement,
     runner: &dyn Runner,
@@ -329,12 +364,14 @@ pub fn run_dast(
             seed.insert(u);
         }
     }
-    let seed: Vec<String> = seed.into_iter().collect();
+    let guard = ScopeGuard::new(eng);
+    // An off-scope seed (e.g. an httpx redirect target) is dropped and counted, never crawled.
+    let (seed, seed_dropped) = filter_in_scope(seed.into_iter().collect(), &|u| guard.in_scope(u));
     let headers = header_args(auth);
     let crawled = enumerate_surface(runner, &seed, &headers).map_err(scrubbed)?;
-    let guard = ScopeGuard::new(eng);
     let crawled_n = crawled.len();
-    let (surface, dropped) = filter_in_scope(crawled, &|u| guard.in_scope(u));
+    let (surface, crawl_dropped) = filter_in_scope(crawled, &|u| guard.in_scope(u));
+    let dropped = seed_dropped + crawl_dropped;
     let mut rows = Vec::new();
     if !surface.is_empty() {
         for pass in nuclei_passes(eng.dast.profile) {
@@ -344,8 +381,8 @@ pub fn run_dast(
             rows.extend(scan_rows(runner, &surface, &args).map_err(scrubbed)?);
         }
     }
-    let rows = scrub_rows(rows, secret);
-    let coverage = coverage(eng.dast.profile, auth.is_some(), &rows);
+    let rows = scrub_rows(dedupe_rows(rows), secret);
+    let coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), &rows);
     Ok(Some(DastOutcome {
         findings: normalise_nuclei(&rows),
         summary: DastSummary {
@@ -374,12 +411,18 @@ mod tests {
     struct Fake {
         calls: RefCell<Vec<Call>>,
         nuclei_err: Option<&'static str>,
+        /// An extra (off-scope) URL httpx reports for example.com.
+        extra_httpx: Option<&'static str>,
+        /// nuclei returns its row twice per call (as two Active passes would).
+        nuclei_twice: bool,
     }
     impl Fake {
         fn new() -> Self {
             Fake {
                 calls: RefCell::new(vec![]),
                 nuclei_err: None,
+                extra_httpx: None,
+                nuclei_twice: false,
             }
         }
         fn count(&self, tool: &str) -> usize {
@@ -400,7 +443,11 @@ mod tests {
                 "subfinder" => vec![],
                 "httpx" => {
                     if args.iter().any(|a| a == "example.com") {
-                        vec![json!({"url":"https://example.com"})]
+                        let mut v = vec![json!({"url":"https://example.com"})];
+                        if let Some(u) = self.extra_httpx {
+                            v.push(json!({ "url": u }));
+                        }
+                        v
                     } else {
                         vec![]
                     }
@@ -414,11 +461,16 @@ mod tests {
                     if let Some(e) = self.nuclei_err {
                         return Err(e.into());
                     }
-                    vec![json!({
+                    let row = json!({
                         "template-id":"t1","matched-at":"http://localhost:3000/rest/products",
                         "info":{"name":"n","severity":"high","tags":["xss"]},
                         "curl-command": format!("curl -H 'Authorization: {SECRET}' http://localhost:3000/rest/products")
-                    })]
+                    });
+                    if self.nuclei_twice {
+                        vec![row.clone(), row]
+                    } else {
+                        vec![row]
+                    }
                 }
                 _ => vec![],
             })
@@ -583,30 +635,60 @@ mod tests {
             json!({"info":{"tags":"cors, headers"}}),
             json!({"info":{"tags":["xss"]}}),
         ];
-        let p = coverage(DastProfile::Passive, false, &rows);
+        let p = coverage(DastProfile::Passive, false, 3, &rows);
         assert_eq!(cat(&p, "sqli")["status"], "not_tested");
         assert_eq!(cat(&p, "sqli")["reason"], "enable the standard profile");
         assert_eq!(cat(&p, "rate-limit")["status"], "not_tested");
         assert_eq!(cat(&p, "cors")["status"], "tested");
         assert_eq!(cat(&p, "cors")["findings"], 1);
         assert_eq!(cat(&p, "headers")["findings"], 1);
-        assert_eq!(cat(&p, "xss")["findings"], 2);
+        // not_tested categories never report findings
+        assert_eq!(cat(&p, "xss")["findings"], 0);
         assert_eq!(p["authenticated"], false);
+        assert_eq!(p["scanned"], 3);
 
-        let s = coverage(DastProfile::Standard, true, &rows);
+        let s = coverage(DastProfile::Standard, true, 3, &rows);
+        assert_eq!(cat(&s, "xss")["findings"], 2);
         assert_eq!(cat(&s, "authz")["status"], "limited");
         assert_eq!(cat(&s, "sqli")["status"], "tested");
         assert_eq!(cat(&s, "rate-limit")["status"], "not_tested");
         assert_eq!(s["authenticated"], true);
 
-        let a = coverage(DastProfile::Active, false, &[]);
-        assert_eq!(cat(&a, "xss")["reason"], "templates plus parameter fuzzing");
+        let a = coverage(DastProfile::Active, false, 1, &[]);
+        for id in ["sqli", "xss", "lfi", "ssrf", "redirect"] {
+            assert_eq!(
+                cat(&a, id)["reason"],
+                "templates plus parameter fuzzing",
+                "{id}"
+            );
+        }
         assert_eq!(a["profile"], "active");
     }
 
     #[test]
+    fn coverage_with_nothing_scanned_claims_nothing_tested() {
+        for prof in [
+            DastProfile::Passive,
+            DastProfile::Standard,
+            DastProfile::Active,
+        ] {
+            let c = coverage(prof, false, 0, &[]);
+            assert_eq!(c["scanned"], 0);
+            for cat in c["categories"].as_array().unwrap() {
+                assert_eq!(cat["status"], "not_tested", "{prof:?} {cat}");
+                assert_eq!(cat["findings"], 0);
+            }
+            assert_eq!(cat(&c, "sqli")["reason"], "no in-scope URLs were scanned");
+            assert_ne!(
+                cat(&c, "rate-limit")["reason"],
+                "no in-scope URLs were scanned"
+            );
+        }
+    }
+
+    #[test]
     fn coverage_markdown_has_a_row_per_category() {
-        let cov = coverage(DastProfile::Passive, false, &[]);
+        let cov = coverage(DastProfile::Passive, false, 1, &[]);
         let md = coverage_markdown(&cov);
         assert!(md.contains("## DAST coverage"));
         assert!(
@@ -672,6 +754,71 @@ mod tests {
         assert!(!serde_json::to_string(&out.summary)
             .unwrap()
             .contains("s3cr3t"));
+    }
+
+    #[test]
+    fn run_dast_drops_off_scope_seeds_before_crawling_and_counts_them() {
+        let mut f = Fake::new();
+        f.extra_httpx = Some("https://evil.test/redirect");
+        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        // the off-scope seed is counted, never handed to katana, and does not abort
+        assert_eq!(out.summary.seeded, 2);
+        assert_eq!(out.summary.out_of_scope_dropped, 2); // 1 seed + github.com from the crawl
+        let calls = f.calls.borrow();
+        let katana = calls.iter().find(|c| c.0 == "katana").unwrap();
+        assert!(!joined(&katana.1).contains("evil.test"), "{:?}", katana.1);
+        assert!(!katana.2.iter().any(|t| t.contains("evil.test")));
+    }
+
+    #[test]
+    fn run_dast_dedupes_rows_repeated_across_passes() {
+        let mut f = Fake::new();
+        f.nuclei_twice = true;
+        let mut e = eng();
+        e.dast.profile = DastProfile::Active; // two passes, each returning the row twice
+        let out = run_dast(&e, &f, None, false).unwrap().unwrap();
+        assert_eq!(f.count("nuclei"), 2);
+        assert_eq!(out.findings.len(), 1);
+    }
+
+    #[test]
+    fn run_dast_zero_scanned_reports_nothing_tested() {
+        // every crawled and seeded URL is off scope
+        let e = Engagement {
+            name: "x".into(),
+            hosts: vec!["example.com".into()],
+            ..Default::default()
+        };
+        struct Off;
+        impl Runner for Off {
+            fn run_json(
+                &self,
+                tool: &str,
+                _a: &[String],
+                _t: &[String],
+            ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+                Ok(match tool {
+                    "httpx" => vec![json!({"url":"https://evil.test/"})],
+                    _ => vec![],
+                })
+            }
+            fn run_text(
+                &self,
+                _t: &str,
+                _a: &[String],
+                _g: &[String],
+            ) -> Result<String, Box<dyn std::error::Error>> {
+                Ok(String::new())
+            }
+        }
+        let out = run_dast(&e, &Off, None, false).unwrap().unwrap();
+        assert_eq!(out.summary.scanned, 0);
+        assert_eq!(out.summary.out_of_scope_dropped, 1);
+        assert!(out.coverage["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["status"] == "not_tested"));
     }
 
     #[test]

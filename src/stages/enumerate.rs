@@ -13,7 +13,14 @@ pub fn enumerate_surface(
     // Targets and `-u` args are derived in one pass so every URL katana scans has its
     // host scope-checked; URLs without a host are never scanned.
     let mut hosts: BTreeSet<String> = BTreeSet::new();
-    let mut args: Vec<String> = vec!["-silent".into(), "-jsonl".into()];
+    // `-fs fqdn`: crawl only the exact hostnames given (katana defaults to the whole
+    // registered domain, which would contact, and send auth to, out-of-scope siblings).
+    let mut args: Vec<String> = vec![
+        "-silent".into(),
+        "-jsonl".into(),
+        "-fs".into(),
+        "fqdn".into(),
+    ];
     for u in urls {
         if let Some(h) = Url::parse(u)
             .ok()
@@ -115,6 +122,20 @@ mod tests {
         assert!(!args.iter().any(|a| a.contains("evil.com")));
         assert!(args.contains(&"https://app.example.com".to_string()));
         assert!(out.contains(&"evil.com:8080".to_string()));
+    }
+
+    #[test]
+    fn katana_is_limited_to_exact_hostnames_before_the_url_list() {
+        let rec = Rec::default();
+        enumerate_surface(&rec, &["https://app.example.com".to_string()], &[]).unwrap();
+        let calls = rec.calls.borrow();
+        let args = &calls[0].1;
+        let fs = args.iter().position(|a| a == "-fs").expect("-fs present");
+        assert_eq!(args[fs + 1], "fqdn");
+        assert!(
+            fs < args.iter().position(|a| a == "-u").unwrap(),
+            "{args:?}"
+        );
     }
 
     #[test]
