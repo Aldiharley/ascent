@@ -4,7 +4,7 @@
 //! what was and was not tested. dos / brute-force / default-login are never run.
 use super::enumerate::enumerate_surface;
 use super::recon::{ensure_httpx_identity, is_subfinder_candidate, probe_urls, recon};
-use super::scan::{scan_rows, write_new_lines, TempDir};
+use super::scan::{listed_count, scan_rows, write_new_lines, TempDir};
 use crate::models::Finding;
 use crate::normalise::normalise_nuclei;
 use crate::runner::Runner;
@@ -204,6 +204,121 @@ fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std
         }
     }
     Ok(off.into_iter().collect())
+}
+
+const TRACE_MISSING: &str = "nuclei trace log missing";
+/// A host is reported as failing when at least half of at least this many requests failed.
+const FAILING_MIN_REQUESTS: usize = 20;
+/// Off-scope host names listed by name; the rest are counted.
+const OFF_SCOPE_NAMES_SHOWN: usize = 10;
+
+/// An in-scope host most of whose requests failed (the target was overloaded or went down).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FailingHost {
+    pub host: String,
+    pub failed: usize,
+    pub sent: usize,
+}
+
+/// The host of a trace-log `address` (`host:port`, `[v6]:port`, a bare host or IPv6),
+/// lower-cased.
+fn address_host(address: &str) -> String {
+    let a = address.trim();
+    let host = if let Some(rest) = a.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else if a.matches(':').count() == 1 {
+        a.split(':').next().unwrap_or("")
+    } else {
+        a
+    };
+    host.to_ascii_lowercase()
+}
+
+/// What the nuclei trace logs (`-tlog`: one JSON object per request sent, with
+/// `address` = `host:port` and `error` = `none` or the cause) say about the requests.
+#[derive(Default)]
+struct TraceAudit {
+    sent: usize,
+    errors: usize,
+    off_scope: BTreeSet<String>,
+    off_scope_count: usize,
+    /// In-scope host -> (sent, failed).
+    per_host: std::collections::BTreeMap<String, (usize, usize)>,
+}
+
+impl TraceAudit {
+    /// Streams one trace log (it can be tens of MB) and returns how many request lines
+    /// it held. A line that is not a JSON object with an `address` is skipped.
+    fn read(&mut self, path: &Path, guard: &ScopeGuard, secret: Option<&str>) -> std::io::Result<usize> {
+        use std::io::BufRead;
+        let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
+        let mut buf = Vec::new();
+        let mut n = 0;
+        loop {
+            buf.clear();
+            if r.read_until(b'\n', &mut buf)? == 0 {
+                break;
+            }
+            let Ok(Value::Object(o)) = serde_json::from_slice::<Value>(&buf) else {
+                continue;
+            };
+            let Some(address) = o.get("address").and_then(Value::as_str) else {
+                continue;
+            };
+            n += 1;
+            let error = o.get("error").and_then(Value::as_str).unwrap_or("");
+            self.record(address, error, guard, secret);
+        }
+        Ok(n)
+    }
+
+    fn record(&mut self, address: &str, error: &str, guard: &ScopeGuard, secret: Option<&str>) {
+        self.sent += 1;
+        let failed = !(error.is_empty() || error == "none");
+        if failed {
+            self.errors += 1;
+        }
+        // Scrubbed first, so nothing derived from it can carry the auth value.
+        let host = address_host(&scrub_text(address, secret));
+        if host.is_empty() {
+            // A request that went out with no recorded destination is never assumed
+            // to have stayed in scope; a failed one with none was never sent.
+            if !failed {
+                self.off_scope_count += 1;
+                self.off_scope.insert("(no address)".into());
+            }
+            return;
+        }
+        if guard.in_scope(&host) {
+            let e = self.per_host.entry(host).or_default();
+            e.0 += 1;
+            e.1 += usize::from(failed);
+        } else {
+            // A failed request still went towards the host (at least a DNS lookup).
+            // The name reaches the report verbatim, so it is bounded (a DNS name is <= 253).
+            self.off_scope_count += 1;
+            self.off_scope.insert(host.chars().take(255).collect());
+        }
+    }
+
+    /// The off-scope host names, sorted, at most [`OFF_SCOPE_NAMES_SHOWN`] plus
+    /// "…and N more".
+    fn off_scope_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.off_scope.iter().take(OFF_SCOPE_NAMES_SHOWN).cloned().collect();
+        if self.off_scope.len() > OFF_SCOPE_NAMES_SHOWN {
+            v.push(format!("…and {} more", self.off_scope.len() - OFF_SCOPE_NAMES_SHOWN));
+        }
+        v
+    }
+
+    fn failing_hosts(&self) -> Vec<FailingHost> {
+        self.per_host
+            .iter()
+            .filter(|(_, (sent, failed))| *sent >= FAILING_MIN_REQUESTS && failed * 2 >= *sent)
+            .map(|(h, (sent, failed))| FailingHost { host: h.clone(), failed: *failed, sent: *sent })
+            .collect()
+    }
 }
 
 /// `-H` plus exactly ONE `"Name: value"` element (never split, never other flags).
@@ -493,12 +608,43 @@ pub fn coverage_markdown(cov: &Value) -> String {
         }
         out.push('\n');
     }
+    let mut notes: Vec<String> = Vec::new();
     match cov["templates_excluded"].as_u64().unwrap_or(0) {
         0 => {}
-        1 => out.push_str("\n1 template excluded: it sends requests to hosts outside the target\n"),
-        n => out.push_str(&format!(
-            "\n{n} templates excluded: they send requests to hosts outside the target\n"
-        )),
+        1 => notes.push("1 template excluded: it sends requests to hosts outside the target".into()),
+        n => notes.push(format!("{n} templates excluded: they send requests to hosts outside the target")),
+    }
+    let plural = |n: u64| if n == 1 { "request" } else { "requests" };
+    if cov["scanned"].as_u64().unwrap_or(0) > 0 {
+        let sent = cov["requests_sent"].as_u64().unwrap_or(0);
+        notes.push(format!(
+            "nuclei sent {sent} {}; {} failed (timeouts/connection errors) — those checks produced no result",
+            plural(sent),
+            cov["request_errors"].as_u64().unwrap_or(0),
+        ));
+    }
+    let off = cov["off_scope_request_count"].as_u64().unwrap_or(0);
+    if off > 0 {
+        let names: Vec<&str> = cov["out_of_scope_requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        notes.push(format!(
+            "nuclei sent {off} {} to hosts outside the scope: {} — the run is INCOMPLETE",
+            plural(off),
+            names.join(", ")
+        ));
+    }
+    if !notes.is_empty() {
+        out.push('\n');
+        for n in notes {
+            out.push_str(&n);
+            out.push_str("\n\n");
+        }
+        out.truncate(out.trim_end().len());
+        out.push('\n');
     }
     out
 }
@@ -523,6 +669,16 @@ pub struct DastSummary {
     pub unreachable_urls: Vec<String>,
     /// Installed http templates never run because they send requests off the target.
     pub templates_excluded: usize,
+    /// Requests nuclei sent (from its trace logs), and how many of them failed
+    /// (timeouts/connection errors: those checks produced no result).
+    pub requests_sent: usize,
+    pub request_errors: usize,
+    /// Hosts outside the engagement scope nuclei sent requests to (at most ten names,
+    /// then "…and N more"), and how many requests went there. Any makes the run INCOMPLETE.
+    pub out_of_scope_requests: Vec<String>,
+    pub off_scope_request_count: usize,
+    /// In-scope hosts where at least half of at least 20 requests failed.
+    pub failing_hosts: Vec<FailingHost>,
 }
 
 pub struct DastOutcome {
@@ -576,6 +732,7 @@ pub fn run_dast(
     let dropped = url_dropped + recon_dropped + seed_dropped + crawl_dropped;
     let mut rows = Vec::new();
     let mut templates_excluded = 0;
+    let mut audit = TraceAudit::default();
     if !surface.is_empty() {
         // Live only: a private scratch directory (removed on every path, also on error)
         // for the template exclusion list. A dry run lists nothing and excludes nothing.
@@ -591,12 +748,19 @@ pub fn run_dast(
                 exclude_args = vec!["-et".into(), p.to_string_lossy().into_owned()];
             }
         }
-        for pass in nuclei_passes(eng.dast.profile) {
+        let listed = listed_count(&surface);
+        for (i, pass) in nuclei_passes(eng.dast.profile).into_iter().enumerate() {
             // Tag the `-dast` fuzzing pass's rows so they normalise as `nuclei-dast`.
             let fuzz_pass = pass.iter().any(|a| a == "-dast");
             let mut args = common_nuclei_args();
             args.extend(pass);
             args.extend(exclude_args.iter().cloned());
+            // Each pass logs every request it sends; nuclei creates the file itself, so
+            // its absence after a successful pass means nothing was logged.
+            let trace = scratch.as_ref().map(|d| d.path().join(format!("trace-{i}.jsonl")));
+            if let Some(t) = &trace {
+                args.extend(["-tlog".into(), t.to_string_lossy().into_owned()]);
+            }
             args.extend(headers.iter().cloned());
             for mut r in scan_rows(runner, &surface, &args).map_err(scrubbed)? {
                 if fuzz_pass {
@@ -606,11 +770,28 @@ pub fn run_dast(
                 }
                 rows.push(r);
             }
+            if let Some(t) = &trace {
+                if listed > 0 {
+                    let n = audit.read(t, &guard, secret).map_err(|_| TRACE_MISSING)?;
+                    // The template pass always sends requests for a listed URL; the
+                    // `-dast` pass only fuzzes URLs with parameters, so it may send none.
+                    if n == 0 && !fuzz_pass {
+                        return Err(TRACE_MISSING.into());
+                    }
+                }
+                // Tens of MB: free it now (the scratch dir is removed on every path anyway).
+                let _ = std::fs::remove_file(t);
+            }
         }
     }
     let rows = scrub_rows(dedupe_rows(rows), secret);
     let mut coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), !live, &rows);
+    let out_of_scope_requests = audit.off_scope_names();
     coverage["templates_excluded"] = json!(templates_excluded);
+    coverage["requests_sent"] = json!(audit.sent);
+    coverage["request_errors"] = json!(audit.errors);
+    coverage["out_of_scope_requests"] = json!(out_of_scope_requests);
+    coverage["off_scope_request_count"] = json!(audit.off_scope_count);
     Ok(Some(DastOutcome {
         findings: normalise_nuclei(&rows),
         summary: DastSummary {
@@ -625,6 +806,11 @@ pub fn run_dast(
             unreachable: dead_urls.len(),
             unreachable_urls: dead_urls,
             templates_excluded,
+            requests_sent: audit.sent,
+            request_errors: audit.errors,
+            out_of_scope_requests,
+            off_scope_request_count: audit.off_scope_count,
+            failing_hosts: audit.failing_hosts(),
         },
         coverage,
     }))
@@ -655,6 +841,36 @@ pub(crate) mod test_support {
     /// A listing of one ordinary (on-target) fixture template.
     pub fn benign_listing() -> String {
         listing(&fixture_templates(), &["http/benign.yaml"])
+    }
+
+    /// One nuclei v3 `-tlog` trace line.
+    pub fn trace_line(address: &str, error: &str) -> String {
+        serde_json::json!({"template": "http/benign.yaml", "type": "http",
+            "input": "http://x/", "address": address, "error": error})
+        .to_string()
+    }
+
+    /// One successful trace line per URL, addressed to its `host:port`.
+    pub fn trace_for_urls(urls: &[String]) -> Vec<String> {
+        urls.iter()
+            .filter_map(|u| url::Url::parse(u).ok())
+            .filter_map(|u| Some(format!("{}:{}", u.host_str()?, u.port_or_known_default()?)))
+            .map(|a| trace_line(&a, "none"))
+            .collect()
+    }
+
+    /// The value after `flag` in a nuclei argv.
+    pub fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
+        args.windows(2).find(|w| w[0] == flag).map(|w| &w[1])
+    }
+
+    /// What a real nuclei pass leaves behind: a trace log (`-tlog`) with one successful
+    /// request per URL of its `-l` list.
+    pub fn write_default_trace(args: &[String]) {
+        if let (Some(t), Some(l)) = (flag_value(args, "-tlog"), flag_value(args, "-l")) {
+            let urls: Vec<String> = std::fs::read_to_string(l).unwrap().lines().map(String::from).collect();
+            std::fs::write(t, trace_for_urls(&urls).join("\n") + "\n").unwrap();
+        }
     }
 }
 
@@ -701,10 +917,22 @@ mod tests {
         text_calls: RefCell<Vec<Call>>,
         /// The `-et` file of each nuclei scan call (None without `-et`), read while it exists.
         nuclei_excludes: RefCell<Vec<Option<Vec<String>>>>,
+        /// Whether a pass writes its `-tlog` trace log at all (default true).
+        write_trace: bool,
+        /// Trace lines the template pass writes (default: one success per listed URL).
+        trace_lines: Option<Vec<String>>,
+        /// Trace lines the `-dast` pass writes (default: one success per listed URL).
+        dast_trace_lines: Option<Vec<String>>,
+        /// The `-tlog` path of each nuclei scan call.
+        trace_paths: RefCell<Vec<String>>,
     }
     impl Fake {
         fn new() -> Self {
             Fake {
+                write_trace: true,
+                trace_lines: None,
+                dast_trace_lines: None,
+                trace_paths: RefCell::new(vec![]),
                 listing: benign_listing(),
                 text_calls: RefCell::new(vec![]),
                 nuclei_excludes: RefCell::new(vec![]),
@@ -776,6 +1004,15 @@ mod tests {
                         return Err(e.into());
                     }
                     let is_dast = args.iter().any(|a| a == "-dast");
+                    if let Some(t) = flag_value(args, "-tlog") {
+                        self.trace_paths.borrow_mut().push(t.clone());
+                        let custom = if is_dast { &self.dast_trace_lines } else { &self.trace_lines };
+                        match (self.write_trace, custom) {
+                            (false, _) => {}
+                            (true, None) => write_default_trace(args),
+                            (true, Some(lines)) => std::fs::write(t, lines.join("\n")).unwrap(),
+                        }
+                    }
                     match (is_dast, &self.dast_rows, &self.template_rows) {
                         (true, Some(r), _) | (false, _, Some(r)) => return Ok(r.clone()),
                         _ => {}
@@ -1574,5 +1811,176 @@ mod tests {
         assert!(!f.text_calls.borrow().iter().any(|c| c.1.iter().any(|a| a == "-tl")));
         assert!(!f.calls.borrow().iter().any(|c| c.1.iter().any(|a| a == "-et")));
         assert_eq!(out.summary.templates_excluded, 0);
+    }
+
+    // ---- H3: every request nuclei sent is audited against the scope ----
+
+    #[test]
+    fn address_host_strips_port_and_brackets() {
+        assert_eq!(address_host("checkip.amazonaws.com:3000"), "checkip.amazonaws.com");
+        assert_eq!(address_host("127.0.0.1:3000"), "127.0.0.1");
+        assert_eq!(address_host("[::1]:3000"), "::1");
+        assert_eq!(address_host("[::1]"), "::1");
+        assert_eq!(address_host("::1"), "::1");
+        assert_eq!(address_host("example.com"), "example.com");
+        assert_eq!(address_host(" Example.COM:443 "), "example.com");
+        assert_eq!(address_host(""), "");
+    }
+
+    #[test]
+    fn every_live_pass_writes_a_trace_log_that_is_audited_then_deleted() {
+        let f = Fake::new();
+        let mut e = eng();
+        e.dast.profile = DastProfile::Active;
+        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let paths = f.trace_paths.borrow();
+        assert_eq!(paths.len(), 2, "one trace log per pass");
+        assert_ne!(paths[0], paths[1]);
+        for p in paths.iter() {
+            assert!(!std::path::Path::new(p).exists(), "{p} left behind");
+        }
+        // 4 in-scope URLs per pass, all answered
+        assert_eq!(out.summary.requests_sent, 8);
+        assert_eq!(out.summary.request_errors, 0);
+        assert!(out.summary.out_of_scope_requests.is_empty());
+        assert_eq!(out.summary.off_scope_request_count, 0);
+        assert!(out.summary.failing_hosts.is_empty());
+        let md = coverage_markdown(&out.coverage);
+        assert!(
+            md.contains("nuclei sent 8 requests; 0 failed (timeouts/connection errors) — those checks produced no result"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn requests_to_hosts_outside_scope_are_collected() {
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![
+            trace_line("localhost:3000", "none"),
+            trace_line("checkip.amazonaws.com:443", "none"),
+            trace_line("checkip.amazonaws.com:3000", "no address found for host"),
+            trace_line("[::1]:80", "none"),
+            "not json".into(),
+            "{\"truncated\":".into(),
+            trace_line("127.0.0.1:3000", "context deadline exceeded"),
+        ]);
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let s = &out.summary;
+        assert_eq!(s.out_of_scope_requests, vec!["::1", "checkip.amazonaws.com"]);
+        assert_eq!(s.off_scope_request_count, 3);
+        // malformed lines are skipped, not counted
+        assert_eq!(s.requests_sent, 5);
+        assert_eq!(s.request_errors, 2);
+        assert_eq!(out.coverage["out_of_scope_requests"], json!(["::1", "checkip.amazonaws.com"]));
+        let md = coverage_markdown(&out.coverage);
+        assert!(md.contains("nuclei sent 3 requests to hosts outside the scope: ::1, checkip.amazonaws.com"), "{md}");
+    }
+
+    #[test]
+    fn a_successful_request_with_no_address_is_never_assumed_in_scope() {
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line("", "none"), trace_line("", "dial failed")]);
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(out.summary.out_of_scope_requests, vec!["(no address)"]);
+        assert_eq!(out.summary.off_scope_request_count, 1);
+    }
+
+    #[test]
+    fn the_off_scope_list_is_capped_at_ten_names() {
+        let mut f = Fake::new();
+        f.trace_lines = Some((0..12).map(|i| trace_line(&format!("h{i:02}.evil.test:80"), "none")).collect());
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let l = &out.summary.out_of_scope_requests;
+        assert_eq!(l.len(), 11, "{l:?}");
+        assert_eq!(l[0], "h00.evil.test");
+        assert_eq!(l[9], "h09.evil.test");
+        assert_eq!(l[10], "…and 2 more");
+        assert_eq!(out.summary.off_scope_request_count, 12);
+    }
+
+    #[test]
+    fn a_host_where_most_requests_failed_is_reported() {
+        let mut f = Fake::new();
+        let mut lines: Vec<String> = Vec::new();
+        // localhost: 30 requests, 15 failed (50%) -> reported
+        lines.extend((0..15).map(|_| trace_line("localhost:3000", "none")));
+        lines.extend((0..15).map(|_| trace_line("localhost:3000", "context deadline exceeded")));
+        // example.com: 19 requests, all failed -> too few to judge
+        lines.extend((0..19).map(|_| trace_line("example.com:443", "connection refused")));
+        // 127.0.0.1: 40 requests, 19 failed (<50%) -> fine
+        lines.extend((0..21).map(|_| trace_line("127.0.0.1:3000", "none")));
+        lines.extend((0..19).map(|_| trace_line("127.0.0.1:3000", "i/o timeout")));
+        f.trace_lines = Some(lines);
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(
+            out.summary.failing_hosts,
+            vec![FailingHost { host: "localhost".into(), failed: 15, sent: 30 }]
+        );
+        assert_eq!(out.summary.requests_sent, 89);
+        assert_eq!(out.summary.request_errors, 53);
+    }
+
+    #[test]
+    fn a_missing_trace_log_fails_closed() {
+        let mut f = Fake::new();
+        f.write_trace = false;
+        let e = run_dast(&eng(), &f, None, true).err().expect("missing trace log");
+        assert_eq!(e.to_string(), "nuclei trace log missing");
+        let p = f.trace_paths.borrow()[0].clone();
+        assert!(!std::path::Path::new(&p).parent().unwrap().exists(), "scratch dir left behind");
+    }
+
+    #[test]
+    fn a_trace_log_with_nothing_parseable_is_missing() {
+        for lines in [vec![], vec!["garbage".to_string()], vec!["{\"no_address\":1}".to_string()]] {
+            let mut f = Fake::new();
+            f.trace_lines = Some(lines.clone());
+            let e = run_dast(&eng(), &f, None, true).err().expect("empty trace log");
+            assert_eq!(e.to_string(), "nuclei trace log missing", "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_trace_log_of_the_fuzzing_pass_is_not_an_error() {
+        // `-dast` templates only fire on URLs with parameters: zero requests is normal.
+        let mut f = Fake::new();
+        f.dast_trace_lines = Some(vec![]);
+        let mut e = eng();
+        e.dast.profile = DastProfile::Active;
+        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        assert_eq!(out.summary.requests_sent, 4);
+        // ...but a missing one still is
+        let mut f = Fake::new();
+        f.write_trace = false;
+        assert!(run_dast(&e, &f, None, true).is_err());
+    }
+
+    #[test]
+    fn trace_derived_text_is_scrubbed() {
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line(&format!("{SECRET}.evil.test:80"), "none")]);
+        let auth = ("Authorization".to_string(), SECRET.to_string());
+        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
+        let s = serde_json::to_string(&out.summary).unwrap();
+        assert!(!s.contains("s3cr3t"), "{s}");
+        assert!(!out.coverage.to_string().contains("s3cr3t"));
+        assert_eq!(out.summary.off_scope_request_count, 1);
+    }
+
+    #[test]
+    fn dry_run_writes_and_audits_no_trace_log() {
+        let f = Fake::new();
+        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        assert!(f.trace_paths.borrow().is_empty());
+        assert_eq!(out.summary.requests_sent, 0);
+        assert!(!coverage_markdown(&out.coverage).contains("nuclei sent"));
+    }
+
+    #[test]
+    fn an_old_summary_without_the_audit_fields_still_parses() {
+        let s: DastSummary = serde_json::from_str(r#"{"profile":"standard","scanned":3,"unreachable_urls":[]}"#).unwrap();
+        assert_eq!(s.scanned, 3);
+        assert_eq!((s.requests_sent, s.request_errors, s.off_scope_request_count, s.templates_excluded), (0, 0, 0, 0));
+        assert!(s.out_of_scope_requests.is_empty() && s.failing_hosts.is_empty());
     }
 }

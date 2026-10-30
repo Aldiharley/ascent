@@ -200,7 +200,8 @@ fn is_localhost(target: &str) -> bool {
 }
 
 /// Declared DAST scope that was not tested fails closed: a real run that scanned no
-/// URL, or whose declared URLs did not all answer, is incomplete.
+/// URL, or whose declared URLs did not all answer, is incomplete. So is one in which
+/// nuclei sent any request outside scope, or most requests to a host failed.
 fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
     let mut reasons = Vec::new();
     if d.scanned == 0 {
@@ -217,6 +218,19 @@ fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
         }
         reasons.push(r);
     }
+    // nuclei's own trace logs: a request to any host outside scope fails closed.
+    if d.off_scope_request_count > 0 || !d.out_of_scope_requests.is_empty() {
+        reasons.push(format!(
+            "DAST: nuclei sent requests outside scope to: {}",
+            d.out_of_scope_requests.join(", ")
+        ));
+    }
+    for h in &d.failing_hosts {
+        reasons.push(format!(
+            "DAST: most requests to {} failed ({} of {}) — the target was overloaded or went down during the scan",
+            h.host, h.failed, h.sent
+        ));
+    }
     reasons
 }
 
@@ -226,6 +240,7 @@ mod tests {
     use crate::models::Finding;
     use crate::runner::Runner;
     use crate::scope::Engagement;
+    use crate::stages::dast::test_support::{flag_value, trace_line, write_default_trace};
     use crate::triage::{TriageEngine, TriageItem};
     use serde_json::{json, Value};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -266,7 +281,7 @@ mod tests {
         fn run_json(
             &self,
             tool: &str,
-            _a: &[String],
+            a: &[String],
             _t: &[String],
         ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
             Ok(match tool {
@@ -276,10 +291,11 @@ mod tests {
                 "katana" => vec![json!({"timestamp":"2026-10-31T00:00:00.000000+00:00",
                     "request":{"method":"GET","endpoint":"https://app.example.com/login","raw":"GET /login HTTP/1.1"},
                     "response":{"status_code":200}})],
-                "nuclei" => vec![
-                    json!({"template-id":"sqli","info":{"name":"SQLi","severity":"high"},
-                    "matched-at":"https://app.example.com/login"}),
-                ],
+                "nuclei" => {
+                    write_default_trace(a);
+                    vec![json!({"template-id":"sqli","info":{"name":"SQLi","severity":"high"},
+                        "matched-at":"https://app.example.com/login"})]
+                }
                 _ => vec![],
             })
         }
@@ -819,12 +835,15 @@ mod tests {
                         false => json!({"url": format!("https://{}", w[1])}),
                     })
                     .collect(),
-                "nuclei" => vec![json!({
-                    "template-id":"t1","matched-at":"https://c.example.com/",
-                    "info":{"name":"n","severity":"high","tags":["xss"]},
-                    "curl-command": format!("curl -H 'X: {}' https://c.example.com/",
-                        self.leak.clone().unwrap_or_default())
-                })],
+                "nuclei" => {
+                    write_default_trace(a);
+                    vec![json!({
+                        "template-id":"t1","matched-at":"https://c.example.com/",
+                        "info":{"name":"n","severity":"high","tags":["xss"]},
+                        "curl-command": format!("curl -H 'X: {}' https://c.example.com/",
+                            self.leak.clone().unwrap_or_default())
+                    })]
+                }
                 _ => vec![],
             })
         }
@@ -864,6 +883,102 @@ mod tests {
         assert_eq!(s.urls, 3);
         assert_eq!(s.dast.as_ref().unwrap().scanned, s.urls);
         assert!(s.complete);
+    }
+
+    /// `HostRun`, but every nuclei pass's trace log holds exactly `0`.
+    struct TraceRun(Vec<String>);
+    impl Runner for TraceRun {
+        fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            let rows = HostRun { leak: None }.run_json(t, a, g)?;
+            if let Some(p) = flag_value(a, "-tlog") {
+                std::fs::write(p, self.0.join("\n")).unwrap();
+            }
+            Ok(rows)
+        }
+        fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(version_of(t, a))
+        }
+    }
+
+    fn gate_decision(dir: &str) -> (crate::gate::evaluate::Decision, u8) {
+        let policy = crate::gate::policy::parse_policy("version: 1\nfail_on:\n  severity: [CRITICAL]\n").unwrap();
+        let st = crate::runstatus::read_run_status(dir).unwrap();
+        let r = crate::gate::evaluate::evaluate(&[], &policy, Some(&st), false);
+        (r.decision, r.exit_code)
+    }
+
+    #[test]
+    fn a_request_sent_outside_scope_makes_the_run_incomplete() {
+        let dir = unique_dir();
+        let r = TraceRun(vec![
+            trace_line("c.example.com:443", "none"),
+            trace_line("checkip.amazonaws.com:443", "none"),
+            trace_line("checkip.amazonaws.com:3000", "no address found for host"),
+        ]);
+        let s = run_pipeline(&dast_engagement(), &r, &FakeTri, &dir, false, None).unwrap();
+        assert!(!s.complete);
+        let want = vec!["DAST: nuclei sent requests outside scope to: checkip.amazonaws.com".to_string()];
+        assert_eq!(s.incomplete_reasons, want);
+        let run = read_json(&dir, "run.json");
+        assert_eq!(run["complete"], false);
+        assert_eq!(run["incomplete_reasons"], json!(want));
+        assert_eq!(run["dast"]["out_of_scope_requests"], json!(["checkip.amazonaws.com"]));
+        assert_eq!(run["dast"]["off_scope_request_count"], 2);
+        assert_eq!(run["dast"]["requests_sent"], 3);
+        assert_eq!(run["dast"]["request_errors"], 1);
+        assert_eq!(gate_decision(&dir), (crate::gate::evaluate::Decision::Incomplete, 3));
+        let report = std::fs::read_to_string(Path::new(&dir).join("report.md")).unwrap();
+        assert!(report.contains("outside the scope: checkip.amazonaws.com"), "{report}");
+    }
+
+    #[test]
+    fn a_host_where_most_requests_failed_makes_the_run_incomplete() {
+        let dir = unique_dir();
+        let mut lines: Vec<String> = (0..10).map(|_| trace_line("c.example.com:443", "none")).collect();
+        lines.extend((0..10).map(|_| trace_line("c.example.com:443", "context deadline exceeded")));
+        let s = run_pipeline(&dast_engagement(), &TraceRun(lines), &FakeTri, &dir, false, None).unwrap();
+        assert!(!s.complete);
+        assert_eq!(
+            s.incomplete_reasons,
+            vec!["DAST: most requests to c.example.com failed (10 of 20) — the target was overloaded or went down during the scan".to_string()]
+        );
+        assert_eq!(gate_decision(&dir).1, 3);
+    }
+
+    #[test]
+    fn a_clean_trace_adds_no_reason_and_records_the_counts() {
+        let dir = unique_dir();
+        let mut lines: Vec<String> = (0..11).map(|_| trace_line("c.example.com:443", "none")).collect();
+        lines.extend((0..9).map(|_| trace_line("c.example.com:443", "i/o timeout")));
+        let s = run_pipeline(&dast_engagement(), &TraceRun(lines), &FakeTri, &dir, false, None).unwrap();
+        assert!(s.complete, "{:?}", s.incomplete_reasons);
+        let run = read_json(&dir, "run.json");
+        assert_eq!(run["dast"]["requests_sent"], 20);
+        assert_eq!(run["dast"]["request_errors"], 9);
+        assert_eq!(run["dast"]["off_scope_request_count"], 0);
+        let report = std::fs::read_to_string(Path::new(&dir).join("report.md")).unwrap();
+        assert!(report.contains("nuclei sent 20 requests; 9 failed (timeouts/connection errors)"), "{report}");
+    }
+
+    #[test]
+    fn a_missing_trace_log_aborts_the_run_incomplete() {
+        struct NoTrace;
+        impl Runner for NoTrace {
+            fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+                let rows = HostRun { leak: None }.run_json(t, a, g)?;
+                if let Some(p) = flag_value(a, "-tlog") {
+                    let _ = std::fs::remove_file(p);
+                }
+                Ok(rows)
+            }
+            fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+                Ok(version_of(t, a))
+            }
+        }
+        let dir = unique_dir();
+        let e = run_pipeline(&dast_engagement(), &NoTrace, &FakeTri, &dir, false, None).err().unwrap();
+        assert_eq!(e.to_string(), "nuclei trace log missing");
+        assert!(!crate::runstatus::read_run_status(&dir).unwrap().complete);
     }
 
     #[test]

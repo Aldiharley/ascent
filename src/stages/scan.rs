@@ -102,16 +102,10 @@ impl Drop for TempDir {
     }
 }
 
-/// Runs nuclei with the caller's flags and returns its raw JSON rows. `args` are
-/// passed verbatim, followed by `-l <file>` listing the URLs (one `-u` per URL would
-/// overflow Windows' 32K command line on a real app).
-pub fn scan_rows(
-    runner: &dyn Runner,
-    urls: &[String],
-    args: &[String],
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    // Targets and the URL list are derived in one pass so every URL nuclei scans has
-    // its host scope-checked; URLs without a host are never scanned.
+/// The hosts (scope targets) and the URLs nuclei is given, derived in one pass so
+/// every URL nuclei scans has its host scope-checked; URLs without a host are never
+/// scanned.
+fn scannable(urls: &[String]) -> (BTreeSet<String>, Vec<String>) {
     let mut hosts: BTreeSet<String> = BTreeSet::new();
     let mut listed: Vec<String> = Vec::new();
     for u in urls {
@@ -123,6 +117,23 @@ pub fn scan_rows(
             listed.push(u.clone());
         }
     }
+    (hosts, listed)
+}
+
+/// How many of `urls` [`scan_rows`] lists for nuclei (0: nuclei is not run).
+pub fn listed_count(urls: &[String]) -> usize {
+    scannable(urls).1.len()
+}
+
+/// Runs nuclei with the caller's flags and returns its raw JSON rows. `args` are
+/// passed verbatim, followed by `-l <file>` listing the URLs (one `-u` per URL would
+/// overflow Windows' 32K command line on a real app).
+pub fn scan_rows(
+    runner: &dyn Runner,
+    urls: &[String],
+    args: &[String],
+) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    let (hosts, listed) = scannable(urls);
     if hosts.is_empty() {
         return Ok(vec![]);
     }

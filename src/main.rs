@@ -199,6 +199,10 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
                     d.profile, d.authenticated, d.seeded, d.crawled, d.out_of_scope_dropped, d.scanned, d.unreachable
                 );
                 println!(
+                    "nuclei: templates_excluded={} requests={} request_errors={} off_scope_requests={}",
+                    d.templates_excluded, d.requests_sent, d.request_errors, d.off_scope_request_count
+                );
+                println!(
                     "coverage: {}",
                     std::path::Path::new(&out).join("dast-coverage.json").display()
                 );
