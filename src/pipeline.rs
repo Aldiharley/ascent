@@ -19,9 +19,12 @@ pub struct Summary {
     pub triaged: usize,
     pub report_path: String,
     pub audit_path: String,
-    /// True only for a non-dry run in which every SAST analyser that is present completed.
+    /// True only for a non-dry run in which every SAST analyser that is present completed
+    /// and, with DAST scope, at least one URL was scanned and every declared URL answered.
     pub complete: bool,
     pub failed_tools: Vec<String>,
+    /// Why the run is incomplete beyond failed tools (also in run.json and gate.json).
+    pub incomplete_reasons: Vec<String>,
 }
 
 /// The output directory's audit chain does not verify (CLI exit 4).
@@ -160,10 +163,15 @@ pub fn run_pipeline(
     }
     std::fs::write(&report_path, report)?;
     crate::sarif::write_sarif(out_dir, &crate::sarif::item_values(&items), eff_source.as_deref())?;
-    let complete = !dry_run && failed_tools.is_empty();
     let dast_summary = dast.as_ref().map(|d| d.summary.clone());
+    let incomplete_reasons = match &dast_summary {
+        Some(d) if !dry_run => dast_incomplete_reasons(eng, d),
+        _ => vec![],
+    };
+    let complete = !dry_run && failed_tools.is_empty() && incomplete_reasons.is_empty();
     write_run_status(out_dir, &RunStatus { complete, dry_run, failed_tools: failed_tools.clone(),
-        skipped_tools, finished_at: now_ts(), dast: dast_summary.clone() })?;
+        skipped_tools, finished_at: now_ts(), dast: dast_summary.clone(),
+        incomplete_reasons: incomplete_reasons.clone() })?;
     Ok(Summary {
         urls: dast_summary.as_ref().map_or(0, |d| d.scanned),
         dast: dast_summary,
@@ -176,7 +184,39 @@ pub fn run_pipeline(
             .into(),
         complete,
         failed_tools,
+        incomplete_reasons,
     })
+}
+
+const LOCALHOST_HINT: &str = " — ProjectDiscovery tools may not resolve localhost; use 127.0.0.1";
+
+fn is_localhost(target: &str) -> bool {
+    let host = url::Url::parse(target)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| target.to_ascii_lowercase());
+    host == "localhost"
+}
+
+/// Declared DAST scope that was not tested fails closed: a real run that scanned no
+/// URL, or whose declared URLs did not all answer, is incomplete.
+fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if d.scanned == 0 {
+        let mut r = "DAST: no in-scope URL was reachable".to_string();
+        if eng.hosts.iter().any(|h| is_localhost(h)) {
+            r.push_str(LOCALHOST_HINT);
+        }
+        reasons.push(r);
+    }
+    if !d.unreachable_urls.is_empty() {
+        let mut r = format!("DAST: declared URL(s) unreachable: {}", d.unreachable_urls.join(", "));
+        if d.unreachable_urls.iter().any(|u| is_localhost(u)) {
+            r.push_str(LOCALHOST_HINT);
+        }
+        reasons.push(r);
+    }
+    reasons
 }
 
 #[cfg(test)]
@@ -764,10 +804,14 @@ mod tests {
             _t: &[String],
         ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
             Ok(match tool {
+                // a declared URL is a liveness probe and is echoed back as live
                 "httpx" => a
                     .windows(2)
                     .filter(|w| w[0] == "-u")
-                    .map(|w| json!({"url": format!("https://{}", w[1])}))
+                    .map(|w| match w[1].contains("://") {
+                        true => json!({"input": w[1], "url": w[1]}),
+                        false => json!({"url": format!("https://{}", w[1])}),
+                    })
                     .collect(),
                 "nuclei" => vec![json!({
                     "template-id":"t1","matched-at":"https://c.example.com/",
@@ -922,6 +966,127 @@ mod tests {
         let dir = unique_dir();
         let s = run_pipeline(&auth_engagement(VAR), &EmptyRun, &FakeTri, &dir, true, None).unwrap();
         assert!(!s.dast.as_ref().unwrap().authenticated);
+    }
+
+    /// Real-looking tool versions, but httpx answers no probe and nothing else finds anything.
+    struct DeadRun;
+    impl Runner for DeadRun {
+        fn run_json(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
+        fn run_text(
+            &self,
+            t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(version_of(t))
+        }
+    }
+
+    fn urls_engagement(urls: &[&str]) -> Engagement {
+        Engagement {
+            name: "lab".into(),
+            urls: urls.iter().map(|u| u.to_string()).collect(),
+            cidrs: vec!["127.0.0.0/8".into()],
+            starts: "x".into(),
+            ends: "y".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unreachable_declared_url_makes_the_run_incomplete() {
+        let dir = unique_dir();
+        let s = run_pipeline(&urls_engagement(&["http://127.0.0.1:9/"]), &DeadRun, &FakeTri, &dir, false, None).unwrap();
+        assert!(!s.complete);
+        let want = [
+            "DAST: no in-scope URL was reachable".to_string(),
+            "DAST: declared URL(s) unreachable: http://127.0.0.1:9/".to_string(),
+        ];
+        assert_eq!(s.incomplete_reasons, want);
+        let st = crate::runstatus::read_run_status(&dir).unwrap();
+        assert!(!st.complete && !st.dry_run);
+        assert_eq!(st.incomplete_reasons, want);
+        assert_eq!(st.dast.unwrap().unreachable_urls, vec!["http://127.0.0.1:9/"]);
+        // coverage agrees: nothing was tested
+        let cov = read_json(&dir, "dast-coverage.json");
+        assert_eq!(cov["scanned"], 0);
+    }
+
+    #[test]
+    fn one_dead_declared_url_among_live_ones_is_still_incomplete() {
+        let dir = unique_dir();
+        let mut eng = dast_engagement();
+        eng.urls.push("https://d.example.com/".into());
+        // HostRun echoes every probe; make d.example.com dead by wrapping it
+        struct OneDead;
+        impl Runner for OneDead {
+            fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+                let rows = HostRun { leak: None }.run_json(t, a, g)?;
+                Ok(rows.into_iter().filter(|r| r["input"] != "https://d.example.com/").collect())
+            }
+            fn run_text(&self, t: &str, _a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+                Ok(version_of(t))
+            }
+        }
+        let s = run_pipeline(&eng, &OneDead, &FakeTri, &dir, false, None).unwrap();
+        assert!(s.urls > 0);
+        assert!(!s.complete);
+        assert_eq!(s.incomplete_reasons, vec!["DAST: declared URL(s) unreachable: https://d.example.com/".to_string()]);
+    }
+
+    #[test]
+    fn unreachable_localhost_url_gets_the_resolver_hint() {
+        let dir = unique_dir();
+        let s = run_pipeline(&urls_engagement(&["http://localhost:3000/"]), &DeadRun, &FakeTri, &dir, false, None).unwrap();
+        assert!(!s.complete);
+        let r = s.incomplete_reasons.iter().find(|r| r.contains("unreachable")).unwrap();
+        assert_eq!(
+            r,
+            "DAST: declared URL(s) unreachable: http://localhost:3000/ — ProjectDiscovery tools may not resolve localhost; use 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn all_off_scope_surface_is_incomplete() {
+        struct OffRun;
+        impl Runner for OffRun {
+            fn run_json(&self, t: &str, _a: &[String], _g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+                Ok(match t {
+                    "httpx" => vec![json!({"url":"https://evil.test/"})],
+                    _ => vec![],
+                })
+            }
+            fn run_text(&self, t: &str, _a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+                Ok(version_of(t))
+            }
+        }
+        let dir = unique_dir();
+        let mut eng = engagement();
+        eng.urls.clear();
+        let s = run_pipeline(&eng, &OffRun, &FakeTri, &dir, false, None).unwrap();
+        assert!(!s.complete);
+        assert_eq!(s.incomplete_reasons, vec!["DAST: no in-scope URL was reachable".to_string()]);
+    }
+
+    #[test]
+    fn dry_run_coverage_says_nothing_was_sent() {
+        let dir = unique_dir();
+        let s = run_pipeline(&dast_engagement(), &HostRun { leak: None }, &FakeTri, &dir, true, None).unwrap();
+        assert!(!s.complete);
+        // a dry run is incomplete by itself; no DAST reachability reasons are invented
+        assert!(s.incomplete_reasons.is_empty(), "{:?}", s.incomplete_reasons);
+        let cov = read_json(&dir, "dast-coverage.json");
+        assert_eq!(cov["scanned"], 0);
+        let sqli = cov["categories"].as_array().unwrap().iter().find(|c| c["id"] == "sqli").unwrap().clone();
+        assert_eq!(sqli["status"], "not_tested");
+        assert_eq!(sqli["reason"], "dry run: nothing was sent");
     }
 
     #[test]

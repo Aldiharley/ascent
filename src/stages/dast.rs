@@ -3,7 +3,7 @@
 //! with the optional auth header, scrub the auth value from every raw result, and report
 //! what was and was not tested. dos / brute-force / default-login are never run.
 use super::enumerate::enumerate_surface;
-use super::recon::{ensure_httpx_identity, is_subfinder_candidate, recon};
+use super::recon::{ensure_httpx_identity, is_subfinder_candidate, probe_urls, recon};
 use super::scan::scan_rows;
 use crate::models::Finding;
 use crate::normalise::normalise_nuclei;
@@ -240,12 +240,20 @@ fn row_tags(r: &Value) -> Vec<String> {
 
 /// What was and was not tested. `scanned` is the number of in-scope URLs nuclei
 /// actually ran against: with zero, nothing was tested whatever the profile says.
+/// A dry run sent nothing, so it always reports zero.
 pub fn coverage(
     profile: DastProfile,
     authenticated: bool,
     scanned: usize,
+    dry_run: bool,
     rows: &[Value],
 ) -> Value {
+    let scanned = if dry_run { 0 } else { scanned };
+    let zero_reason = if dry_run {
+        "dry run: nothing was sent"
+    } else {
+        "no in-scope URL was reachable"
+    };
     let tagsets: Vec<Vec<String>> = rows.iter().map(row_tags).collect();
     let cats: Vec<Value> = CATEGORIES
         .iter()
@@ -255,9 +263,7 @@ pub fn coverage(
                     "not_tested",
                     "needs load generation; Ascent never floods a target".to_string(),
                 ),
-                Some(_) if scanned == 0 => {
-                    ("not_tested", "no in-scope URLs were scanned".to_string())
-                }
+                Some(_) if scanned == 0 => ("not_tested", zero_reason.to_string()),
                 Some(min) if min > profile => {
                     ("not_tested", format!("enable the {} profile", min.as_str()))
                 }
@@ -318,15 +324,24 @@ pub fn coverage_markdown(cov: &Value) -> String {
     out
 }
 
+/// What the DAST track did. Every field defaults, so an older `run.json` still parses.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DastSummary {
     pub profile: String,
     pub authenticated: bool,
     pub auth_header: String,
+    /// Live in-scope seed URLs handed to the crawler.
     pub seeded: usize,
+    /// NEW endpoints katana found (seeds not counted).
     pub crawled: usize,
     pub out_of_scope_dropped: usize,
+    /// In-scope URLs nuclei ran against (0 in a dry run).
     pub scanned: usize,
+    /// Declared `urls` that answered / did not answer the httpx probe.
+    pub reachable: usize,
+    pub unreachable: usize,
+    pub unreachable_urls: Vec<String>,
 }
 
 pub struct DastOutcome {
@@ -336,11 +351,14 @@ pub struct DastOutcome {
 }
 
 /// `Ok(None)` when the engagement has no hosts and no urls (no DAST scope).
+/// `live` is false for a dry run: every call still goes through the scope-checking
+/// runner, but nothing is sent, so no declared URL is reported unreachable and the
+/// coverage says nothing was scanned.
 pub fn run_dast(
     eng: &Engagement,
     runner: &dyn Runner,
     auth: Option<&(String, String)>,
-    check_httpx: bool,
+    live: bool,
 ) -> Result<Option<DastOutcome>, Box<dyn std::error::Error>> {
     if eng.hosts.is_empty() && eng.urls.is_empty() {
         return Ok(None);
@@ -349,23 +367,31 @@ pub fn run_dast(
     let scrubbed = |e: Box<dyn std::error::Error>| -> Box<dyn std::error::Error> {
         scrub_text(&e.to_string(), secret).into()
     };
-    if check_httpx && !eng.hosts.is_empty() {
+    // httpx runs whenever there is DAST scope: recon probes the hosts, the probe the urls.
+    if live {
         ensure_httpx_identity(runner).map_err(scrubbed)?;
     }
-    let mut seed: BTreeSet<String> = eng.urls.iter().cloned().collect();
+    let guard = ScopeGuard::new(eng);
+    // A declared URL the guard refuses is dropped and counted, never probed.
+    let declared: BTreeSet<String> = eng.urls.iter().cloned().collect();
+    let (declared, url_dropped) = filter_in_scope(declared.into_iter().collect(), &|u| guard.in_scope(u));
+    // Only declared URLs that answer are crawled (hosts are probed by recon).
+    let (live_urls, dead_urls) = probe_urls(runner, &declared).map_err(scrubbed)?;
+    let (live_urls, dead_urls) = if live { (live_urls, dead_urls) } else { (declared, vec![]) };
+    let mut seed: BTreeSet<String> = live_urls.iter().cloned().collect();
     for h in &eng.hosts {
         for u in recon(runner, h, is_subfinder_candidate(h)).map_err(scrubbed)? {
             seed.insert(u);
         }
     }
-    let guard = ScopeGuard::new(eng);
     // An off-scope seed (e.g. an httpx redirect target) is dropped and counted, never crawled.
     let (seed, seed_dropped) = filter_in_scope(seed.into_iter().collect(), &|u| guard.in_scope(u));
     let headers = header_args(auth);
     let crawled = enumerate_surface(runner, &seed, &headers).map_err(scrubbed)?;
-    let crawled_n = crawled.len();
+    let seeds: BTreeSet<&String> = seed.iter().collect();
+    let crawled_n = crawled.iter().filter(|u| !seeds.contains(u)).count();
     let (surface, crawl_dropped) = filter_in_scope(crawled, &|u| guard.in_scope(u));
-    let dropped = seed_dropped + crawl_dropped;
+    let dropped = url_dropped + seed_dropped + crawl_dropped;
     let mut rows = Vec::new();
     if !surface.is_empty() {
         for pass in nuclei_passes(eng.dast.profile) {
@@ -376,7 +402,7 @@ pub fn run_dast(
         }
     }
     let rows = scrub_rows(dedupe_rows(rows), secret);
-    let coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), &rows);
+    let coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), !live, &rows);
     Ok(Some(DastOutcome {
         findings: normalise_nuclei(&rows),
         summary: DastSummary {
@@ -386,7 +412,10 @@ pub fn run_dast(
             seeded: seed.len(),
             crawled: crawled_n,
             out_of_scope_dropped: dropped,
-            scanned: surface.len(),
+            scanned: if live { surface.len() } else { 0 },
+            reachable: if live { live_urls.len() } else { 0 },
+            unreachable: dead_urls.len(),
+            unreachable_urls: dead_urls,
         },
         coverage,
     }))
@@ -409,6 +438,10 @@ mod tests {
         extra_httpx: Option<&'static str>,
         /// nuclei returns its row twice per call (as two Active passes would).
         nuclei_twice: bool,
+        /// Declared URLs the httpx probe gets no answer from.
+        dead: Vec<&'static str>,
+        /// `httpx -version` output.
+        httpx_version: &'static str,
     }
     impl Fake {
         fn new() -> Self {
@@ -417,6 +450,8 @@ mod tests {
                 nuclei_err: None,
                 extra_httpx: None,
                 nuclei_twice: false,
+                dead: vec![],
+                httpx_version: "projectdiscovery.io\n[INF] Current Version: v1.12.0",
             }
         }
         fn count(&self, tool: &str) -> usize {
@@ -436,15 +471,23 @@ mod tests {
             Ok(match tool {
                 "subfinder" => vec![],
                 "httpx" => {
-                    if args.iter().any(|a| a == "example.com") {
-                        let mut v = vec![json!({"url":"https://example.com"})];
-                        if let Some(u) = self.extra_httpx {
-                            v.push(json!({ "url": u }));
+                    // A `-u` URL is a liveness probe (echoed back unless dead); a bare
+                    // host is recon (only example.com answers).
+                    let mut v = vec![];
+                    for w in args.windows(2).filter(|w| w[0] == "-u") {
+                        let u = w[1].as_str();
+                        if u.contains("://") {
+                            if !self.dead.contains(&u) {
+                                v.push(json!({"input": u, "url": u}));
+                            }
+                        } else if u == "example.com" {
+                            v.push(json!({"url":"https://example.com"}));
+                            if let Some(x) = self.extra_httpx {
+                                v.push(json!({ "url": x }));
+                            }
                         }
-                        v
-                    } else {
-                        vec![]
                     }
+                    v
                 }
                 "katana" => vec![
                     json!({"endpoint":"https://github.com/x"}),
@@ -471,11 +514,11 @@ mod tests {
         }
         fn run_text(
             &self,
-            _t: &str,
+            t: &str,
             _a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(String::new())
+            Ok(if t == "httpx" { self.httpx_version.to_string() } else { String::new() })
         }
     }
 
@@ -629,7 +672,7 @@ mod tests {
             json!({"info":{"tags":"cors, headers"}}),
             json!({"info":{"tags":["xss"]}}),
         ];
-        let p = coverage(DastProfile::Passive, false, 3, &rows);
+        let p = coverage(DastProfile::Passive, false, 3, false, &rows);
         assert_eq!(cat(&p, "sqli")["status"], "not_tested");
         assert_eq!(cat(&p, "sqli")["reason"], "enable the standard profile");
         assert_eq!(cat(&p, "rate-limit")["status"], "not_tested");
@@ -641,14 +684,14 @@ mod tests {
         assert_eq!(p["authenticated"], false);
         assert_eq!(p["scanned"], 3);
 
-        let s = coverage(DastProfile::Standard, true, 3, &rows);
+        let s = coverage(DastProfile::Standard, true, 3, false, &rows);
         assert_eq!(cat(&s, "xss")["findings"], 2);
         assert_eq!(cat(&s, "authz")["status"], "limited");
         assert_eq!(cat(&s, "sqli")["status"], "tested");
         assert_eq!(cat(&s, "rate-limit")["status"], "not_tested");
         assert_eq!(s["authenticated"], true);
 
-        let a = coverage(DastProfile::Active, false, 1, &[]);
+        let a = coverage(DastProfile::Active, false, 1, false, &[]);
         for id in ["sqli", "xss", "lfi", "ssrf", "redirect"] {
             assert_eq!(
                 cat(&a, id)["reason"],
@@ -666,23 +709,28 @@ mod tests {
             DastProfile::Standard,
             DastProfile::Active,
         ] {
-            let c = coverage(prof, false, 0, &[]);
+            let c = coverage(prof, false, 0, false, &[]);
             assert_eq!(c["scanned"], 0);
             for cat in c["categories"].as_array().unwrap() {
                 assert_eq!(cat["status"], "not_tested", "{prof:?} {cat}");
                 assert_eq!(cat["findings"], 0);
             }
-            assert_eq!(cat(&c, "sqli")["reason"], "no in-scope URLs were scanned");
+            assert_eq!(cat(&c, "sqli")["reason"], "no in-scope URL was reachable");
             assert_ne!(
                 cat(&c, "rate-limit")["reason"],
-                "no in-scope URLs were scanned"
+                "no in-scope URL was reachable"
             );
+            // a dry run sent nothing, whatever `scanned` the caller passes
+            let d = coverage(prof, false, 5, true, &[]);
+            assert_eq!(d["scanned"], 0);
+            assert_eq!(cat(&d, "sqli")["reason"], "dry run: nothing was sent");
+            assert!(d["categories"].as_array().unwrap().iter().all(|c| c["status"] == "not_tested"));
         }
     }
 
     #[test]
     fn coverage_markdown_has_a_row_per_category() {
-        let cov = coverage(DastProfile::Passive, false, 1, &[]);
+        let cov = coverage(DastProfile::Passive, false, 1, false, &[]);
         let md = coverage_markdown(&cov);
         assert!(md.contains("## DAST coverage"));
         assert!(
@@ -703,7 +751,7 @@ mod tests {
             ..Default::default()
         };
         let f = Fake::new();
-        assert!(run_dast(&e, &f, None, false).unwrap().is_none());
+        assert!(run_dast(&e, &f, None, true).unwrap().is_none());
         assert!(f.calls.borrow().is_empty());
     }
 
@@ -711,7 +759,7 @@ mod tests {
     fn run_dast_seeds_every_host_and_url_and_drops_off_scope() {
         let f = Fake::new();
         let auth = ("Authorization".to_string(), SECRET.to_string());
-        let out = run_dast(&eng(), &f, Some(&auth), false).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
         assert_eq!(f.count("subfinder"), 1);
         {
             let calls = f.calls.borrow();
@@ -726,9 +774,13 @@ mod tests {
             }
         }
         assert_eq!(out.summary.seeded, 2);
-        assert_eq!(out.summary.crawled, 5);
+        // only katana's NEW endpoints count as crawled, never the seeds
+        assert_eq!(out.summary.crawled, 3);
         assert_eq!(out.summary.out_of_scope_dropped, 1);
         assert_eq!(out.summary.scanned, 4);
+        assert_eq!(out.summary.reachable, 1);
+        assert_eq!(out.summary.unreachable, 0);
+        assert!(out.summary.unreachable_urls.is_empty());
         assert_eq!(out.summary.auth_header, "Authorization");
         assert!(out.summary.authenticated);
         assert_eq!(out.summary.profile, "standard");
@@ -754,7 +806,7 @@ mod tests {
     fn run_dast_drops_off_scope_seeds_before_crawling_and_counts_them() {
         let mut f = Fake::new();
         f.extra_httpx = Some("https://evil.test/redirect");
-        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         // the off-scope seed is counted, never handed to katana, and does not abort
         assert_eq!(out.summary.seeded, 2);
         assert_eq!(out.summary.out_of_scope_dropped, 2); // 1 seed + github.com from the crawl
@@ -770,7 +822,7 @@ mod tests {
         f.nuclei_twice = true;
         let mut e = eng();
         e.dast.profile = DastProfile::Active; // two passes, each returning the row twice
-        let out = run_dast(&e, &f, None, false).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
         assert_eq!(f.count("nuclei"), 2);
         assert_eq!(out.findings.len(), 1);
     }
@@ -802,10 +854,10 @@ mod tests {
                 _a: &[String],
                 _g: &[String],
             ) -> Result<String, Box<dyn std::error::Error>> {
-                Ok(String::new())
+                Ok("projectdiscovery.io".into())
             }
         }
-        let out = run_dast(&e, &Off, None, false).unwrap().unwrap();
+        let out = run_dast(&e, &Off, None, true).unwrap().unwrap();
         assert_eq!(out.summary.scanned, 0);
         assert_eq!(out.summary.out_of_scope_dropped, 1);
         assert!(out.coverage["categories"]
@@ -813,6 +865,7 @@ mod tests {
             .unwrap()
             .iter()
             .all(|c| c["status"] == "not_tested"));
+        assert_eq!(cat(&out.coverage, "sqli")["reason"], "no in-scope URL was reachable");
     }
 
     #[test]
@@ -820,11 +873,63 @@ mod tests {
         let mut f = Fake::new();
         f.nuclei_err = Some("nuclei exited: header Bearer s3cr3t rejected");
         let auth = ("Authorization".to_string(), SECRET.to_string());
-        let e = run_dast(&eng(), &f, Some(&auth), false)
+        let e = run_dast(&eng(), &f, Some(&auth), true)
             .err()
             .expect("error");
         let t = e.to_string();
         assert!(t.contains("***"), "{t}");
         assert!(!t.contains("s3cr3t"), "{t}");
+    }
+
+    #[test]
+    fn run_dast_probes_declared_urls_and_never_crawls_dead_ones() {
+        let mut f = Fake::new();
+        f.dead = vec!["http://localhost:3000/"];
+        let auth = ("Authorization".to_string(), SECRET.to_string());
+        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
+        assert_eq!(out.summary.reachable, 0);
+        assert_eq!(out.summary.unreachable, 1);
+        assert_eq!(out.summary.unreachable_urls, vec!["http://localhost:3000/"]);
+        assert_eq!(out.summary.seeded, 1); // only https://example.com from recon
+        let calls = f.calls.borrow();
+        // the probe sends no auth header and only the declared URL
+        let probe = calls
+            .iter()
+            .find(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://")))
+            .expect("declared URLs are probed");
+        assert!(!probe.1.iter().any(|a| a == "-H" || a.contains(SECRET)), "{:?}", probe.1);
+        assert_eq!(probe.2, vec!["localhost".to_string()]);
+        let katana = calls.iter().find(|c| c.0 == "katana").unwrap();
+        assert!(!katana.1.contains(&"http://localhost:3000/".to_string()), "{:?}", katana.1);
+    }
+
+    #[test]
+    fn run_dast_checks_httpx_identity_with_urls_only() {
+        let mut f = Fake::new();
+        f.httpx_version = "Usage: httpx [OPTIONS] URL";
+        let e = Engagement {
+            name: "x".into(),
+            urls: vec!["http://127.0.0.1:3000/".into()],
+            ..Default::default()
+        };
+        let err = run_dast(&e, &f, None, true).err().expect("python httpx refused");
+        assert!(err.to_string().contains("not ProjectDiscovery httpx"), "{err}");
+        assert_eq!(f.count("httpx"), 0, "nothing probed with the wrong httpx");
+    }
+
+    #[test]
+    fn dry_run_claims_nothing_was_scanned_and_nothing_unreachable() {
+        let mut f = Fake::new();
+        f.dead = vec!["http://localhost:3000/"]; // a dry run cannot know
+        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        assert_eq!(out.summary.scanned, 0);
+        assert!(out.summary.unreachable_urls.is_empty());
+        assert_eq!(out.coverage["scanned"], 0);
+        for c in out.coverage["categories"].as_array().unwrap() {
+            assert_eq!(c["status"], "not_tested", "{c}");
+        }
+        assert_eq!(cat(&out.coverage, "sqli")["reason"], "dry run: nothing was sent");
+        // the plan still went through the (scope-checking) runner
+        assert!(f.count("httpx") >= 1);
     }
 }

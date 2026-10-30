@@ -1,5 +1,6 @@
 use crate::runner::Runner;
 use std::collections::BTreeSet;
+use url::Url;
 
 /// Refuse to run recon with anything but ProjectDiscovery httpx: a pip-installed
 /// Python `httpx` (`Usage: httpx [OPTIONS] URL`) can shadow it on PATH.
@@ -54,6 +55,46 @@ pub fn recon(
         .filter_map(|r| r["url"].as_str().map(String::from))
         .collect();
     Ok(urls.into_iter().collect())
+}
+
+/// Probes the declared `urls` with httpx (no auth header, no redirect following)
+/// and splits them into `(live, dead)`, both in input order. A URL is live when
+/// httpx returns a row whose `input` (else `url`) equals it, ignoring one trailing
+/// `/` on either side. A URL without a host is dead and never probed. Every host
+/// passed to httpx is also a scope target.
+pub fn probe_urls(
+    runner: &dyn Runner,
+    urls: &[String],
+) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+    let mut hosts: BTreeSet<String> = BTreeSet::new();
+    let mut args: Vec<String> = vec!["-silent".into(), "-json".into(), "-rl".into(), "50".into()];
+    for u in urls {
+        if let Some(h) = Url::parse(u)
+            .ok()
+            .and_then(|p| p.host_str().map(String::from))
+        {
+            hosts.insert(h);
+            args.push("-u".into());
+            args.push(u.clone());
+        }
+    }
+    let rows = if hosts.is_empty() {
+        vec![]
+    } else {
+        let hv: Vec<String> = hosts.into_iter().collect();
+        runner.run_json("httpx", &args, &hv)?
+    };
+    let norm = |s: &str| s.strip_suffix('/').unwrap_or(s).to_string();
+    let answered: BTreeSet<String> = rows
+        .iter()
+        .filter_map(|r| r["input"].as_str().or_else(|| r["url"].as_str()))
+        .map(norm)
+        .collect();
+    let (live, dead): (Vec<String>, Vec<String>) = urls
+        .iter()
+        .cloned()
+        .partition(|u| Url::parse(u).is_ok_and(|p| p.host_str().is_some()) && answered.contains(&norm(u)));
+    Ok((live, dead))
 }
 
 #[cfg(test)]
@@ -178,6 +219,100 @@ mod tests {
         assert_eq!(tool, "httpx");
         assert_eq!(targets, &vec!["localhost".to_string()]);
         assert!(args.contains(&"localhost".to_string()));
+    }
+
+    /// httpx answers with the given rows; every call is recorded.
+    struct Probe {
+        rows: Vec<Value>,
+        calls: RefCell<Vec<Call>>,
+    }
+    impl Runner for Probe {
+        fn run_json(
+            &self,
+            t: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            self.calls
+                .borrow_mut()
+                .push((t.to_string(), a.to_vec(), g.to_vec()));
+            Ok(self.rows.clone())
+        }
+        fn run_text(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn probe_urls_uses_exact_args_and_url_hosts_as_targets() {
+        let p = Probe { rows: vec![], calls: RefCell::new(vec![]) };
+        let urls = vec![
+            "http://127.0.0.1:3000/".to_string(),
+            "https://app.example.com/login".to_string(),
+        ];
+        probe_urls(&p, &urls).unwrap();
+        let calls = p.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        let (tool, args, targets) = &calls[0];
+        assert_eq!(tool, "httpx");
+        assert_eq!(
+            args,
+            &vec![
+                "-silent",
+                "-json",
+                "-rl",
+                "50",
+                "-u",
+                "http://127.0.0.1:3000/",
+                "-u",
+                "https://app.example.com/login"
+            ]
+        );
+        assert_eq!(
+            targets,
+            &vec!["127.0.0.1".to_string(), "app.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn probe_urls_matches_input_then_url_ignoring_one_trailing_slash() {
+        let p = Probe {
+            rows: vec![
+                // `input` wins; a trailing slash on either side does not matter
+                json!({"input":"http://127.0.0.1:3000","url":"http://127.0.0.1:3000/redirected"}),
+                // no `input`: fall back to `url`
+                json!({"url":"https://app.example.com/login/"}),
+            ],
+            calls: RefCell::new(vec![]),
+        };
+        let urls = vec![
+            "http://127.0.0.1:3000/".to_string(),
+            "https://app.example.com/login".to_string(),
+            "http://127.0.0.1:9/".to_string(),
+        ];
+        let (live, dead) = probe_urls(&p, &urls).unwrap();
+        assert_eq!(
+            live,
+            vec!["http://127.0.0.1:3000/", "https://app.example.com/login"]
+        );
+        assert_eq!(dead, vec!["http://127.0.0.1:9/"]);
+    }
+
+    #[test]
+    fn probe_urls_host_less_url_is_dead_and_never_probed() {
+        let p = Probe { rows: vec![], calls: RefCell::new(vec![]) };
+        let (live, dead) = probe_urls(&p, &["evil.com:8080/x".to_string()]).unwrap();
+        assert!(live.is_empty());
+        assert_eq!(dead, vec!["evil.com:8080/x"]);
+        assert!(p.calls.borrow().is_empty());
+        let (live, dead) = probe_urls(&p, &[]).unwrap();
+        assert!(live.is_empty() && dead.is_empty());
+        assert!(p.calls.borrow().is_empty());
     }
 
     #[test]

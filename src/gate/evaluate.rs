@@ -153,9 +153,12 @@ pub fn evaluate(items: &[Value], policy: &Policy, status: Option<&RunStatus>, fa
     }
     counts.failed = failed.len();
     counts.warned = warned.len();
-    // A policy category whose analyser was not installed was never scanned.
+    // A policy category whose analyser was not installed was never scanned. A DAST
+    // track that scanned nothing tested nothing, whatever `complete` claims (defence
+    // in depth against a stale or hand-edited run.json).
     let complete = status.is_some_and(|st| {
         st.complete
+            && !st.dast.as_ref().is_some_and(|d| d.scanned == 0)
             && !st.skipped_tools.iter().any(|t| {
                 tool_category(t).is_some_and(|c| policy.fail_on.categories.iter().any(|x| x == c))
             })
@@ -186,6 +189,7 @@ pub fn gate_document(policy: &Policy, r: &GateResult, status: Option<&RunStatus>
         "complete": r.complete,
         "failed_tools": status.map(|st| st.failed_tools.clone()).unwrap_or_default(),
         "skipped_tools": status.map(|st| st.skipped_tools.clone()).unwrap_or_default(),
+        "incomplete_reasons": status.map(|st| st.incomplete_reasons.clone()).unwrap_or_default(),
         "dry_run": status.is_some_and(|st| st.dry_run),
         "counts": r.counts,
         "failed": r.failed,
@@ -327,6 +331,26 @@ mod tests {
         let doc = gate_document(&policy(), &r, Some(&st), "t");
         assert_eq!(doc["skipped_tools"], json!(["trivy"]));
         assert_eq!(gate_document(&policy(), &r, None, "t")["skipped_tools"], json!([]));
+    }
+    #[test]
+    fn dast_that_scanned_nothing_is_never_complete() {
+        // a stale or hand-edited run.json claiming complete cannot PASS
+        let mut st = done();
+        st.dast = Some(crate::stages::dast::DastSummary { scanned: 0, ..Default::default() });
+        let r = evaluate(&[], &policy(), Some(&st), false);
+        assert_eq!((r.decision, r.exit_code, r.complete), (Decision::Incomplete, 3, false));
+        st.dast = Some(crate::stages::dast::DastSummary { scanned: 1, ..Default::default() });
+        assert_eq!(evaluate(&[], &policy(), Some(&st), false).decision, Decision::Pass);
+    }
+    #[test]
+    fn gate_document_lists_incomplete_reasons() {
+        let mut st = done();
+        st.complete = false;
+        st.incomplete_reasons = vec!["DAST: no in-scope URL was reachable".into()];
+        let r = evaluate(&[], &policy(), Some(&st), false);
+        let doc = gate_document(&policy(), &r, Some(&st), "t");
+        assert_eq!(doc["incomplete_reasons"], json!(["DAST: no in-scope URL was reachable"]));
+        assert_eq!(gate_document(&policy(), &r, None, "t")["incomplete_reasons"], json!([]));
     }
     #[test]
     fn category_filter_excludes_findings() {

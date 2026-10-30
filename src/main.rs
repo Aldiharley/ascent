@@ -195,8 +195,8 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
             );
             if let Some(d) = &s.dast {
                 println!(
-                    "dast: profile={} authenticated={} seeded={} crawled={} out_of_scope_dropped={} scanned={}",
-                    d.profile, d.authenticated, d.seeded, d.crawled, d.out_of_scope_dropped, d.scanned
+                    "dast: profile={} authenticated={} seeded={} crawled={} out_of_scope_dropped={} scanned={} unreachable={}",
+                    d.profile, d.authenticated, d.seeded, d.crawled, d.out_of_scope_dropped, d.scanned, d.unreachable
                 );
                 println!(
                     "coverage: {}",
@@ -206,6 +206,9 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
             if !s.complete {
                 // stderr, so CI logs show it even when stdout is captured.
                 eprintln!("run INCOMPLETE (dry run or failed scanners: {:?})", s.failed_tools);
+                for r in &s.incomplete_reasons {
+                    eprintln!("  {r}");
+                }
             }
             println!("report: {}\naudit:  {}", s.report_path, s.audit_path);
             println!("sarif:  {}", std::path::Path::new(&out).join("ascent.sarif").display());
