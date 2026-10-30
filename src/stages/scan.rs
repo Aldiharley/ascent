@@ -1,7 +1,7 @@
 use crate::runner::Runner;
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -28,20 +28,35 @@ pub fn ensure_nuclei_version(runner: &dyn Runner) -> Result<(), Box<dyn std::err
     }
 }
 
+/// A fresh, process-unique path in the system temp directory (nothing is created).
+fn unique_temp_path(suffix: &str) -> PathBuf {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "ascent-nuclei-{}-{nanos}-{}{suffix}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ))
+}
+
+/// Writes `lines` (one per line) to a NEW file at `p`; never follows or reuses an
+/// existing file.
+pub fn write_new_lines(p: &Path, lines: &[String]) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(p)?;
+    f.write_all((lines.join("\n") + "\n").as_bytes())
+}
+
 /// A temporary URL list that is deleted when dropped (also on error or panic).
 struct ListFile(PathBuf);
 impl ListFile {
     fn create(lines: &[String]) -> std::io::Result<Self> {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!(
-            "ascent-nuclei-{}-{nanos}-{}.txt",
-            std::process::id(),
-            N.fetch_add(1, Ordering::SeqCst)
-        ));
+        let p = unique_temp_path(".txt");
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -54,6 +69,36 @@ impl ListFile {
 impl Drop for ListFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A fresh private temporary directory, removed with everything in it when dropped
+/// (also on error or panic). Creation fails rather than reuse an existing path, and
+/// on Unix only the owner can enter it, so no other local user can plant, swap or
+/// read a file in it (a trace log path is handed to nuclei before the file exists).
+pub struct TempDir(PathBuf);
+impl TempDir {
+    pub fn create() -> std::io::Result<Self> {
+        let p = unique_temp_path(".d");
+        #[cfg(unix)]
+        let b = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut b = std::fs::DirBuilder::new();
+            b.mode(0o700);
+            b
+        };
+        #[cfg(not(unix))]
+        let b = std::fs::DirBuilder::new();
+        b.create(&p)?;
+        Ok(TempDir(p))
+    }
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -230,6 +275,31 @@ mod tests {
         let out = scan_rows(&rec, &urls, &jsonl()).unwrap();
         assert!(out.is_empty());
         assert!(rec.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn temp_dir_is_fresh_and_removed_with_its_contents() {
+        let (a, b) = (TempDir::create().unwrap(), TempDir::create().unwrap());
+        assert_ne!(a.path(), b.path());
+        assert!(a.path().is_dir());
+        let f = a.path().join("exclude.txt");
+        write_new_lines(&f, &["x".into(), "y".into()]).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "x\ny\n");
+        // never overwrites an existing file
+        assert!(write_new_lines(&f, &["z".into()]).is_err());
+        std::fs::write(a.path().join("trace.jsonl"), "{}").unwrap();
+        let p = a.path().to_path_buf();
+        drop(a);
+        assert!(!p.exists(), "temp dir left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_dir_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TempDir::create().unwrap();
+        let mode = std::fs::metadata(d.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
     }
 
     struct Ver(&'static str);

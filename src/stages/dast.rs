@@ -4,7 +4,7 @@
 //! what was and was not tested. dos / brute-force / default-login are never run.
 use super::enumerate::enumerate_surface;
 use super::recon::{ensure_httpx_identity, is_subfinder_candidate, probe_urls, recon};
-use super::scan::scan_rows;
+use super::scan::{scan_rows, write_new_lines, TempDir};
 use crate::models::Finding;
 use crate::normalise::normalise_nuclei;
 use crate::runner::Runner;
@@ -12,6 +12,7 @@ use crate::scope::{DastProfile, Engagement, ScopeGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 pub const ALWAYS_EXCLUDED: &str = "dos,brute-force,default-login";
 const PASSIVE_TAGS: &str = "tech,misconfig,exposure,headers,cors,cookie,session";
@@ -72,6 +73,137 @@ pub fn nuclei_passes(profile: DastProfile) -> Vec<Vec<String>> {
             ],
         ],
     }
+}
+
+const LISTING_NOT_RECOGNISED: &str = "nuclei template listing not recognised";
+
+/// nuclei variables that resolve to the scanned target. `{{Host}}`/`{{Hostname}}` are
+/// a bare host (`host`, `host:port`); `{{BaseURL}}`/`{{RootURL}}` carry their own scheme.
+const TARGET_HOST_VARS: [&str; 2] = ["{{Hostname}}", "{{Host}}"];
+const TARGET_URL_VARS: [&str; 2] = ["{{BaseURL}}", "{{RootURL}}"];
+
+/// What may follow a target variable: nothing, a path, or a numeric port (Ascent scope
+/// is host/IP-level, so another port of the target stays in scope). Anything else
+/// (`.evil.test`, `@evil.test`, `:{{port}}`) can name another host.
+fn target_suffix_ok(rest: &str) -> bool {
+    if rest.is_empty() || rest.starts_with('/') {
+        return true;
+    }
+    let Some(port) = rest.strip_prefix(':') else {
+        return false;
+    };
+    let port = port.split('/').next().unwrap_or("");
+    !port.is_empty() && port.len() <= 5 && port.bytes().all(|c| c.is_ascii_digit())
+}
+
+/// True when one `@Host:` annotation value keeps the request on the scanned target.
+fn host_value_on_target(value: &str) -> bool {
+    let v = value.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    let lower = v.to_ascii_lowercase();
+    let bare = ["http://", "https://"]
+        .iter()
+        .find(|s| lower.starts_with(**s))
+        .map_or(v, |s| &v[s.len()..]);
+    TARGET_HOST_VARS
+        .iter()
+        .find_map(|var| bare.strip_prefix(var))
+        .or_else(|| TARGET_URL_VARS.iter().find_map(|var| v.strip_prefix(var)))
+        .is_some_and(target_suffix_ok)
+}
+
+/// Every `@Host:` annotation value in a template (the name matched case-insensitively,
+/// anywhere on a line; a value ends at the line end or at an escaped `\n`/`\r`).
+fn host_annotations(template: &str) -> Vec<&str> {
+    const KEY: &str = "@host:";
+    let mut out = Vec::new();
+    for line in template.lines() {
+        let lower = line.to_ascii_lowercase(); // ASCII-only change: byte offsets agree
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(KEY) {
+            let start = from + i + KEY.len();
+            let rest = &line[start..];
+            let end = [rest.find("\\n"), rest.find("\\r")]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(rest.len());
+            out.push(&rest[..end]);
+            from = start;
+        }
+    }
+    out
+}
+
+/// True when a template redirects any request away from the scanned target with the
+/// raw-request `@Host:` annotation (a literal host, `localhost`, or anything that is
+/// not a target variable). Ascent's scope guard only sees nuclei's `-l` targets, so
+/// such a template would send a request (with the auth header) to an unchecked host.
+pub fn sends_off_target(template: &str) -> bool {
+    host_annotations(template)
+        .iter()
+        .any(|v| !host_value_on_target(v))
+}
+
+/// A listed template path resolved under the listing's directory (nuclei prints
+/// paths relative to it, with `\` on Windows).
+fn resolve_listed(dir: &Path, rel: &str) -> PathBuf {
+    if Path::new(rel).is_absolute() {
+        return PathBuf::from(rel);
+    }
+    rel.split(['/', '\\'])
+        .filter(|c| !c.is_empty())
+        .fold(dir.to_path_buf(), |p, c| p.join(c))
+}
+
+/// The absolute template paths in `nuclei -tl` output: a banner
+/// `Listing available <ver> nuclei templates for <DIR>`, then one path per line
+/// relative to DIR. Fails closed — no banner, an unreadable DIR, or no template
+/// listed is an error, so a scan never runs unfiltered.
+pub fn parse_template_listing(out: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut lines = out.lines().map(str::trim);
+    let banner = lines
+        .by_ref()
+        .find(|l| l.starts_with("Listing available") && l.contains(" nuclei templates for "))
+        .ok_or(LISTING_NOT_RECOGNISED)?;
+    let dir = banner.rsplit(" for ").next().unwrap_or("").trim();
+    if dir.is_empty() || std::fs::read_dir(dir).is_err() {
+        return Err(LISTING_NOT_RECOGNISED.into());
+    }
+    let dir = Path::new(dir);
+    let paths: Vec<PathBuf> = lines
+        .filter(|l| {
+            let l = l.to_ascii_lowercase();
+            l.ends_with(".yaml") || l.ends_with(".yml")
+        })
+        .map(|l| resolve_listed(dir, l))
+        .collect();
+    if paths.is_empty() {
+        return Err(LISTING_NOT_RECOGNISED.into());
+    }
+    Ok(paths)
+}
+
+/// The installed http templates that send a request off the target (see
+/// [`sends_off_target`]). Lists the templates once (no targets, no network); a
+/// listed template that cannot be read is treated as off-target.
+fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let args: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let out = runner.run_text("nuclei", &args, &[])?;
+    let listed = parse_template_listing(&out)?;
+    let mut off: BTreeSet<PathBuf> = BTreeSet::new();
+    for p in listed {
+        let excluded = match std::fs::read(&p) {
+            Ok(bytes) => sends_off_target(&String::from_utf8_lossy(&bytes)),
+            Err(_) => true,
+        };
+        if excluded {
+            off.insert(p);
+        }
+    }
+    Ok(off.into_iter().collect())
 }
 
 /// `-H` plus exactly ONE `"Name: value"` element (never split, never other flags).
@@ -361,6 +493,13 @@ pub fn coverage_markdown(cov: &Value) -> String {
         }
         out.push('\n');
     }
+    match cov["templates_excluded"].as_u64().unwrap_or(0) {
+        0 => {}
+        1 => out.push_str("\n1 template excluded: it sends requests to hosts outside the target\n"),
+        n => out.push_str(&format!(
+            "\n{n} templates excluded: they send requests to hosts outside the target\n"
+        )),
+    }
     out
 }
 
@@ -382,6 +521,8 @@ pub struct DastSummary {
     pub reachable: usize,
     pub unreachable: usize,
     pub unreachable_urls: Vec<String>,
+    /// Installed http templates never run because they send requests off the target.
+    pub templates_excluded: usize,
 }
 
 pub struct DastOutcome {
@@ -434,12 +575,28 @@ pub fn run_dast(
     let (surface, crawl_dropped) = filter_in_scope(crawled, &|u| guard.in_scope(u));
     let dropped = url_dropped + recon_dropped + seed_dropped + crawl_dropped;
     let mut rows = Vec::new();
+    let mut templates_excluded = 0;
     if !surface.is_empty() {
+        // Live only: a private scratch directory (removed on every path, also on error)
+        // for the template exclusion list. A dry run lists nothing and excludes nothing.
+        let scratch = if live { Some(TempDir::create()?) } else { None };
+        let mut exclude_args: Vec<String> = Vec::new();
+        if let Some(dir) = &scratch {
+            let off = off_target_templates(runner).map_err(scrubbed)?;
+            templates_excluded = off.len();
+            if !off.is_empty() {
+                let p = dir.path().join("exclude-templates.txt");
+                let lines: Vec<String> = off.iter().map(|t| t.to_string_lossy().into_owned()).collect();
+                write_new_lines(&p, &lines)?;
+                exclude_args = vec!["-et".into(), p.to_string_lossy().into_owned()];
+            }
+        }
         for pass in nuclei_passes(eng.dast.profile) {
             // Tag the `-dast` fuzzing pass's rows so they normalise as `nuclei-dast`.
             let fuzz_pass = pass.iter().any(|a| a == "-dast");
             let mut args = common_nuclei_args();
             args.extend(pass);
+            args.extend(exclude_args.iter().cloned());
             args.extend(headers.iter().cloned());
             for mut r in scan_rows(runner, &surface, &args).map_err(scrubbed)? {
                 if fuzz_pass {
@@ -452,7 +609,8 @@ pub fn run_dast(
         }
     }
     let rows = scrub_rows(dedupe_rows(rows), secret);
-    let coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), !live, &rows);
+    let mut coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), !live, &rows);
+    coverage["templates_excluded"] = json!(templates_excluded);
     Ok(Some(DastOutcome {
         findings: normalise_nuclei(&rows),
         summary: DastSummary {
@@ -466,13 +624,43 @@ pub fn run_dast(
             reachable: if live { live_urls.len() } else { 0 },
             unreachable: dead_urls.len(),
             unreachable_urls: dead_urls,
+            templates_excluded,
         },
         coverage,
     }))
 }
 
+/// Fixtures shared with the pipeline tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+
+    /// `tests/fixtures/nuclei-templates`: a few small templates, on and off target.
+    pub fn fixture_templates() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("nuclei-templates")
+    }
+
+    /// `nuclei -tl -nc -duc -silent -pt http` output (v3.11.1 shape) listing `rel` under `dir`.
+    pub fn listing(dir: &std::path::Path, rel: &[&str]) -> String {
+        format!(
+            "\nListing available v10.4.9 nuclei templates for {}\n{}\n",
+            dir.display(),
+            rel.join("\n")
+        )
+    }
+
+    /// A listing of one ordinary (on-target) fixture template.
+    pub fn benign_listing() -> String {
+        listing(&fixture_templates(), &["http/benign.yaml"])
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
     use std::cell::RefCell;
 
@@ -507,10 +695,19 @@ mod tests {
         template_rows: Option<Vec<Value>>,
         /// When set, the `-dast` pass returns these rows instead.
         dast_rows: Option<Vec<Value>>,
+        /// `nuclei -tl` output (default: one ordinary fixture template).
+        listing: String,
+        /// Every `run_text` call.
+        text_calls: RefCell<Vec<Call>>,
+        /// The `-et` file of each nuclei scan call (None without `-et`), read while it exists.
+        nuclei_excludes: RefCell<Vec<Option<Vec<String>>>>,
     }
     impl Fake {
         fn new() -> Self {
             Fake {
+                listing: benign_listing(),
+                text_calls: RefCell::new(vec![]),
+                nuclei_excludes: RefCell::new(vec![]),
                 calls: RefCell::new(vec![]),
                 nuclei_err: None,
                 extra_httpx: None,
@@ -570,6 +767,11 @@ mod tests {
                             .borrow_mut()
                             .push(text.lines().map(String::from).collect());
                     }
+                    let et = args.windows(2).find(|w| w[0] == "-et").map(|w| {
+                        let text = std::fs::read_to_string(&w[1]).unwrap();
+                        text.lines().map(String::from).collect()
+                    });
+                    self.nuclei_excludes.borrow_mut().push(et);
                     if let Some(e) = self.nuclei_err {
                         return Err(e.into());
                     }
@@ -595,10 +797,17 @@ mod tests {
         fn run_text(
             &self,
             t: &str,
-            _a: &[String],
-            _g: &[String],
+            a: &[String],
+            g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(if t == "httpx" { self.httpx_version.to_string() } else { String::new() })
+            self.text_calls
+                .borrow_mut()
+                .push((t.into(), a.to_vec(), g.to_vec()));
+            Ok(match t {
+                "httpx" => self.httpx_version.to_string(),
+                "nuclei" if a.iter().any(|x| x == "-tl") => self.listing.clone(),
+                _ => String::new(),
+            })
         }
     }
 
@@ -1182,5 +1391,188 @@ mod tests {
         assert_eq!(cat(&out.coverage, "sqli")["reason"], "dry run: nothing was sent");
         // the plan still went through the (scope-checking) runner
         assert!(f.count("httpx") >= 1);
+    }
+
+    // ---- H2: templates that send requests off the target are excluded ----
+
+    fn off(t: &str) -> bool {
+        sends_off_target(t)
+    }
+
+    #[test]
+    fn host_annotation_classifier() {
+        let raw = |h: &str| format!("http:\n  - raw:\n      - |\n        {h}\n        GET / HTTP/1.1\n");
+        for h in [
+            "@Host: https://checkip.amazonaws.com",
+            "@Host: https://x.example:443",
+            "@Host: localhost",
+            "@Host: 127.0.0.1",
+            // a template variable used as a prefix of another name is NOT the target
+            "@Host: {{Hostname}}.evil.test",
+            "@Host: {{Hostname}}@evil.test",
+            "@Host: http://{{BaseURL}}",
+            // unknown/lower-case variables stay literal in nuclei
+            "@Host: {{host}}",
+            "@Host: {{Host}}:{{port}}",
+            "@Host:",
+            // the annotation name itself is matched case-insensitively (fail closed)
+            "@host: https://evil.test",
+        ] {
+            assert!(off(&raw(h)), "{h} must be off-target");
+        }
+        for h in [
+            "@Host: {{Hostname}}",
+            "@Host: {{Host}}",
+            "@Host: {{BaseURL}}",
+            "@Host: {{RootURL}}/x",
+            "@Host: http://{{Host}}:43800",
+            "@Host: https://{{Hostname}}",
+            "@Host: {{Host}}:9780",
+            "@Host: \"{{BaseURL}}\"",
+            "@Host: '{{Hostname}}'",
+            "@Host:{{Hostname}}",
+        ] {
+            assert!(!off(&raw(h)), "{h} stays on the target");
+        }
+        // no @Host at all
+        assert!(!off("id: x\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/\"\n"));
+        // indentation and CRLF variants
+        assert!(off("http:\r\n  - raw:\r\n      - |\r\n\t\t@Host: https://evil.test\r\n        GET / HTTP/1.1\r\n"));
+        assert!(!off("http:\r\n  - raw:\r\n      - |\r\n          @Host: {{Hostname}}   \r\n        GET / HTTP/1.1\r\n"));
+        // one off-target request among on-target ones excludes the whole template
+        assert!(off(&format!("{}{}", raw("@Host: {{Hostname}}"), raw("@Host: https://evil.test"))));
+        // a raw request written as one escaped string
+        assert!(off("    raw: [\"@Host: https://evil.test\\nGET / HTTP/1.1\\n\\n\"]\n"));
+        assert!(!off("    raw: [\"@Host: {{Hostname}}\\nGET / HTTP/1.1\\n\\n\"]\n"));
+    }
+
+    #[test]
+    fn template_listing_is_parsed_and_resolved_under_the_banner_dir() {
+        let dir = fixture_templates();
+        let out = listing(&dir, &["http/benign.yaml", "http\\cves\\off-target.yaml", ""]);
+        let got = parse_template_listing(&out).unwrap();
+        assert_eq!(
+            got,
+            vec![dir.join("http").join("benign.yaml"), dir.join("http").join("cves").join("off-target.yaml")]
+        );
+        for bad in [
+            "",
+            "\n\n",
+            "nuclei v3.11.1\nhttp/a.yaml\n",
+            "[ERR] could not read templates\n",
+            // banner but nothing listed
+            &listing(&dir, &[]),
+            // banner naming a directory that cannot be read
+            &listing(&dir.join("no-such-dir"), &["http/a.yaml"]),
+        ] {
+            let e = parse_template_listing(bad).unwrap_err();
+            assert_eq!(e.to_string(), "nuclei template listing not recognised", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn off_target_templates_are_excluded_from_every_pass() {
+        let dir = fixture_templates();
+        let mut f = Fake::new();
+        f.listing = listing(
+            &dir,
+            &[
+                "http/benign.yaml",
+                "http\\cves\\off-target.yaml",
+                "http/on-target.yaml",
+                "http/off-localhost.yaml",
+                // listed but unreadable: excluded (fail closed)
+                "http/missing.yaml",
+            ],
+        );
+        let mut e = eng();
+        e.dast.profile = DastProfile::Active;
+        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        // listed once, with no targets, before any scan
+        let texts = f.text_calls.borrow();
+        let tl: Vec<_> = texts.iter().filter(|c| c.1.iter().any(|a| a == "-tl")).collect();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].0, "nuclei");
+        assert_eq!(tl[0].1, ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]);
+        assert!(tl[0].2.is_empty());
+        let want: BTreeSet<PathBuf> = [
+            dir.join("http").join("cves").join("off-target.yaml"),
+            dir.join("http").join("off-localhost.yaml"),
+            dir.join("http").join("missing.yaml"),
+        ]
+        .into_iter()
+        .collect();
+        let excludes = f.nuclei_excludes.borrow();
+        assert_eq!(excludes.len(), 2, "both active passes");
+        for et in excludes.iter() {
+            let got: BTreeSet<PathBuf> = et.as_ref().expect("-et on every pass").iter().map(PathBuf::from).collect();
+            assert_eq!(got, want);
+            assert!(got.iter().all(|p| p.is_absolute()), "{got:?}");
+        }
+        // the -et file is gone afterwards
+        let calls = f.calls.borrow();
+        for c in calls.iter().filter(|c| c.0 == "nuclei") {
+            let p = c.1.windows(2).find(|w| w[0] == "-et").unwrap()[1].clone();
+            assert!(!std::path::Path::new(&p).exists(), "{p} left behind");
+        }
+        assert_eq!(out.summary.templates_excluded, 3);
+        assert_eq!(out.coverage["templates_excluded"], 3);
+        let md = coverage_markdown(&out.coverage);
+        assert!(md.contains("3 templates excluded: they send requests to hosts outside the target"), "{md}");
+    }
+
+    #[test]
+    fn no_off_target_template_means_no_exclusion_note() {
+        let f = Fake::new();
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(out.summary.templates_excluded, 0);
+        assert_eq!(out.coverage["templates_excluded"], 0);
+        assert!(!coverage_markdown(&out.coverage).contains("excluded"));
+    }
+
+    #[test]
+    fn unrecognised_template_listing_fails_closed_before_any_scan() {
+        for bad in ["", "nuclei v3.11.1\n", "Usage: nuclei [flags]\n"] {
+            let mut f = Fake::new();
+            f.listing = bad.into();
+            let e = run_dast(&eng(), &f, None, true).err().expect("must fail closed");
+            assert_eq!(e.to_string(), "nuclei template listing not recognised", "{bad:?}");
+            assert_eq!(f.count("nuclei"), 0, "never scan unfiltered");
+        }
+    }
+
+    /// Manual check against the installed nuclei. It only LISTS templates (no target,
+    /// no network). Run with ProjectDiscovery's bin dir first on PATH:
+    /// `cargo test --bin ascent real_nuclei_listing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_nuclei_listing_excludes_exactly_the_off_target_templates() {
+        let r = crate::runner::ToolRunner::new(ScopeGuard::new(&Engagement::default()), false);
+        let off = off_target_templates(&r).unwrap();
+        eprintln!("{} off-target templates:", off.len());
+        for p in &off {
+            eprintln!("  {}", p.display());
+        }
+        let tl: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"].iter().map(|s| s.to_string()).collect();
+        let before = parse_template_listing(&r.run_text("nuclei", &tl, &[]).unwrap()).unwrap();
+        let dir = TempDir::create().unwrap();
+        let et = dir.path().join("exclude-templates.txt");
+        write_new_lines(&et, &off.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap();
+        let mut args = tl.clone();
+        args.extend(["-et".to_string(), et.to_string_lossy().into_owned()]);
+        let after = parse_template_listing(&r.run_text("nuclei", &args, &[]).unwrap()).unwrap();
+        eprintln!("listed {} -> {} with -et", before.len(), after.len());
+        assert!(off.iter().all(|p| before.contains(p)));
+        assert!(off.iter().all(|p| !after.contains(p)), "nuclei did not honour -et");
+        assert_eq!(before.len() - after.len(), off.len());
+    }
+
+    #[test]
+    fn dry_run_lists_no_templates() {
+        let f = Fake::new();
+        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        assert!(!f.text_calls.borrow().iter().any(|c| c.1.iter().any(|a| a == "-tl")));
+        assert!(!f.calls.borrow().iter().any(|c| c.1.iter().any(|a| a == "-et")));
+        assert_eq!(out.summary.templates_excluded, 0);
     }
 }

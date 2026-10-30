@@ -286,17 +286,19 @@ mod tests {
         fn run_text(
             &self,
             t: &str,
-            _a: &[String],
+            a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(version_of(t))
+            Ok(version_of(t, a))
         }
     }
 
-    /// `-version` output of the real ProjectDiscovery tools.
-    fn version_of(tool: &str) -> String {
+    /// `-version` output of the real ProjectDiscovery tools; `nuclei -tl` lists one
+    /// ordinary fixture template.
+    fn version_of(tool: &str, args: &[String]) -> String {
         match tool {
             "httpx" => "projectdiscovery.io\n[INF] Current Version: v1.12.0".into(),
+            "nuclei" if args.iter().any(|a| a == "-tl") => crate::stages::dast::test_support::benign_listing(),
             _ => "nuclei v3.10.1".into(),
         }
     }
@@ -394,10 +396,10 @@ mod tests {
         fn run_text(
             &self,
             t: &str,
-            _a: &[String],
+            a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(version_of(t))
+            Ok(version_of(t, a))
         }
     }
 
@@ -427,12 +429,12 @@ mod tests {
         fn run_text(
             &self,
             t: &str,
-            _a: &[String],
+            a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
             Ok(match t {
                 "httpx" => "Usage: httpx [OPTIONS] URL".into(),
-                _ => version_of(t),
+                _ => version_of(t, a),
             })
         }
     }
@@ -829,10 +831,10 @@ mod tests {
         fn run_text(
             &self,
             t: &str,
-            _a: &[String],
+            a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(version_of(t))
+            Ok(version_of(t, a))
         }
     }
 
@@ -999,10 +1001,10 @@ mod tests {
         fn run_text(
             &self,
             t: &str,
-            _a: &[String],
+            a: &[String],
             _g: &[String],
         ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(version_of(t))
+            Ok(version_of(t, a))
         }
     }
 
@@ -1048,8 +1050,8 @@ mod tests {
                 let rows = HostRun { leak: None }.run_json(t, a, g)?;
                 Ok(rows.into_iter().filter(|r| r["input"] != "https://d.example.com/").collect())
             }
-            fn run_text(&self, t: &str, _a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
-                Ok(version_of(t))
+            fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+                Ok(version_of(t, a))
             }
         }
         let s = run_pipeline(&eng, &OneDead, &FakeTri, &dir, false, None).unwrap();
@@ -1080,8 +1082,8 @@ mod tests {
                     _ => vec![],
                 })
             }
-            fn run_text(&self, t: &str, _a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
-                Ok(version_of(t))
+            fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+                Ok(version_of(t, a))
             }
         }
         let dir = unique_dir();
