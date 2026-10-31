@@ -777,6 +777,18 @@ pub fn coverage_markdown(cov: &Value) -> String {
             names.join(", ")
         ));
     }
+    let gone: Vec<&str> = cov["stopped_answering"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !gone.is_empty() {
+        notes.push(format!(
+            "stopped answering during the scan: {} — the checks after that point produced no result; the run is INCOMPLETE",
+            gone.join(", ")
+        ));
+    }
     if !notes.is_empty() {
         out.push('\n');
         for n in notes {
@@ -929,9 +941,15 @@ pub fn run_dast(
         }
         // A target that crashed part-way leaves only a minority of failed requests in
         // the trace, so every live seed is probed again: one that no longer answers
-        // means the later checks never reached it.
+        // means the later checks never reached it. A seed that misses the probe once is
+        // retried once. A probe that fails outright counts every seed it covered as not
+        // answering, so the scan's results are kept and the run still fails closed.
         if live {
-            stopped_answering = probe_urls(runner, &seed).map_err(scrubbed)?.1;
+            let dead = |urls: &[String]| probe_urls(runner, urls).map_or_else(|_| urls.to_vec(), |r| r.1);
+            stopped_answering = dead(&seed);
+            if !stopped_answering.is_empty() {
+                stopped_answering = dead(&stopped_answering);
+            }
         }
     }
     let rows = scrub_rows(dedupe_rows(rows), secret);
@@ -942,6 +960,7 @@ pub fn run_dast(
     coverage["request_errors"] = json!(audit.errors);
     coverage["out_of_scope_requests"] = json!(out_of_scope_requests);
     coverage["off_scope_request_count"] = json!(audit.off_scope_count);
+    coverage["stopped_answering"] = json!(stopped_answering);
     Ok(Some(DastOutcome {
         findings: normalise_nuclei(&rows),
         summary: DastSummary {
@@ -1060,6 +1079,10 @@ mod tests {
         dead: Vec<&'static str>,
         /// URLs that answer the httpx probe until nuclei has run, then no longer do.
         down_after_scan: Vec<&'static str>,
+        /// Once nuclei has run, the httpx URL probe fails outright.
+        httpx_err_after_scan: bool,
+        /// URLs that miss only the first httpx probe after the scan.
+        slow_after_scan: Vec<&'static str>,
         /// `httpx -version` output.
         httpx_version: &'static str,
         /// Names subfinder reports for example.com.
@@ -1101,6 +1124,8 @@ mod tests {
                 nuclei_twice: false,
                 dead: vec![],
                 down_after_scan: vec![],
+                httpx_err_after_scan: false,
+                slow_after_scan: vec![],
                 httpx_version: "projectdiscovery.io\n[INF] Current Version: v1.12.0",
                 subs: vec![],
                 nuclei_lists: RefCell::new(vec![]),
@@ -1131,7 +1156,18 @@ mod tests {
                     for w in args.windows(2).filter(|w| w[0] == "-u") {
                         let u = w[1].as_str();
                         if u.contains("://") {
-                            let gone = self.down_after_scan.contains(&u) && self.count("nuclei") > 0;
+                            let scanned = self.count("nuclei") > 0;
+                            if scanned && self.httpx_err_after_scan {
+                                return Err("httpx exited 1".into());
+                            }
+                            // This call is already recorded, so the first probe after the scan sees 1.
+                            let probes_since_scan = {
+                                let calls = self.calls.borrow();
+                                let last = calls.iter().rposition(|c| c.0 == "nuclei");
+                                last.map_or(0, |i| calls[i..].iter().filter(|c| c.0 == "httpx").count())
+                            };
+                            let slow = self.slow_after_scan.contains(&u) && probes_since_scan == 1;
+                            let gone = (self.down_after_scan.contains(&u) && scanned) || slow;
                             if !self.dead.contains(&u) && !gone {
                                 v.push(json!({"input": u, "url": u}));
                             }
@@ -2336,14 +2372,17 @@ mod tests {
         let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
         assert!(out.summary.unreachable_urls.is_empty());
         assert_eq!(out.summary.stopped_answering, vec!["http://localhost:3000/"]);
+        assert_eq!(out.coverage["stopped_answering"], json!(["http://localhost:3000/"]));
+        let md = coverage_markdown(&out.coverage);
+        assert!(md.contains("stopped answering during the scan: http://localhost:3000/ — the checks after that point produced no result; the run is INCOMPLETE"), "{md}");
         // re-probed after the last nuclei pass, with every live seed and no auth header
         let calls = f.calls.borrow();
         let last_nuclei = calls.iter().rposition(|c| c.0 == "nuclei").unwrap();
-        let reprobe = calls
-            .iter()
-            .rposition(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://")))
-            .unwrap();
-        assert!(reprobe > last_nuclei, "re-probe runs after the scan");
+        let reprobe = last_nuclei
+            + calls[last_nuclei..]
+                .iter()
+                .position(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://")))
+                .expect("re-probe runs after the scan");
         let args = &calls[reprobe].1;
         assert!(!args.iter().any(|a| a == "-H" || a.contains(SECRET)), "{args:?}");
         for u in ["http://localhost:3000/", "https://example.com"] {
@@ -2359,9 +2398,34 @@ mod tests {
     }
 
     #[test]
+    fn a_seed_that_misses_one_probe_is_retried_once() {
+        let mut f = Fake::new();
+        f.slow_after_scan = vec!["http://localhost:3000/"];
+        f.down_after_scan = vec!["https://example.com"];
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert_eq!(out.summary.stopped_answering, vec!["https://example.com"]);
+        let calls = f.calls.borrow();
+        let retry = calls.iter().rev().find(|c| c.0 == "httpx").unwrap();
+        // only the URLs that missed the first re-probe are retried
+        assert!(retry.1.contains(&"http://localhost:3000/".to_string()), "{:?}", retry.1);
+        assert!(retry.1.contains(&"https://example.com".to_string()), "{:?}", retry.1);
+        assert_eq!(retry.1.iter().filter(|a| *a == "-u").count(), 2, "{:?}", retry.1);
+    }
+
+    #[test]
+    fn a_failed_re_probe_keeps_the_findings_and_reports_every_seed() {
+        let mut f = Fake::new();
+        f.httpx_err_after_scan = true;
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert!(!out.findings.is_empty(), "the scan's findings are kept");
+        assert_eq!(out.summary.stopped_answering, vec!["http://localhost:3000/", "https://example.com"]);
+    }
+
+    #[test]
     fn a_dry_run_never_re_probes() {
         let f = Fake::new();
-        run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        assert!(out.summary.stopped_answering.is_empty());
         let calls = f.calls.borrow();
         let probes = calls.iter().filter(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://"))).count();
         assert_eq!(probes, 1, "only the up-front probe of the declared URLs");
@@ -2429,5 +2493,6 @@ mod tests {
         assert_eq!(s.scanned, 3);
         assert_eq!((s.requests_sent, s.request_errors, s.off_scope_request_count, s.templates_excluded), (0, 0, 0, 0));
         assert!(s.out_of_scope_requests.is_empty() && s.failing_hosts.is_empty());
+        assert!(s.stopped_answering.is_empty());
     }
 }
