@@ -2,9 +2,9 @@
 
 Ascent is an open-source (Apache-2.0), scope-enforced, human-in-the-loop AppSec pipeline written in Rust. It drives external open-source scanners as subprocesses (opengrep, gitleaks and trivy for source code; nuclei with httpx and katana for running web targets), triages the findings with the offline [Crux](https://github.com/Aldiharley/crux) engine, and produces a ranked report, a hash-chained audit log and native SARIF 2.1.0. A YAML policy turns the result into a CI-friendly verdict. Every network target passes a fail-closed scope guard, and nothing is ever exploited automatically: a human approves each detect-only verification step in a local dashboard.
 
-![Ascent dashboard overview: policy gate verdict, KPI tiles, triaged findings, a pending approval gate and the hash-chained audit log](docs/images/dashboard-overview.png)
+![Ascent dashboard overview: the watchdog greeting, verdict KPI tiles, the policy gate verdict, severity and verdict charts, top findings, pending approval gates and the recent audit log](docs/images/dashboard-overview.png)
 
-*The Overview screen over a demo lab dataset: the policy gate verdict (FAIL, exit code 1) with the top failing findings, the findings table, a pending detect-only approval gate, and the audit log with its "Hash chain OK" check.*
+*The Overview screen after a lab run (OWASP Juice Shop on 127.0.0.1 plus a planted SAST fixture): verdict tiles, the policy gate verdict with its failing findings, severity and verdict charts, top findings, pending detect-only approval gates and the recent audit log.*
 
 Use Ascent only against systems you own or have explicit written permission to test.
 
@@ -194,6 +194,12 @@ Coverage depends on the installed nuclei templates, so the counts differ by vers
 ## Dashboard
 
 A local web dashboard (axum backend, React UI) shows the triaged findings, the pending human-approval gates, the report and the hash-chained audit log, and has a New Scan screen that validates targets and writes an engagement scope file.
+
+The UI uses a soft clay-and-knit theme with a white fluffy watchdog as its mascot. It works at desktop width, as an icon rail on small laptops, and as a bottom tab bar on phones. It is keyboard-operable throughout, honours `prefers-reduced-motion`, and every text colour pair is tested for WCAG AA contrast. The mascot and fabric art are static images under `frontend/public/`, drawn only as CSS backgrounds: scanned data is always rendered as plain text, never as HTML or images.
+
+![Ascent findings screen: verdict filter tiles and the triaged findings table with severity, confidence, verdict, location and CWE mapping](docs/images/dashboard-findings.png)
+
+*The Findings screen: the tiles filter by triage verdict, and the top-bar search filters by title, rule, CWE or path.*
 
 ![Ascent report screen: the ranked markdown report rendered in the dashboard](docs/images/dashboard-report.png)
 
