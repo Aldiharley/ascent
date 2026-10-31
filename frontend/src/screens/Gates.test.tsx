@@ -244,6 +244,31 @@ test("the toast stack is capped at 4, dropping the oldest", async () => {
   );
 });
 
+test("an onDecided that throws neither rejects unhandled nor hides the confirmation", async () => {
+  const unhandled = vi.fn();
+  process.on("unhandledRejection", unhandled);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json([gate()]))
+      .mockResolvedValueOnce(json({ ok: true }));
+    const onDecided = vi.fn(() => {
+      throw new Error("refresh failed for g1 http://lab/secret");
+    });
+    render(<Gates onDecided={onDecided} />);
+    fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+    // The decision was recorded: the user is told so, and the view settles back.
+    expect(await screen.findByText(/recorded in the audit log/i)).toBeInTheDocument();
+    expect(onDecided).toHaveBeenCalledTimes(1);
+    await new Promise((r) => setTimeout(r, 0)); // give a stray rejection time to surface
+    expect(unhandled).not.toHaveBeenCalled();
+    // Nothing is logged: the error text could carry gate or target data.
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    process.off("unhandledRejection", unhandled);
+  }
+});
+
 test("unmounting mid-request and then resolving does not warn or throw", async () => {
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
   let resolve!: (r: Response) => void;
@@ -465,19 +490,19 @@ test("a new version refetches the list and keeps the cards and toasts on screen 
 });
 
 test("a decided gate stays hidden even if a slow refetch still lists it", async () => {
-  vi.spyOn(globalThis, "fetch")
+  const spy = vi
+    .spyOn(globalThis, "fetch")
     .mockResolvedValueOnce(json([gate()]))
     .mockResolvedValueOnce(json({ ok: true }))
-    .mockResolvedValueOnce(json([gate()])); // stale server view
+    // stale server view: still lists the decided gate, plus a new one that proves the payload landed
+    .mockResolvedValueOnce(json([gate(), gate({ id: "g2", title: "Confirm XSS" })]));
   const { rerender } = render(<Gates version={0} />);
   fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
   await screen.findByText(/No actions awaiting approval/i);
   rerender(<Gates version={1} />);
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 20)); // let the refetch land
-  });
+  expect(await screen.findByText("Confirm XSS")).toBeInTheDocument();
+  expect(spy).toHaveBeenCalledTimes(3);
   expect(screen.queryByText("Confirm SSRF")).not.toBeInTheDocument();
-  expect(screen.getByText(/No actions awaiting approval/i)).toBeInTheDocument();
 });
 
 test("a gate without detect-only metadata renders no badge and neither line", async () => {
@@ -719,20 +744,23 @@ test("compact: loading and failure are the shared skeleton and error cards", asy
 // ---- decided ids: pruned when the server stops listing them ----
 
 test("a decided id is forgotten once a newer payload no longer lists it, so a real pending gate with that id shows", async () => {
-  vi.spyOn(globalThis, "fetch")
+  const spy = vi
+    .spyOn(globalThis, "fetch")
     .mockResolvedValueOnce(json([gate()]))
     .mockResolvedValueOnce(json({ ok: true }))
-    .mockResolvedValueOnce(json([])) // the server has recorded the decision
-    .mockResolvedValueOnce(json([gate({ title: "Confirm SSRF again" })])); // later: a new gate, same id
+    // the server has recorded the decision (g1 is gone); g2 proves this payload landed
+    .mockResolvedValueOnce(json([gate({ id: "g2", title: "Confirm XSS" })]))
+    // later: a new gate that reuses the id g1
+    .mockResolvedValueOnce(json([gate({ title: "Confirm SSRF again" }), gate({ id: "g2", title: "Confirm XSS" })]));
   const { rerender } = render(<Gates version={0} />);
   fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
   await screen.findByText(/No actions awaiting approval/i);
   rerender(<Gates version={1} />);
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 20));
-  });
+  expect(await screen.findByText("Confirm XSS")).toBeInTheDocument();
+  expect(spy).toHaveBeenCalledTimes(3);
   expect(screen.queryByText("Confirm SSRF")).not.toBeInTheDocument();
   rerender(<Gates version={2} />);
   expect(await screen.findByText("Confirm SSRF again")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+  expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(2);
+  for (const b of screen.getAllByRole("button", { name: "Approve" })) expect(b).toBeEnabled();
 });

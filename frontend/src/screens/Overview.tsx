@@ -11,7 +11,7 @@ import { usePendingGates } from "../data/gates";
 import { useStaleResource } from "../data/resources";
 import type { Resource, ResourceKey, ResourceMap } from "../data/resources";
 import { Gates } from "./Gates";
-import { ChartSlot, KpiRow, RecentAuditCard, ReportBanner, TopFindingsCard } from "./overviewCards";
+import { ChartSlot, KpiRow, RecentAuditCard, ReportBanner, TopFindingsCard, showsReportBanner } from "./overviewCards";
 
 export interface OverviewProps {
   /** Per-resource version counters from `App`; a bump swaps that data in place. */
@@ -44,6 +44,7 @@ export function Overview({ versions, query, onClearQuery, onNavigate, onOpenFind
   const gates = usePendingGates(versions.gates);
   const gate = useStaleResource("gate", versions.gate);
   const engagement = useStaleResource("engagement", versions.engagement);
+  const report = useStaleResource("report", versions.report);
 
   const summary: HeroSummary = {
     needsReview: findings.status === "ready" ? verdictCounts(findings.data).hu : undefined,
@@ -103,15 +104,18 @@ export function Overview({ versions, query, onClearQuery, onNavigate, onOpenFind
         </ErrorBoundary>
       </div>
 
-      <div className="col-12">
-        <ErrorBoundary>
-          <ReportBanner
-            version={versions.report}
-            onOpenReport={() => onNavigate("report")}
-            onNewScan={() => onNavigate("newscan")}
-          />
-        </ErrorBoundary>
-      </div>
+      {/* No cell at all when the report failed to load: an empty cell would still add a row gap. */}
+      {showsReportBanner(report) ? (
+        <div className="col-12">
+          <ErrorBoundary>
+            <ReportBanner
+              res={report}
+              onOpenReport={() => onNavigate("report")}
+              onNewScan={() => onNavigate("newscan")}
+            />
+          </ErrorBoundary>
+        </div>
+      ) : null}
     </div>
   );
 }

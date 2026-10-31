@@ -2,6 +2,11 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, expect, test, vi } from "vitest";
 import { NewScan } from "./NewScan";
 
+// The hint under the select for the Active profile: backend's standard profile excludes the
+// `intrusive` templates, active keeps them (and adds parameter fuzzing), so the warning says so.
+const ACTIVE_HINT =
+  "Adds intrusive templates and parameter fuzzing — may change application state. Use only on a lab or staging target.";
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
 }
@@ -259,9 +264,14 @@ test("the guidance card explains the three steps with the watchdog, and is repla
   expect(await screen.findByText(/Scan defined: Acme/)).toBeInTheDocument();
   expect(screen.queryByText("What happens next")).toBeNull();
   expect(screen.queryByText("Scope first, always.")).toBeNull();
-  const success = screen.getByRole("status");
+  // A labelled region, not a live region: focus moves to its heading, which is the announcement
+  // (a role="status" on top of that is read twice).
+  const success = screen.getByRole("region", { name: "Scan defined: Acme" });
   expect(success).toHaveClass("ok-card");
-  expect(within(success).getByRole("heading", { level: 3 })).toHaveTextContent("Scan defined: Acme");
+  expect(screen.queryByRole("status")).toBeNull();
+  // A sibling of the form card's h2, not an h3 hanging under it with a level skipped.
+  expect(within(success).getByRole("heading", { level: 2 })).toHaveTextContent("Scan defined: Acme");
+  expect(within(success).queryByRole("heading", { level: 3 })).toBeNull();
   // still two cards in the grid
   expect(container.querySelector(".newscan-grid")?.children).toHaveLength(2);
 });
@@ -294,7 +304,7 @@ test("on success, focus moves to the success heading and the card is scrolled in
     render(<NewScan />);
     fill();
     fireEvent.click(screen.getByRole("button", { name: /create scan/i }));
-    const heading = await screen.findByRole("heading", { level: 3, name: /Scan defined: Acme/ });
+    const heading = await screen.findByRole("heading", { level: 2, name: /Scan defined: Acme/ });
     await waitFor(() => expect(heading).toHaveFocus());
     expect(scroll).toHaveBeenCalledWith({ block: "start" });
   } finally {
@@ -347,10 +357,10 @@ test("the DAST profile hint follows the selection; Active is a warning in a poli
   expect(select).toHaveAccessibleDescription("Fingerprinting and passive checks only. Sends no attack payloads.");
 
   fireEvent.change(select, { target: { value: "active" } });
-  expect(live).toHaveTextContent("Adds parameter fuzzing — use only on targets you may actively test.");
+  expect(live).toHaveTextContent(ACTIVE_HINT);
   expect(live.querySelector(".callout--warn")).not.toBeNull();
   expect(live.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
-  expect(select).toHaveAccessibleDescription(/use only on targets you may actively test/);
+  expect(select).toHaveAccessibleDescription(ACTIVE_HINT);
 
   fireEvent.change(select, { target: { value: "standard" } });
   expect(live.querySelector(".callout--warn")).toBeNull();

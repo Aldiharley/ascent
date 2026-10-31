@@ -42,17 +42,26 @@ function useActiveSection(body: React.RefObject<HTMLElement | null>, sections: r
     if (!root || sections.length === 0 || typeof IntersectionObserver === "undefined") return;
     const ids = new Set(sections.map((s) => s.id));
     const heads = Array.from(root.querySelectorAll("h2")).filter((h) => ids.has(h.id));
-    const visible = new Set<string>();
+    // Where each heading is relative to the observed band, from its latest report: in it, scrolled
+    // past it (above), or still to come (below).
+    const place = new Map<string, "in" | "above" | "below">();
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           const id = (e.target as HTMLElement).id;
-          if (e.isIntersecting) visible.add(id);
-          else visible.delete(id);
+          if (e.isIntersecting) place.set(id, "in");
+          else {
+            const bandTop = e.rootBounds?.top ?? 0;
+            place.set(id, e.boundingClientRect.top < bandTop ? "above" : "below");
+          }
         }
-        // Reading order wins; when no heading is in the band the last one stays marked.
-        const first = sections.find((s) => visible.has(s.id));
-        if (first) setActive(first.id);
+        // The first heading in the band is the one being read. With none in it, the section is the
+        // last heading scrolled past (so scrolling back up moves the mark up too), or none at all
+        // above the first heading.
+        const inBand = sections.find((s) => place.get(s.id) === "in");
+        if (inBand) return setActive(inBand.id);
+        const passed = sections.filter((s) => place.get(s.id) === "above");
+        setActive(passed.length > 0 ? passed[passed.length - 1].id : null);
       },
       { rootMargin: "0px 0px -65% 0px" },
     );

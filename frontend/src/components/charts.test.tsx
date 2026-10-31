@@ -181,6 +181,24 @@ test("donut segments use dasharray/dashoffset with a 3px gap when two or more ar
   expect(segs[0]).toHaveAttribute("transform", "rotate(-90 100 100)");
 });
 
+test("every segment carries the circumference its draw-in animation starts from", () => {
+  const C = 2 * Math.PI * 72;
+  const items = [item("HIGH"), item("HIGH", "ABSTAIN")];
+  const { container } = render(<DonutCard items={items} />);
+  const segs = container.querySelectorAll<SVGCircleElement>("circle.donut-seg");
+  expect(segs).toHaveLength(2);
+  for (const seg of segs) {
+    expect(Number(seg.style.getPropertyValue("--donut-circ"))).toBeCloseTo(C, 2);
+  }
+  // the radius and the circumference are one fact: the dasharray's gap length is the same number
+  expect(Number((segs[0].getAttribute("stroke-dasharray") ?? "").split(" ")[1])).toBeCloseTo(C, 2);
+});
+
+test("the donut and hero art take their colours from tokens, never a hex literal", () => {
+  const { container } = render(<DonutCard items={[item("HIGH")]} />);
+  expect(container.innerHTML).not.toMatch(/#[0-9a-fA-F]{3,6}\b(?!-)/);
+});
+
 test("one drawn segment has no gap and zero-value segments are not drawn", () => {
   const C = 2 * Math.PI * 72;
   const { container } = render(<DonutCard items={[item("HIGH"), item("LOW")]} />);

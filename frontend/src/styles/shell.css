@@ -22,7 +22,7 @@
 .avatar{
   width:116px;height:116px;border-radius:50%;flex:none;
   background:url(/mascot/watchdog-avatar.png) center 58% / 92% no-repeat,
-             radial-gradient(circle at 35% 30%,#eef5f5 0%,#b9d3d6 68%,#8fb3ba 100%);
+             var(--avatar-disc);
   box-shadow:0 0 0 4px var(--slate-550),var(--shadow-clay);
 }
 .sb-word{font:800 22px/1.2 var(--font-display);color:var(--ink-on-dark);margin:0}
@@ -46,7 +46,7 @@
   stroke-linecap:round;stroke-linejoin:round}
 .sb-nav button:hover{background:rgba(255,255,255,.08);color:var(--ink-on-dark);transform:translateY(-1px)}
 .sb-nav button[aria-current="page"]{
-  background:linear-gradient(180deg,#eef4f5 0%,#dbe7e9 100%);color:var(--ink);box-shadow:var(--shadow-clay);
+  background:var(--nav-active);color:var(--ink);box-shadow:var(--shadow-clay);
 }
 .sb-nav button[aria-current="page"] svg{color:var(--teal-600)}
 .sb-nav button:focus-visible{outline:3px solid var(--focus-on-dark);outline-offset:2px}
@@ -173,7 +173,7 @@
   .sb-nav button:hover{transform:none}
   .sb-nav button svg{width:22px;height:22px;box-sizing:content-box;padding:5px 9px;border-radius:12px}
   .sb-nav button[aria-current="page"]{background:transparent;box-shadow:none;color:var(--ink-on-dark)}
-  .sb-nav button[aria-current="page"] svg{background:linear-gradient(180deg,#eef4f5 0%,#dbe7e9 100%);color:var(--teal-600)}
+  .sb-nav button[aria-current="page"] svg{background:var(--nav-active);color:var(--teal-600)}
   /* full label hidden but exposed (accessible name); the short label is the visible one */
   .sb-nav .nav-label,.sb-nav button:hover .nav-label,.sb-nav button:focus-visible .nav-label{
     position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);

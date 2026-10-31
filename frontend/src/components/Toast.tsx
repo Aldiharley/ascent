@@ -53,8 +53,12 @@ export function ToastView({
   const [focused, setFocused] = useState(false);
   const paused = hovered || focused;
   const remaining = useRef(TOAST_MS);
+  // The timer must call the latest onDismiss without being restarted when it changes. The ref is
+  // written in an effect (declared before the timer effect), never during render.
   const dismissRef = useRef(onDismiss);
-  dismissRef.current = onDismiss;
+  useEffect(() => {
+    dismissRef.current = onDismiss;
+  });
   const { key } = toast;
 
   useEffect(() => {
@@ -70,8 +74,10 @@ export function ToastView({
   return (
     <div
       className={`toast toast-${toast.kind}`}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      // Pointer events, and not for touch: a tap fires an emulated hover that no leave ever undoes
+      // (until the next tap elsewhere), which would pin the toast on screen for good.
+      onPointerEnter={(e) => setHovered(e.pointerType !== "touch")}
+      onPointerLeave={() => setHovered(false)}
       onFocus={() => setFocused(true)}
       onBlur={() => setFocused(false)}
     >
@@ -105,21 +111,17 @@ export function ToastStack({
   toasts: ToastItem[];
   onDismiss: (key: number) => void;
 }) {
+  const views = (isError: boolean) =>
+    toasts
+      .filter((t) => (t.kind === "error") === isError)
+      .map((t) => <ToastView key={t.key} toast={t} onDismiss={onDismiss} />);
   return (
     <div className="toast-stack">
       <div aria-live="polite" role="status" className="toast-region">
-        {toasts
-          .filter((t) => t.kind !== "error")
-          .map((t) => (
-            <ToastView key={t.key} toast={t} onDismiss={onDismiss} />
-          ))}
+        {views(false)}
       </div>
       <div aria-live="assertive" role="alert" className="toast-region">
-        {toasts
-          .filter((t) => t.kind === "error")
-          .map((t) => (
-            <ToastView key={t.key} toast={t} onDismiss={onDismiss} />
-          ))}
+        {views(true)}
       </div>
     </div>
   );

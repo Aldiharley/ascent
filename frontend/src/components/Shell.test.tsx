@@ -2,9 +2,17 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { Shell } from "./Shell";
 
+// navigator.clipboard is replaced per test and put back afterwards, so no test sees another's stub.
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+function stubClipboard(writeText: (text: string) => Promise<void>) {
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else delete (navigator as { clipboard?: unknown }).clipboard;
 });
 
 test("renders brand and nav", () => {
@@ -127,6 +135,16 @@ test("pending approvals: a nav badge and a bell badge, with the count on the bel
   expect(container.querySelectorAll(".nav-badge")).toHaveLength(1);
 });
 
+test("the nav badge is capped at 99+ like the bell's, while the bell name keeps the true count", () => {
+  const { container } = render(<Shell pendingGates={150} />);
+  expect(container.querySelector(".nav-badge")).toHaveTextContent("99+");
+  expect(container.querySelector(".icon-btn-badge")).toHaveTextContent("99+");
+  expect(screen.getByRole("button", { name: "Pending approvals: 150" })).toBeInTheDocument();
+  const { container: c2 } = render(<Shell pendingGates={99} />);
+  expect(c2.querySelector(".nav-badge")).toHaveTextContent("99");
+  expect(c2.querySelector(".nav-badge")).not.toHaveTextContent("99+");
+});
+
 test("zero pending approvals shows no badge but still names the count", () => {
   const { container } = render(<Shell pendingGates={0} />);
   expect(screen.getByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
@@ -204,6 +222,21 @@ test("the / key focuses search unless focus is already in a field", () => {
   expect(box).not.toHaveFocus();
 });
 
+test("the / key leaves a keystroke another handler already took", () => {
+  render(<Shell />);
+  const box = screen.getByRole("searchbox", { name: "Search findings" });
+  const claim = (e: Event) => e.preventDefault();
+  document.addEventListener("keydown", claim, true); // runs first (capture), like a widget's own shortcut
+  try {
+    fireEvent.keyDown(document.body, { key: "/", cancelable: true });
+    expect(box).not.toHaveFocus();
+  } finally {
+    document.removeEventListener("keydown", claim, true);
+  }
+  fireEvent.keyDown(document.body, { key: "/", cancelable: true });
+  expect(box).toHaveFocus();
+});
+
 test("on screens that cannot filter live, focusing search explains Enter", () => {
   const { rerender } = render(<Shell active="audit" />);
   const box = screen.getByRole("searchbox", { name: "Search findings" });
@@ -272,7 +305,7 @@ test("View verdict waits for the card to render before focusing it", () => {
 
 test("no verdict yet: explains --policy and copies the flag", async () => {
   const writeText = vi.fn().mockResolvedValue(undefined);
-  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  stubClipboard(writeText);
   vi.useFakeTimers();
   render(<Shell policy={null} />);
   expect(screen.getByText("No verdict yet")).toBeInTheDocument();
@@ -289,9 +322,48 @@ test("no verdict yet: explains --policy and copies the flag", async () => {
   expect(screen.getByRole("button", { name: "Copy --policy flag" })).toBeInTheDocument();
 });
 
+test("copying announces 'Copied' in one polite status region, from the card or the rail button", async () => {
+  stubClipboard(vi.fn().mockResolvedValue(undefined));
+  vi.useFakeTimers();
+  render(<Shell policy={null} />);
+  const live = document.querySelector(".sb-card-live") as HTMLElement;
+  expect(live).toHaveAttribute("role", "status");
+  expect(live).toHaveClass("sr-only");
+  expect(live).toBeEmptyDOMElement(); // always mounted, so the later text is announced
+  // The desktop card button...
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Copy --policy flag" }));
+  });
+  expect(live).toHaveTextContent("Copied --policy flag to the clipboard");
+  act(() => {
+    vi.advanceTimersByTime(1500);
+  });
+  expect(live).toBeEmptyDOMElement();
+  // ...and the icon-rail button (whose accessible name never changes) announce the same thing.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Policy gate: not evaluated" }));
+  });
+  expect(live).toHaveTextContent("Copied --policy flag to the clipboard");
+  expect(document.querySelectorAll(".sb-card-live")).toHaveLength(1);
+});
+
+test("a clipboard failure announces nothing and leaves the label alone", async () => {
+  stubClipboard(vi.fn().mockRejectedValue(new Error("denied")));
+  const { container } = render(<Shell policy={null} />);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Policy gate: not evaluated" }));
+  });
+  expect(container.querySelector(".sb-card-live")).toBeEmptyDOMElement();
+});
+
+test("the live region is not drawn without a policy card", () => {
+  const { container } = render(<Shell />);
+  expect(container.querySelector(".sb-card-live")).toBeNull();
+});
+
 test("a clipboard failure leaves the copy label alone", async () => {
   const writeText = vi.fn().mockRejectedValue(new Error("denied"));
-  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  stubClipboard(writeText);
   render(<Shell policy={null} />);
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy --policy flag" }));

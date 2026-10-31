@@ -20,6 +20,21 @@ test("a heading with nothing to slug still gets a valid id", () => {
   expect(sectionIds(["!!!", "", "???"])).toEqual(["r-section", "r-section-2", "r-section-3"]);
 });
 
+test("the slug is capped at 64 characters, with no dangling dash, and still de-duplicated", () => {
+  const long = "word ".repeat(40); // 200 characters of heading
+  const [one] = sectionIds([long]);
+  expect(one.slice("r-".length).length).toBeLessThanOrEqual(64);
+  expect(one).not.toMatch(/-$/);
+  // The cut can land on a dash: the id never ends with one.
+  const [cut] = sectionIds(["a".repeat(63) + " tail"]);
+  expect(cut).toBe("r-" + "a".repeat(63));
+  // Two headings that only differ after the cut collide on the capped slug, so they get -2.
+  const [a, b, c] = sectionIds(["x".repeat(70) + " one", "x".repeat(70) + " two", "x".repeat(70) + " three"]);
+  expect(new Set([a, b, c]).size).toBe(3);
+  expect(b).toBe(`${a}-2`);
+  expect(c).toBe(`${a}-3`);
+});
+
 test("hostile text can only produce [a-z0-9-]", () => {
   for (const id of sectionIds(['<img src=x onerror=alert(1)>', '"><script>', "constructor", "__proto__", "javascript:alert(1)"])) {
     expect(id).toMatch(/^r-[a-z0-9-]+$/);

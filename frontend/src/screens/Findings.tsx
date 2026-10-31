@@ -96,7 +96,8 @@ export function Findings({
           </h2>
           <span className="count">{total} triaged</span>
           {filtered && total > 0 ? <span className="count">{rows.length} shown</span> : null}
-          {filtered && total > 0 ? clear : null}
+          {/* With no matching rows the message below carries the one reset, so it is not repeated here. */}
+          {filtered && rows.length > 0 ? clear : null}
         </div>
         {total === 0 ? (
           <EmptyState

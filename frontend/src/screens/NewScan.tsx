@@ -24,7 +24,9 @@ const PROFILE_OPTIONS: { value: DastProfile; label: string }[] = [
 const PROFILE_HINTS: Record<DastProfile, string> = {
   passive: "Fingerprinting and passive checks only. Sends no attack payloads.",
   standard: "Passive checks plus known-vulnerability and injection templates. The default.",
-  active: "Adds parameter fuzzing — use only on targets you may actively test.",
+  // The standard profile excludes the `intrusive` templates; active keeps them and adds fuzzing.
+  active:
+    "Adds intrusive templates and parameter fuzzing — may change application state. Use only on a lab or staging target.",
 };
 
 export interface NewScanProps {
@@ -323,14 +325,16 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
       </section>
 
       {submit.status === "created" ? (
-        <section className="card ok-card" role="status" ref={successCard}>
+        // A labelled region rather than a live region: focus moves to the heading, which is what gets
+        // announced (a role="status" on top of that is read twice).
+        <section className="card ok-card" aria-labelledby="ns-success-title" ref={successCard}>
           <div className="ok-head">
             <IconBadge tone="teal" size="sm">
               <IconTick />
             </IconBadge>
-            <h3 ref={successTitle} tabIndex={-1}>
+            <h2 className="card-title" id="ns-success-title" ref={successTitle} tabIndex={-1}>
               Scan defined: {submit.result.name}
-            </h3>
+            </h2>
           </div>
           <ScopeList label="Hosts" items={submit.result.scope.hosts} />
           <ScopeList label="CIDRs" items={submit.result.scope.cidrs} />

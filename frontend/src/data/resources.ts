@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import {
   getAudit,
   getEngagement,
@@ -52,6 +52,28 @@ interface Entry {
   settled?: Settled<unknown>;
 }
 
+// Requests in flight, for the top bar's refresh spinner (any screen's load counts, not only the
+// ones App reads itself). `generation` changes on a cache reset so a request that was already
+// forgotten cannot decrement the count of the ones that replaced it.
+let inFlight = 0;
+let generation = 0;
+const fetchListeners = new Set<() => void>();
+const emitFetching = () => {
+  for (const listener of [...fetchListeners]) listener();
+};
+const subscribeFetching = (listener: () => void) => {
+  fetchListeners.add(listener);
+  return () => {
+    fetchListeners.delete(listener);
+  };
+};
+const isFetching = () => inFlight > 0;
+
+/** True while any resource request is in flight (first loads and refetches alike). */
+export function useIsFetching(): boolean {
+  return useSyncExternalStore(subscribeFetching, isFetching);
+}
+
 // Module-level cache keyed `${key}@${version}`. A request is shared by every consumer of the same
 // key and version; bumping the version (App's `versions`) is how a view asks for fresh data.
 const cache = new Map<string, Entry>();
@@ -65,6 +87,11 @@ const retryListeners = new Set<(id: string) => void>();
 /** Test hook: forget every cached request (called from `src/test/setup.ts` after each test). */
 export function __resetResourceCache(): void {
   cache.clear();
+  generation += 1;
+  if (inFlight !== 0) {
+    inFlight = 0;
+    emitFetching();
+  }
 }
 
 function ensure(key: ResourceKey, version: number): Entry {
@@ -78,13 +105,23 @@ function ensure(key: ResourceKey, version: number): Entry {
     if (k === key && Number(v) < version) cache.delete(other);
   }
   const entry: Entry = { promise: FETCHERS[key]() };
+  const startedIn = generation;
+  const done = () => {
+    if (startedIn !== generation) return;
+    inFlight -= 1;
+    emitFetching();
+  };
+  inFlight += 1;
+  emitFetching();
   entry.promise.then(
     (data) => {
       entry.settled = { ok: true, data };
+      done();
     },
     () => {
       // Errors are never cached: the next consumer (or Retry) asks again.
       if (cache.get(id) === entry) cache.delete(id);
+      done();
     },
   );
   cache.set(id, entry);
@@ -131,7 +168,9 @@ export function useResource<K extends ResourceKey>(
   }, [id]);
 
   const retry = useCallback(() => {
-    cache.delete(id);
+    // Only a failed or still-unsettled entry is dropped: another consumer may have re-requested the
+    // key since this one failed, and its healthy entry must not be thrown away (nor refetched).
+    if (!cache.get(id)?.settled?.ok) cache.delete(id);
     for (const listener of [...retryListeners]) listener(id);
   }, [id]);
 
@@ -157,9 +196,22 @@ export function useStaleResource<K extends ResourceKey>(
   version = 0,
 ): Resource<ResourceMap[K]> {
   const res = useResource(key, version);
-  const last = useRef<{ data: ResourceMap[K] } | null>(null);
-  if (res.status === "ready") last.current = { data: res.data };
-  else if (res.status === "error") last.current = null;
-  if (res.status === "loading" && last.current) return { status: "ready", data: last.current.data };
+  const last = useLastReady(res, true);
+  if (res.status === "loading" && last) return { status: "ready", data: last.data };
   return res;
+}
+
+/**
+ * The most recent payload a resource was `ready` with, as `{ data }` (the box tells a legitimate
+ * `null` payload from "nothing yet"), or `null` before the first one. With `clearOnError` a failure
+ * forgets it; otherwise it is kept (a chip that must not lose a name it already showed).
+ *
+ * Kept in state and adjusted during render (React's "derive state from props" pattern) rather than
+ * in a ref written during render, which concurrent rendering may discard or replay.
+ */
+export function useLastReady<T>(res: Resource<T>, clearOnError = false): { data: T } | null {
+  const [last, setLast] = useState<{ data: T } | null>(null);
+  if (res.status === "ready" && (last === null || last.data !== res.data)) setLast({ data: res.data });
+  else if (res.status === "error" && clearOnError && last !== null) setLast(null);
+  return last;
 }

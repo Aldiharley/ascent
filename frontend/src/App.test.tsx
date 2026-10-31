@@ -253,6 +253,25 @@ test("Refresh data refetches what the shell and the visible screen read", async 
   await waitFor(() => expect(screen.getByRole("button", { name: "Refresh data" })).not.toHaveAttribute("aria-busy"));
 });
 
+test("the refresh icon is busy while the screen's own data loads, not only the shell's", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  mockApi({
+    "/api/findings": async () => {
+      await held;
+      return json([finding]);
+    },
+  });
+  render(<App />);
+  // The shell's own reads (engagement, gates, policy) land first; findings is still in flight.
+  await screen.findByRole("button", { name: "Pending approvals: 1" });
+  await screen.findByText("engagement: ascent-local-lab");
+  expect(screen.getByRole("button", { name: "Refresh data" })).toHaveAttribute("aria-busy", "true");
+  release();
+  expect(await screen.findByText("SSRF in fetch")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh data" })).not.toHaveAttribute("aria-busy"));
+});
+
 test("the sidebar policy card shows the read-only verdict from /api/gate", async () => {
   mockApi({ "/api/gate": () => json(failGate) });
   render(<App />);
@@ -549,9 +568,17 @@ test("the Findings empty state sends you to New scan", async () => {
 
 test("after a decision the bell, the hero and the Approval card agree, even if the refetch is stale", async () => {
   let posted = false;
-  mockApi({
-    // A stale server view: it keeps listing the gate after the decision was recorded.
-    "/api/gates": () => json([gate]),
+  let reads = 0;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const spy = mockApi({
+    // A stale server view: the first read lists one gate; the refetch (held until the test lets it
+    // land) still lists it, the decision not being reflected yet, next to a genuinely new one.
+    "/api/gates": async () => {
+      if (reads++ === 0) return json([gate]);
+      await held;
+      return json([gate, { ...gate, id: "g2", title: "Confirm XSS" }]);
+    },
     "/api/gates/g1/approve": () => {
       posted = true;
       return json({ ok: true });
@@ -561,6 +588,7 @@ test("after a decision the bell, the hero and the Approval card agree, even if t
   await screen.findByRole("button", { name: "Pending approvals: 1" });
   expect(screen.getByText("1 pending")).toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  // At once, before any refetch: the decided gate is gone from every view.
   expect(await screen.findByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
   expect(posted).toBe(true);
   expect(screen.getByText("0 pending")).toBeInTheDocument();
@@ -568,6 +596,15 @@ test("after a decision the bell, the hero and the Approval card agree, even if t
   expect(screen.queryByRole("button", { name: "Review approvals" })).not.toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Welcome" }).textContent).not.toMatch(/approval/i);
   expect(within(screen.getByRole("button", { name: "Approval gates" })).queryByText("1")).not.toBeInTheDocument();
+
+  // The stale refetch lands (the new gate proves it): the decided gate is still hidden everywhere,
+  // and only the genuinely pending one is counted.
+  release();
+  expect(await screen.findByRole("heading", { name: "Confirm XSS" })).toBeInTheDocument();
+  expect(calls(spy, "/api/gates")).toBe(2);
+  expect(screen.queryByRole("heading", { name: "Confirm SSRF" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Pending approvals: 1" })).toBeInTheDocument();
+  expect(screen.getByText("1 pending")).toBeInTheDocument();
 });
 
 test("a decision made on the Approval gates screen is still recorded when you leave before the answer arrives", async () => {

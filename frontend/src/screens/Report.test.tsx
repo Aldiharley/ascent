@@ -156,39 +156,108 @@ test("no index when the report has no h2; the report text is still shown", async
   expect(screen.queryByRole("navigation", { name: "Report sections" })).toBeNull();
 });
 
-test("the active section follows an IntersectionObserver; the link is marked aria-current", async () => {
-  type Cb = (entries: Partial<IntersectionObserverEntry>[]) => void;
-  let cb: Cb = () => {};
-  const observed: Element[] = [];
-  const disconnect = vi.fn();
+type IoCb = (entries: Partial<IntersectionObserverEntry>[]) => void;
+
+/** Stubs IntersectionObserver; resolves to the observed headings and a way to fire the callback. */
+function stubObserver() {
+  const seen = { cb: (() => {}) as IoCb, observed: [] as Element[], disconnect: vi.fn() };
   vi.stubGlobal(
     "IntersectionObserver",
     class {
-      constructor(c: Cb) {
-        cb = c;
+      constructor(c: IoCb) {
+        seen.cb = c;
       }
       observe(el: Element) {
-        observed.push(el);
+        seen.observed.push(el);
       }
       unobserve() {}
-      disconnect = disconnect;
+      disconnect = seen.disconnect;
     },
   );
+  return seen;
+}
+
+// The observed band is the top 300px of the viewport. Where a heading is when it is not in it:
+const IN = { isIntersecting: true };
+const band = { top: 0, bottom: 300 } as DOMRectReadOnly;
+const ABOVE = { isIntersecting: false, boundingClientRect: { top: -40 } as DOMRectReadOnly, rootBounds: band };
+const BELOW = { isIntersecting: false, boundingClientRect: { top: 600 } as DOMRectReadOnly, rootBounds: band };
+
+test("the active section follows an IntersectionObserver; the link is marked aria-current", async () => {
+  const io = stubObserver();
   try {
     mockReport(DOC);
     const { unmount } = render(<Report />);
     const nav = await screen.findByRole("navigation", { name: "Report sections" });
-    await waitFor(() => expect(observed).toHaveLength(3));
+    await waitFor(() => expect(io.observed).toHaveLength(3));
     const links = within(nav).getAllByRole("link");
     expect(links.some((a) => a.hasAttribute("aria-current"))).toBe(false);
-    act(() => cb([{ target: observed[1], isIntersecting: true }]));
+    act(() => io.cb([{ target: io.observed[1], ...IN }]));
     expect(links[1]).toHaveAttribute("aria-current", "location");
     expect(links[0]).not.toHaveAttribute("aria-current");
-    act(() => cb([{ target: observed[1], isIntersecting: false }, { target: observed[2], isIntersecting: true }]));
+    act(() => io.cb([{ target: io.observed[1], ...ABOVE }, { target: io.observed[2], ...IN }]));
     expect(links[2]).toHaveAttribute("aria-current", "location");
     expect(links[1]).not.toHaveAttribute("aria-current");
     unmount();
-    expect(disconnect).toHaveBeenCalled();
+    expect(io.disconnect).toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("scrolling back up moves the mark to the section above, and off it above the first heading", async () => {
+  const io = stubObserver();
+  try {
+    mockReport(DOC);
+    render(<Report />);
+    const nav = await screen.findByRole("navigation", { name: "Report sections" });
+    await waitFor(() => expect(io.observed).toHaveLength(3));
+    const links = within(nav).getAllByRole("link");
+    const current = () => links.map((a) => a.getAttribute("aria-current") === "location");
+    // reading the third section: the first two headings have scrolled past the band
+    act(() =>
+      io.cb([
+        { target: io.observed[0], ...ABOVE },
+        { target: io.observed[1], ...ABOVE },
+        { target: io.observed[2], ...IN },
+      ]),
+    );
+    expect(current()).toEqual([false, false, true]);
+    // scroll up: the third heading drops below the band and no heading is in it, so the section being
+    // read is the second (this used to leave the third marked until another heading entered)
+    act(() => io.cb([{ target: io.observed[2], ...BELOW }]));
+    expect(current()).toEqual([false, true, false]);
+    act(() => io.cb([{ target: io.observed[1], ...BELOW }]));
+    expect(current()).toEqual([true, false, false]);
+    // back above the first heading: nothing is being read yet
+    act(() => io.cb([{ target: io.observed[0], ...BELOW }]));
+    expect(current()).toEqual([false, false, false]);
+    // and scrolling down again picks the sections up in order
+    act(() => io.cb([{ target: io.observed[0], ...IN }]));
+    expect(current()).toEqual([true, false, false]);
+    act(() => io.cb([{ target: io.observed[0], ...ABOVE }]));
+    expect(current()).toEqual([true, false, false]); // between two headings: the last passed one stays
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("opened part-way down, the last heading already passed is the current one", async () => {
+  const io = stubObserver();
+  try {
+    mockReport(DOC);
+    render(<Report />);
+    const nav = await screen.findByRole("navigation", { name: "Report sections" });
+    await waitFor(() => expect(io.observed).toHaveLength(3));
+    const links = within(nav).getAllByRole("link");
+    act(() =>
+      io.cb([
+        { target: io.observed[0], ...ABOVE },
+        { target: io.observed[1], ...ABOVE },
+        { target: io.observed[2], ...BELOW },
+      ]),
+    );
+    expect(links[1]).toHaveAttribute("aria-current", "location");
   } finally {
     vi.unstubAllGlobals();
   }

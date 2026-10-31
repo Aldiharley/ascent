@@ -170,17 +170,20 @@ export function RecentAuditCard({ version, onSeeAll }: { version: number; onSeeA
 
 // ---- Report banner (3.1.6) ----
 
+/** Whether the banner is drawn at all: a failed report fetch is the Report screen's problem. */
+export function showsReportBanner(res: Resource<string>): boolean {
+  return res.status !== "error";
+}
+
 export function ReportBanner({
-  version,
+  res,
   onOpenReport,
   onNewScan,
 }: {
-  version: number;
+  res: Resource<string>;
   onOpenReport: () => void;
   onNewScan: () => void;
 }) {
-  const res = useStaleResource("report", version);
-  // A failed report fetch is the Report screen's problem: the banner simply is not drawn.
   if (res.status === "error") return null;
   if (res.status === "loading") {
     return (

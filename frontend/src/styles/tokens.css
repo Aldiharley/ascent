@@ -31,6 +31,14 @@
   /* violet (SAST category only) */
   --violet-500:#6a63b0;
   --white:#ffffff;
+  /* component stops: colours that exist only inside one gradient or shade (kept here so that no
+     other sheet carries a raw hex) */
+  --mist-50:#eef5f5; --mist-200:#b9d3d6; --mist-300:#8fb3ba;   /* avatar disc */
+  --pill-50:#eef4f5; --pill-100:#dbe7e9;                       /* active nav pill */
+  --paper-100:#eef2f5; --paper-75:#f1f4f6; --paper-50:#f3f6f8; --paper-25:#f7f9fa; /* button, well, zebra stops */
+  --teal-800:#2a6a64; --teal-900:#255e59;                     /* primary button lower stop (rest, hover) */
+  --sand-400:#c9a24a;                                         /* needs-human confidence fill */
+  --dot-active:#6fd0c1;                                       /* live status dot */
 
   /* ---------- semantic: surfaces ---------- */
   --bg:#dbe3e8;                               /* page canvas */
@@ -42,6 +50,8 @@
   --surface-dark: linear-gradient(180deg,var(--slate-700) 0%,var(--slate-800) 100%); /* sidebar */
   --surface-dark-2: linear-gradient(160deg,var(--slate-600) 0%,#3d5266 100%);       /* sidebar card */
   --surface-hero: linear-gradient(120deg,var(--slate-550) 0%,var(--slate-650) 55%,var(--slate-750) 100%);
+  --avatar-disc: radial-gradient(circle at 35% 30%,var(--mist-50) 0%,var(--mist-200) 68%,var(--mist-300) 100%);
+  --nav-active: linear-gradient(180deg,var(--pill-50) 0%,var(--pill-100) 100%);
   --surface-banner: linear-gradient(100deg,var(--sand-100) 0%,var(--sand-200) 100%);
   --code-bg:#e3efee; --code-ink:#1d4a52; --code-border:#c4dedb;
 

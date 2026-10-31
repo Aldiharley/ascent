@@ -48,7 +48,7 @@ function forgetUnlisted(listed: ReadonlySet<string>): void {
 
 /** Test hook: forget every recorded decision (called from `src/test/setup.ts` after each test). */
 export function __resetGateDecisions(): void {
-  decided = new Set();
+  if (decided.size > 0) publish(new Set());
 }
 
 /**

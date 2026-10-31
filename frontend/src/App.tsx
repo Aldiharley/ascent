@@ -1,9 +1,9 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Shell, navTitle } from "./components/Shell";
 import type { NavId, ShellPolicy } from "./components/Shell";
-import { usePendingGates as usePendingGatesResource } from "./data/gates";
-import { RESOURCE_KEYS, useResource } from "./data/resources";
+import { usePendingGates } from "./data/gates";
+import { RESOURCE_KEYS, useIsFetching, useLastReady, useResource } from "./data/resources";
 import type { ResourceKey } from "./data/resources";
 import type { Verdict } from "./api";
 import { Audit } from "./screens/Audit";
@@ -23,47 +23,38 @@ const INITIAL_VERSIONS = Object.fromEntries(RESOURCE_KEYS.map((k) => [k, 0])) as
  *  Refetches whenever `version` changes (e.g. after a new scan is created). While a refetch is in
  *  flight, or if it fails, the last known text stays, so the chip neither flickers nor loses a
  *  name it already showed. */
-function useEngagementStatus(version: number): { status: string; loading: boolean } {
+function useEngagementStatus(version: number): string {
   const res = useResource("engagement", version);
-  const last = useRef(NO_ENGAGEMENT);
-  if (res.status === "ready") {
-    const name = typeof res.data?.name === "string" ? res.data.name.trim() : "";
-    last.current = name ? `engagement: ${name}` : NO_ENGAGEMENT;
-  }
-  // On an error the last known text stays; before any name was loaded it is still the neutral
-  // fallback, so a failing first fetch reads "no engagement loaded".
-  return { status: last.current, loading: res.status === "loading" };
+  // Before any payload (and after a failing first fetch) there is no name: the neutral fallback.
+  const last = useLastReady(res);
+  const name = typeof last?.data?.name === "string" ? last.data.name.trim() : "";
+  return name ? `engagement: ${name}` : NO_ENGAGEMENT;
 }
 
 /** Number of pending approval gates for the nav badge and the bell. Unknown (undefined) until the
  *  first load; a refetch or a failure keeps the last known count so the badge does not flicker.
  *  It reads the same pending list as the Approval gates views (decided gates already subtracted), so
  *  the badge, the bell, the hero and the cards always show one number. */
-function usePendingGates(version: number): { count: number | undefined; loading: boolean } {
-  const res = usePendingGatesResource(version);
-  const last = useRef<number | undefined>(undefined);
-  if (res.status === "ready") last.current = Array.isArray(res.data) ? res.data.length : undefined;
-  return { count: last.current, loading: res.status === "loading" };
+function usePendingCount(version: number): number | undefined {
+  const res = usePendingGates(version);
+  const last = useLastReady(res);
+  return last && Array.isArray(last.data) ? last.data.length : undefined;
 }
 
 /** Policy verdict for the sidebar card: undefined = not loaded or failed (no card), null = no
  *  verdict yet. Read-only: nothing here evaluates a policy. */
-function usePolicy(version: number): { policy: ShellPolicy | null | undefined; loading: boolean } {
+function usePolicy(version: number): ShellPolicy | null | undefined {
   const res = useResource("gate", version);
-  const last = useRef<ShellPolicy | null | undefined>(undefined);
-  if (res.status === "ready") {
-    const g = res.data;
-    last.current = g
-      ? {
-          decision: g.decision,
-          exit_code: typeof g.exit_code === "number" ? g.exit_code : 0,
-          policy: typeof g.policy?.name === "string" ? g.policy.name : "",
-        }
-      : null;
-  } else if (res.status === "error") {
-    last.current = undefined;
-  }
-  return { policy: last.current, loading: res.status === "loading" };
+  const last = useLastReady(res, true);
+  if (!last) return undefined;
+  const g = last.data;
+  return g
+    ? {
+        decision: g.decision,
+        exit_code: typeof g.exit_code === "number" ? g.exit_code : 0,
+        policy: typeof g.policy?.name === "string" ? g.policy.name : "",
+      }
+    : null;
 }
 
 export default function App() {
@@ -85,23 +76,25 @@ export default function App() {
   // navigation like the query.
   const [verdictFilter, setVerdictFilter] = useState<Verdict | "ALL">("ALL");
 
-  const engagement = useEngagementStatus(versions.engagement);
-  const pending = usePendingGates(versions.gates);
+  const status = useEngagementStatus(versions.engagement);
+  const pendingGates = usePendingCount(versions.gates);
   const policy = usePolicy(versions.gate);
+  // The refresh icon spins while any request is in flight, whichever screen asked for it.
+  const refreshing = useIsFetching();
 
   const shell = {
     active,
     onNavigate: setActive,
-    status: engagement.status,
+    status,
     title: navTitle(active),
-    pendingGates: pending.count,
-    policy: policy.policy,
+    pendingGates,
+    policy,
     query,
     onQueryChange: setQuery,
     // Enter in the search box always lands on Findings (a no-op there).
     onSearchSubmit: () => setActive("findings"),
     onRefresh: () => bump(...RESOURCE_KEYS),
-    refreshing: engagement.loading || pending.loading || policy.loading,
+    refreshing,
   };
   const onDecided = () => bump("gates", "audit");
   // "Clear filters" on Findings: the verdict toggle and the search box both go back to empty.

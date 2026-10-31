@@ -361,10 +361,11 @@ test("no match: a message and Clear filters, which resets the verdict filter and
   render(<Harness initial="TRUE_POSITIVE" initialQuery="zzz" />);
   expect(await screen.findByText("No findings match these filters")).toBeInTheDocument();
   expect(screen.queryByRole("table")).toBeNull();
-  // The header offers the same reset; the message's button and the header's both work.
+  // One reset, in the message: the header does not repeat it while the message is showing.
   const buttons = screen.getAllByRole("button", { name: "Clear filters" });
-  expect(buttons.length).toBeGreaterThanOrEqual(1);
-  fireEvent.click(buttons[buttons.length - 1]);
+  expect(buttons).toHaveLength(1);
+  expect(buttons[0].closest(".empty-state")).not.toBeNull();
+  fireEvent.click(buttons[0]);
   expect(rowTitles()).toEqual(["Real one", "Maybe two", "Noise three"]);
   expect(screen.getByLabelText("q")).toHaveValue("");
   expect(tile("Findings")).toHaveAttribute("aria-pressed", "true");

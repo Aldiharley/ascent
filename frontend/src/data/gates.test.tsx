@@ -52,33 +52,47 @@ test("a gate decided before a view mounted is hidden from it", async () => {
 });
 
 test("an id a newer payload no longer lists is forgotten, so a later real pending gate is shown", async () => {
-  vi.spyOn(globalThis, "fetch")
+  const spy = vi
+    .spyOn(globalThis, "fetch")
     .mockResolvedValueOnce(json([gate("a")]))
-    .mockResolvedValueOnce(json([])) // the server recorded the decision
-    .mockResolvedValueOnce(json([gate("a")])); // ...and later proposes a new gate with the same id
+    .mockResolvedValueOnce(json([gate("b")])) // the server recorded the decision on "a"
+    .mockResolvedValueOnce(json([gate("a"), gate("b")])); // ...and later proposes a new gate reusing the id
   const { rerender } = render(<Probe version={0} />);
   await screen.findByText("a");
   act(() => markGateDecided("a"));
   expect(await screen.findByText("none")).toBeInTheDocument();
   rerender(<Probe version={1} />);
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 20)); // payload 2 lands (empty): the id is pruned here
-  });
-  expect(screen.getByTestId("p")).toHaveTextContent("none");
+  // Payload 2 has landed once "b" shows; it no longer lists "a", so the hiding of "a" is pruned there.
+  expect(await screen.findByText("b")).toBeInTheDocument();
+  expect(spy).toHaveBeenCalledTimes(2);
   rerender(<Probe version={2} />);
-  expect(await screen.findByText("a")).toBeInTheDocument();
+  expect(await screen.findByText("a,b")).toBeInTheDocument();
+  expect(spy).toHaveBeenCalledTimes(3);
 });
 
 test("an id a payload still lists stays hidden (a slow or stale refetch must not resurrect it)", async () => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => json([gate("a")]));
+  const spy = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate("a")]))
+    .mockResolvedValueOnce(json([gate("a"), gate("c")])); // still lists the decided "a"
   const { rerender } = render(<Probe version={0} />);
   await screen.findByText("a");
   act(() => markGateDecided("a"));
   rerender(<Probe version={1} />);
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 20));
-  });
-  expect(screen.getByTestId("p")).toHaveTextContent("none");
+  // "c" proves the second payload landed; "a" must still be hidden alongside it.
+  expect(await screen.findByText("c")).toBeInTheDocument();
+  expect(spy).toHaveBeenCalledTimes(2);
+  expect(screen.getByTestId("p")).not.toHaveTextContent("a");
+});
+
+test("__resetGateDecisions publishes: a mounted consumer shows the gate again", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => json([gate("a"), gate("b")]));
+  render(<Probe />);
+  await screen.findByText("a,b");
+  act(() => markGateDecided("a"));
+  expect(screen.getByTestId("p")).toHaveTextContent("b");
+  act(() => __resetGateDecisions());
+  expect(screen.getByTestId("p")).toHaveTextContent("a,b");
 });
 
 test("a failed load is still an error", async () => {

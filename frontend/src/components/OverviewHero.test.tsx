@@ -30,6 +30,11 @@ test("greets by local time of day", () => {
   }
 });
 
+test("the wave art takes its colours from tokens, never a hex literal", () => {
+  const { container } = hero();
+  expect(container.innerHTML).not.toMatch(/#[0-9a-fA-F]{3,6}\b(?!-)/);
+});
+
 test("a named engagement reads 'Watching {name}' with the name in bold", () => {
   const { container } = hero();
   const line = container.querySelector(".hero-eng") as HTMLElement;

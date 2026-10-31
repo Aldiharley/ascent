@@ -222,6 +222,33 @@ test("the prefers-reduced-motion override is a single block, last in the last-lo
   expect(tail.match(/@media/g)).toHaveLength(1);
 });
 
+test("no raw hex colour outside tokens.css: every other sheet reads a token", () => {
+  // Spec 1.3: tokens.css is the one place colours are written. (A `#` in a data: URI is %23-encoded.)
+  for (const [name, css] of [
+    ["base", baseCss], ["components", componentsCss], ["shell", shellCss], ["screens", screensCss],
+  ] as const) {
+    expect(css.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [], `${name}.css`).toEqual([]);
+  }
+});
+
+test("the donut draw-in starts from a custom property the chart sets, not a copied number", () => {
+  expect(screensCss).toMatch(/@keyframes donut-draw\{from\{stroke-dashoffset:var\(--donut-circ\)\}\}/);
+  expect(screensCss).not.toMatch(/stroke-dashoffset:\s*\d/);
+});
+
+test("no rule removes a focus indicator: the success heading keeps the default ring", () => {
+  // The New scan success heading is focused by script; `:focus-visible` shows the ring after a
+  // keyboard submit. Nothing may switch it off without a replacement (spec 5.1).
+  for (const [name, css] of [
+    ["base", baseCss], ["components", componentsCss], ["shell", shellCss], ["screens", screensCss],
+  ] as const) {
+    const offenders = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, sel, body]) => /:focus(?!-visible)/.test(sel) && /outline\s*:\s*(none|0)\b/.test(body))
+      .map(([, sel]) => sel.trim());
+    expect(offenders, `${name}.css`).toEqual([]);
+  }
+});
+
 test("the report section-index title uses --ink on the bare canvas", () => {
   expect(rule(screensCss, ".report-index .idx-title").color).toBe("var(--ink)");
 });

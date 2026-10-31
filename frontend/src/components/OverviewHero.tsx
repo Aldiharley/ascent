@@ -68,7 +68,7 @@ export function OverviewHero({ engagement, summary = {}, onNavigate, now }: Over
         <svg className="hero-waves" viewBox="0 0 520 184" preserveAspectRatio="none" focusable="false">
           <defs>
             <pattern id={`${uid}-knit`} width="4" height="4" patternUnits="userSpaceOnUse">
-              <line x1="0" y1="0.5" x2="4" y2="0.5" stroke="#fff" strokeWidth="1" strokeOpacity=".06" />
+              <line x1="0" y1="0.5" x2="4" y2="0.5" style={{ stroke: "var(--white)" }} strokeWidth="1" strokeOpacity=".06" />
             </pattern>
           </defs>
           <path d={WAVE} style={{ fill: "var(--slate-500)" }} opacity=".35" />

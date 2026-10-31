@@ -6,6 +6,7 @@ import { IconBadge } from "../components/IconBadge";
 import { IconChain } from "../components/icons";
 import { SegmentedControl } from "../components/SegmentedControl";
 import { ErrorCard, LoadingCard } from "../components/StateCards";
+import { useScrollable } from "../components/useScrollable";
 import { useStaleResource } from "../data/resources";
 
 export interface AuditProps {
@@ -27,6 +28,10 @@ const FILTERS: { value: AuditKind; label: string }[] = [
 export function Audit({ version = 0 }: AuditProps = {}) {
   const res = useStaleResource("audit", version);
   const [filter, setFilter] = useState<TypeFilter>("all");
+  // Only a timeline that really scrolls is a tab stop. The hook runs before the loading/error
+  // returns below (hooks cannot be conditional), keyed on what changes what is shown.
+  const rowCount = res.status === "ready" ? res.data.entries.length : 0;
+  const [feedRef, feedScrolls] = useScrollable<HTMLDivElement>([res.status, filter, rowCount]);
 
   if (res.status === "loading") return <LoadingCard caption="Loading audit log…" rows={5} />;
   if (res.status === "error") return <ErrorCard title="Could not load the audit log" onRetry={res.retry} />;
@@ -83,8 +88,14 @@ export function Audit({ version = 0 }: AuditProps = {}) {
         {entries.length === 0 ? (
           <EmptyState size={120} title="No audit entries yet" />
         ) : (
-          // Scrollable, so it must be reachable by keyboard.
-          <div className="feed feed--page" role="region" aria-label="Audit timeline" tabIndex={0}>
+          // When it scrolls, it must be reachable by keyboard.
+          <div
+            className="feed feed--page"
+            role="region"
+            aria-label="Audit timeline"
+            ref={feedRef}
+            tabIndex={feedScrolls ? 0 : undefined}
+          >
             {shown.map(({ entry, i }) => (
               <AuditEntryRow key={entry.entry_hash ?? i} entry={entry} />
             ))}

@@ -74,7 +74,12 @@ export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: Ga
       // not this view is still on screen, so tell everyone before anything that needs a mounted view.
       if (outcome !== "failed") {
         markGateDecided(gate.id);
-        onDecided?.();
+        try {
+          onDecided?.();
+        } catch {
+          // The decision is recorded whatever the app's refresh does, and the user must still be told.
+          // Swallowed without logging: the error text could carry gate or target data.
+        }
       }
       if (!live.current) return;
       if (outcome === "recorded") {
@@ -96,6 +101,10 @@ export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: Ga
           detail: `${gate.title}: could not record the decision. Try again.`,
         });
       }
+    } catch {
+      // Nothing above throws on a network or HTTP failure (postDecision reports those as an outcome),
+      // so this is a bug or a throwing subscriber. It must not become an unhandled rejection of the
+      // click handler; it is not logged for the same data-leak reason as above.
     } finally {
       inFlight.current.delete(gate.id);
       if (live.current) setDecidingFor(gate.id, null);

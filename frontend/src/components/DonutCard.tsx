@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import type { CSSProperties } from "react";
 import type { TriageItem } from "../api";
 import { verdictCounts } from "../data/findingStats";
 import { SegmentedControl } from "./SegmentedControl";
@@ -47,6 +48,7 @@ export function categoryMix(items: readonly TriageItem[]): MixSegment[] {
 
 const R = 72;
 const C = 2 * Math.PI * R;
+const CIRC_VAR = "--donut-circ";
 
 /** "Verdict mix" / "Category mix" card: a clay donut with a legend of counts and percents. */
 export function DonutCard({ items }: { items: readonly TriageItem[] }) {
@@ -91,8 +93,8 @@ export function DonutCard({ items }: { items: readonly TriageItem[] }) {
         <svg viewBox="0 0 200 200" role="img" aria-label={name}>
           <defs>
             <radialGradient id={`${uid}-disc`} cx="50%" cy="40%" r="65%">
-              <stop offset="0" stopColor="#ffffff" />
-              <stop offset="1" stopColor="#eef2f5" />
+              <stop offset="0" style={{ stopColor: "var(--white)" }} />
+              <stop offset="1" style={{ stopColor: "var(--paper-100)" }} />
             </radialGradient>
           </defs>
           <circle
@@ -118,7 +120,8 @@ export function DonutCard({ items }: { items: readonly TriageItem[] }) {
                 strokeDasharray={`${Number(a.dash.toFixed(3))} ${Number(C.toFixed(3))}`}
                 strokeDashoffset={Number(a.offset.toFixed(3))}
                 transform="rotate(-90 100 100)"
-                style={{ stroke: `var(${a.color})` }}
+                // --donut-circ is where the draw-in animation starts from (the full circumference)
+                style={{ stroke: `var(${a.color})`, [CIRC_VAR]: Number(C.toFixed(3)) } as CSSProperties}
               />
             ))}
           </g>

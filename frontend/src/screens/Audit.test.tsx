@@ -266,18 +266,70 @@ test("a selected filter that a refresh empties falls back to All instead of an e
   expect(screen.getByRole("button", { name: "All 1" })).toHaveAttribute("aria-pressed", "true");
 });
 
+/** jsdom does no layout: make every element report these heights for the duration of a test. */
+function stubLayout(scrollHeight: number, clientHeight: number) {
+  const sh = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(scrollHeight);
+  const ch = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(clientHeight);
+  return () => {
+    sh.mockRestore();
+    ch.mockRestore();
+  };
+}
+
 test("the timeline is a labelled, keyboard-scrollable region of rows with hash chips", async () => {
   mockAudit(MIXED);
-  const { container } = render(<Audit />);
-  await screen.findByRole("group", { name: "Show" });
-  const feed = container.querySelector(".feed--page") as HTMLElement;
-  expect(feed).toHaveAttribute("tabindex", "0");
+  const restore = stubLayout(900, 400); // taller than its box: it scrolls
+  try {
+    const { container } = render(<Audit />);
+    await screen.findByRole("group", { name: "Show" });
+    const feed = container.querySelector(".feed--page") as HTMLElement;
+    expect(feed).toHaveAttribute("tabindex", "0");
+    expectFeed(feed);
+  } finally {
+    restore();
+  }
+});
+
+test("a timeline that fits its box is not a tab stop: there is nothing to scroll", async () => {
+  mockAudit(MIXED);
+  const restore = stubLayout(400, 400); // e.g. a phone, where the feed is not height-capped
+  try {
+    const { container } = render(<Audit />);
+    await screen.findByRole("group", { name: "Show" });
+    const feed = container.querySelector(".feed--page") as HTMLElement;
+    expect(feed).not.toHaveAttribute("tabindex");
+    expectFeed(feed); // still a labelled region with its rows
+  } finally {
+    restore();
+  }
+});
+
+test("the tab stop follows the content: filtering a long timeline down to a few rows drops it", async () => {
+  mockAudit(MIXED);
+  let overflow = true;
+  const sh = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => (overflow ? 900 : 100));
+  const ch = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(400);
+  try {
+    const { container } = render(<Audit />);
+    const group = await screen.findByRole("group", { name: "Show" });
+    const feed = () => container.querySelector(".feed--page") as HTMLElement;
+    expect(feed()).toHaveAttribute("tabindex", "0");
+    overflow = false;
+    fireEvent.click(within(group).getByRole("button", { name: "Policy 1" }));
+    expect(feed()).not.toHaveAttribute("tabindex");
+  } finally {
+    sh.mockRestore();
+    ch.mockRestore();
+  }
+});
+
+function expectFeed(feed: HTMLElement) {
   expect(feed).toHaveAttribute("role", "region");
   expect(feed).toHaveAccessibleName("Audit timeline");
   expect(feed.querySelectorAll(".audit-hash")).toHaveLength(6);
   expect(feed.querySelectorAll(".audit-hash")[0]).toHaveTextContent("a".repeat(12));
   expect(feed.querySelectorAll("img")).toHaveLength(0);
-});
+}
 
 test("empty log: chain card, 0 entries, the resting watchdog at 120px and no filter", async () => {
   mockAudit({ entries: [], chain_ok: true });

@@ -1,9 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import type { ComponentType, FormEvent, KeyboardEvent, ReactNode } from "react";
-import type { GateDecisionKind } from "../api";
-import { Button } from "./Button";
-import { IconBadge } from "./IconBadge";
-import type { BadgeTone } from "./IconBadge";
 import {
   IconBell,
   IconChain,
@@ -16,7 +12,10 @@ import {
   IconTarget,
 } from "./icons";
 import type { IconProps } from "./icons";
-import { VerdictPill } from "./VerdictPill";
+import { SidebarPolicyCard } from "./SidebarPolicyCard";
+import type { ShellPolicy } from "./SidebarPolicyCard";
+
+export type { ShellPolicy };
 
 export type NavId = "overview" | "newscan" | "findings" | "gates" | "report" | "audit";
 
@@ -47,25 +46,10 @@ export function navTitle(id: NavId): string {
   return Object.hasOwn(TITLES, id) ? TITLES[id] : TITLES.overview;
 }
 
-// Policy card badge tone per decision. Fixed table: the tone is never taken from API text.
-const POLICY_TONES: Record<GateDecisionKind, BadgeTone> = {
-  PASS: "teal",
-  CONDITIONAL: "sand",
-  FAIL: "coral",
-  INCOMPLETE: "bluegrey",
-};
-
-const POLICY_FLAG = "--policy ascent-policy.yaml";
 const POLICY_TITLE_ID = "policy-gate-title";
 
 /** Screens whose content the search field filters live; elsewhere Enter opens Findings. */
 const LIVE_SEARCH: readonly NavId[] = ["findings", "overview"];
-
-export interface ShellPolicy {
-  decision: GateDecisionKind;
-  exit_code: number;
-  policy: string;
-}
 
 export interface ShellProps {
   children?: ReactNode;
@@ -137,7 +121,8 @@ export function Shell({
   // "/" focuses search unless focus is already in a text field.
   useEffect(() => {
     function onKey(e: globalThis.KeyboardEvent) {
-      if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+      // Not a keystroke some other handler already took (a widget's own "/" shortcut).
+      if (e.key !== "/" || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
       const t = e.target;
       if (t instanceof HTMLElement && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) {
         return;
@@ -175,29 +160,6 @@ export function Shell({
     setVerdictRequest((n) => n + 1);
   }
 
-  const [copied, setCopied] = useState(false);
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(copyTimer.current), []);
-
-  async function copyFlag() {
-    try {
-      await navigator.clipboard.writeText(POLICY_FLAG);
-      setCopied(true);
-      clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setCopied(false);
-    }
-  }
-
-  const decision: GateDecisionKind | null = policy
-    ? Object.hasOwn(POLICY_TONES, policy.decision)
-      ? policy.decision
-      : "INCOMPLETE"
-    : null;
-  const tone: BadgeTone = decision ? POLICY_TONES[decision] : "bluegrey";
-  const policyLine = policy ? (policy.policy ? `exit ${policy.exit_code} · ${policy.policy}` : `exit ${policy.exit_code}`) : "";
-
   const pending = typeof pendingGates === "number" && pendingGates > 0 ? pendingGates : 0;
   const bellName = typeof pendingGates === "number" ? `Pending approvals: ${pendingGates}` : "Pending approvals";
 
@@ -233,7 +195,7 @@ export function Shell({
                 </span>
                 {id === "gates" && pending > 0 ? (
                   <span className="nav-badge" aria-hidden="true">
-                    {pending}
+                    {pending > 99 ? "99+" : pending}
                   </span>
                 ) : null}
               </button>
@@ -243,46 +205,7 @@ export function Shell({
 
         <div className="sb-spacer" />
 
-        {policy !== undefined ? (
-          <section className="sb-card">
-            <IconBadge tone={tone}>
-              <IconShieldCheck />
-            </IconBadge>
-            <h2 className="sb-card-title">Policy gate</h2>
-            {policy ? (
-              <>
-                <VerdictPill decision={decision} />
-                <p className="sb-card-line" title={policyLine}>
-                  {policyLine}
-                </p>
-                <Button variant="ghost-dark" size="sm" onClick={viewVerdict}>
-                  View verdict
-                </Button>
-              </>
-            ) : (
-              <>
-                <p className="sb-card-strong">No verdict yet</p>
-                <p className="sb-card-note">
-                  Add --policy to <code>ascent run</code> for a CI exit code.
-                </p>
-                <Button variant="ghost-dark" size="sm" onClick={copyFlag}>
-                  {copied ? "Copied" : "Copy --policy flag"}
-                </Button>
-              </>
-            )}
-            {/* Icon rail (1024-1279px): the card collapses to this one round button. */}
-            <button
-              type="button"
-              className="sb-card-rail"
-              aria-label={`Policy gate: ${decision ?? "not evaluated"}`}
-              onClick={policy ? viewVerdict : copyFlag}
-            >
-              <IconBadge tone={tone} size="lg">
-                <IconShieldCheck />
-              </IconBadge>
-            </button>
-          </section>
-        ) : null}
+        {policy !== undefined ? <SidebarPolicyCard policy={policy} onViewVerdict={viewVerdict} /> : null}
       </nav>
 
       <div className="main">

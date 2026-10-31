@@ -2,11 +2,22 @@ import { act, fireEvent, render, renderHook, screen } from "@testing-library/rea
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { TOAST_MS, ToastStack, useToasts } from "./Toast";
 
+// jsdom has no PointerEvent: a MouseEvent that also carries `pointerType`, which the toast reads.
+class FakePointerEvent extends MouseEvent {
+  readonly pointerType: string;
+  constructor(type: string, init: MouseEventInit & { pointerType?: string } = {}) {
+    super(type, init);
+    this.pointerType = init.pointerType ?? "";
+  }
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.stubGlobal("PointerEvent", FakePointerEvent);
 });
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 function Harness() {
@@ -79,19 +90,33 @@ test("hovering pauses the timer, leaving resumes with the time that was left", (
   act(() => {
     vi.advanceTimersByTime(3000);
   });
-  fireEvent.mouseEnter(toast);
+  fireEvent.pointerEnter(toast, { pointerType: "mouse" });
   act(() => {
     vi.advanceTimersByTime(60_000);
   });
   expect(screen.getByText("Saved")).toBeInTheDocument();
   expect(vi.getTimerCount()).toBe(0);
-  fireEvent.mouseLeave(toast);
+  fireEvent.pointerLeave(toast, { pointerType: "mouse" });
   act(() => {
     vi.advanceTimersByTime(1900);
   });
   expect(screen.getByText("Saved")).toBeInTheDocument();
   act(() => {
     vi.advanceTimersByTime(200);
+  });
+  expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+});
+
+test("a touch tap does not pause the timer: its emulated hover never sends a leave", () => {
+  render(<Harness />);
+  fire("ok");
+  const toast = screen.getByText("Saved").closest(".toast") as HTMLElement;
+  // A tap makes the browser fire pointerenter (pointerType "touch") plus emulated mouse events, and
+  // no pointerleave until the next tap elsewhere: pausing on it would pin the toast on screen.
+  fireEvent.pointerEnter(toast, { pointerType: "touch" });
+  fireEvent.mouseEnter(toast);
+  act(() => {
+    vi.advanceTimersByTime(TOAST_MS + 10);
   });
   expect(screen.queryByText("Saved")).not.toBeInTheDocument();
 });
@@ -135,6 +160,19 @@ test("toast text is rendered as text, not markup", () => {
   const { container } = render(<ToastStack toasts={result.current.toasts} onDismiss={() => undefined} />);
   expect(container.querySelector(".m b")?.textContent).toBe("<b>x</b>");
   expect(container.querySelector("img")).toBeNull();
+});
+
+test("a newer onDismiss is the one a timer calls (no stale closure)", () => {
+  const first = vi.fn();
+  const second = vi.fn();
+  const toast = { key: 7, kind: "ok" as const, title: "T", detail: "d" };
+  const { rerender } = render(<ToastStack toasts={[toast]} onDismiss={first} />);
+  rerender(<ToastStack toasts={[toast]} onDismiss={second} />);
+  act(() => {
+    vi.advanceTimersByTime(TOAST_MS + 10);
+  });
+  expect(first).not.toHaveBeenCalled();
+  expect(second).toHaveBeenCalledWith(7);
 });
 
 test("a toast carries only its own classes: the legacy gate-toast hook is gone", () => {

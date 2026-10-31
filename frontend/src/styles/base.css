@@ -16,8 +16,8 @@ body::before{ /* moodboard fabric, decorative */
   content:""; position:fixed; inset:auto 0 0 auto; width:min(1400px,90vw); height:min(470px,40vh);
   background:url(/textures/fabric-wave.jpg) right bottom / cover no-repeat;
   opacity:.28; pointer-events:none; z-index:-1;
-  -webkit-mask-image:linear-gradient(to top,#000 40%,transparent 100%);
-          mask-image:linear-gradient(to top,#000 40%,transparent 100%);
+  -webkit-mask-image:linear-gradient(to top,black 40%,transparent 100%);
+          mask-image:linear-gradient(to top,black 40%,transparent 100%);
 }
 
 /* form controls inherit the UI font instead of the browser default */

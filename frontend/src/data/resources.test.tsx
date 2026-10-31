@@ -1,6 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { RESOURCE_KEYS, __resetResourceCache, useResource, useStaleResource } from "./resources";
+import {
+  RESOURCE_KEYS,
+  __resetResourceCache,
+  useIsFetching,
+  useResource,
+  useStaleResource,
+} from "./resources";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
@@ -176,6 +182,27 @@ describe("retry", () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
+  test("a retry never evicts a healthy entry another consumer is showing", async () => {
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json({}, 500))
+      .mockResolvedValueOnce(json([{ id: "g1" }]));
+    const failed = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(failed.result.current.status).toBe("error"));
+    // A later mount finds the failure evicted, asks again, and succeeds: the shared entry is healthy.
+    const healthy = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(healthy.result.current.status).toBe("ready"));
+    expect(spy).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      if (failed.result.current.status === "error") failed.result.current.retry();
+    });
+    await waitFor(() => expect(failed.result.current.status).toBe("ready"));
+    // The healthy consumer never flashed back to loading, and nothing was fetched a third time.
+    expect(healthy.result.current).toEqual({ status: "ready", data: [{ id: "g1" }] });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
   test("a retry of one key leaves consumers of other keys alone", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
       String(input) === "/api/gates" ? json({}, 500) : json({ name: "lab" }),
@@ -233,6 +260,45 @@ describe("useStaleResource", () => {
     const { result } = renderHook(() => useStaleResource("gates"));
     expect(result.current.status).toBe("loading");
     await waitFor(() => expect(result.current.status).toBe("error"));
+  });
+});
+
+describe("useIsFetching", () => {
+  test("is true while any request is in flight, false once they settle", async () => {
+    let release!: (r: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockReturnValue(new Promise<Response>((r) => (release = r)));
+    const probe = renderHook(() => useIsFetching());
+    expect(probe.result.current).toBe(false);
+    const reader = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(probe.result.current).toBe(true));
+    release(json([]));
+    await waitFor(() => expect(reader.result.current.status).toBe("ready"));
+    await waitFor(() => expect(probe.result.current).toBe(false));
+  });
+
+  test("a failed request also ends it, and a cache hit never starts it", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      String(input) === "/api/gates" ? json({}, 500) : json({ name: "lab" }),
+    );
+    const probe = renderHook(() => useIsFetching());
+    const failing = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(failing.result.current.status).toBe("error"));
+    await waitFor(() => expect(probe.result.current).toBe(false));
+    const ok = renderHook(() => useResource("engagement"));
+    await waitFor(() => expect(ok.result.current.status).toBe("ready"));
+    ok.unmount();
+    renderHook(() => useResource("engagement")); // served from the cache
+    expect(probe.result.current).toBe(false);
+  });
+
+  test("__resetResourceCache forgets requests that are still in flight", async () => {
+    vi.spyOn(globalThis, "fetch").mockReturnValue(new Promise<Response>(() => undefined));
+    const probe = renderHook(() => useIsFetching());
+    const reader = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(probe.result.current).toBe(true));
+    reader.unmount();
+    act(() => __resetResourceCache());
+    expect(probe.result.current).toBe(false);
   });
 });
 

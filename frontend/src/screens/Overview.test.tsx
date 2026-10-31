@@ -403,6 +403,10 @@ test("the banner is omitted when the report cannot be loaded", async () => {
   await waitFor(() => expect(spyCalled("/api/report")).toBe(true));
   expect(container.querySelector(".banner")).toBeNull();
   expect(screen.queryByText("Could not load the report")).toBeNull();
+  // ...and it leaves no empty grid cell behind (an empty cell still adds a row gap).
+  const cells = Array.from(container.querySelectorAll(".grid > *"));
+  expect(cells.length).toBeGreaterThan(0);
+  for (const cell of cells) expect(cell.childElementCount, cell.className).toBeGreaterThan(0);
 });
 
 function spyCalled(path: string): boolean {
@@ -450,11 +454,13 @@ test("bumping versions swaps the data in place instead of remounting", async () 
 });
 
 test("a decision empties the hero summary and the Approval card together, even if the refetch is stale", async () => {
+  let reads = 0;
   mockApi({
-    "/api/gates": () => json([gate]), // stale: still lists the decided gate
+    // stale: every later read still lists the decided gate, next to a genuinely new one
+    "/api/gates": () => json(reads++ === 0 ? [gate] : [gate, { ...gate, id: "g2", title: "Confirm XSS" }]),
     "/api/gates/g1/approve": () => json({ ok: true }),
   });
-  const { container, props } = overview();
+  const { container, props, rerender } = overview();
   await waitFor(() => expect(container.querySelector(".hero-sum")).toHaveTextContent("1 approval pending"));
   expect(screen.getByText("1 pending")).toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
@@ -462,4 +468,12 @@ test("a decision empties the hero summary and the Approval card together, even i
   await waitFor(() => expect(container.querySelector(".hero-sum")?.textContent ?? "").not.toMatch(/approval/));
   expect(screen.queryByRole("button", { name: "Review approvals" })).toBeNull();
   expect(props.onDecided).toHaveBeenCalledTimes(1);
+
+  // `App` answers onDecided with a refetch; the stale answer must not bring the decided gate back.
+  rerender(<Overview {...props} versions={{ ...zeroVersions, gates: 1 }} />);
+  expect(await screen.findByRole("heading", { name: "Confirm XSS" })).toBeInTheDocument();
+  expect(reads).toBe(2);
+  expect(screen.queryByRole("heading", { name: "Confirm SSRF" })).toBeNull();
+  expect(screen.getByText("1 pending")).toBeInTheDocument();
+  expect(container.querySelector(".hero-sum")).toHaveTextContent("1 approval pending");
 });
