@@ -134,6 +134,20 @@ export function Shell({
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
+  // ---- screen changes move focus to the page title (WCAG 2.4.3, spec 5.1) ----
+  // Many in-screen controls navigate ("See all", KPI tiles, hero and banner CTAs, "N more in Approval
+  // gates"...) and unmount themselves with the old screen, which would drop focus to <body>. The new
+  // screen's h1 takes it instead, so the change is announced and Tab continues from the top of the
+  // page. Not on the first render, and declared before the "View verdict" effect below so that one,
+  // which targets a specific heading, runs last and wins.
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const shownScreen = useRef(active);
+  useEffect(() => {
+    if (shownScreen.current === active) return;
+    shownScreen.current = active;
+    titleRef.current?.focus();
+  }, [active]);
+
   // ---- policy mini-card ----
   // "View verdict": go to Overview, then focus the policy card heading once it exists (its data may
   // still be loading), so keyboard and screen-reader users land on it.
@@ -210,7 +224,7 @@ export function Shell({
 
       <div className="main">
         <header className="topbar">
-          <h1 className="page-title">
+          <h1 className="page-title" ref={titleRef} tabIndex={-1}>
             <span className="sr-only">Ascent Console: </span>
             {heading}
           </h1>

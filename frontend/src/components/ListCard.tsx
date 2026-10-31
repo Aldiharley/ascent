@@ -1,5 +1,5 @@
 import { useId } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { Button } from "./Button";
 
 export interface ListCardProps {
@@ -12,16 +12,18 @@ export interface ListCardProps {
    */
   seeAll?: { label: string; onClick(): void };
   headExtra?: ReactNode;
+  /** Given: the title can take focus from script (`tabIndex=-1`), e.g. after a row removes itself. */
+  titleRef?: Ref<HTMLHeadingElement>;
   children: ReactNode;
 }
 
 /** Card with a heading row (title, count, extras, See all) over a list of rows. */
-export function ListCard({ title, count, seeAll, headExtra, children }: ListCardProps) {
+export function ListCard({ title, count, seeAll, headExtra, titleRef, children }: ListCardProps) {
   const titleId = useId();
   return (
     <section className="card list-card" aria-labelledby={titleId}>
       <div className="card-head">
-        <h2 className="card-title" id={titleId}>
+        <h2 className="card-title" id={titleId} ref={titleRef} tabIndex={titleRef ? -1 : undefined}>
           {title}
         </h2>
         {count !== undefined && count !== null && count !== false ? (

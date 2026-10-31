@@ -360,6 +360,11 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
                 {copied ? "Copied" : "Copy"}
               </Button>
             </div>
+            {/* The button's new name is not announced on its own. Mounted (empty) with the card, so
+                only the copy confirmation is ever spoken here, never the card itself. */}
+            <div role="status" className="sr-only">
+              {copied ? "Copied the run command to the clipboard" : ""}
+            </div>
             <p className="hint">
               Add <code>--policy samples/ascent-policy.example.yaml</code> to gate the run: the
               command then exits 1 when the policy fails, ready for CI.

@@ -313,10 +313,87 @@ test("unmounting mid-request and then failing neither refreshes the app nor warn
   const { unmount } = render(<Gates onDecided={onDecided} />);
   fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
   unmount();
-  resolve(json({ error: "boom" }, 500));
-  await new Promise((r) => setTimeout(r, 0));
+  // A positive signal that the failure was actually examined, so the negatives below are not vacuous.
+  const failure = json({ error: "boom" }, 500);
+  const statusRead = vi.fn();
+  Object.defineProperty(failure, "ok", {
+    get() {
+      statusRead();
+      return false;
+    },
+  });
+  resolve(failure);
+  await waitFor(() => expect(statusRead).toHaveBeenCalled());
+  await new Promise((r) => setTimeout(r, 0)); // and every continuation of it has run
   expect(errors).not.toHaveBeenCalled();
   expect(onDecided).not.toHaveBeenCalled(); // nothing was recorded
+});
+
+// ---- focus after a decision (WCAG 2.4.3): the decided card is gone, so focus must not drop to <body> ----
+
+test("page: after a recorded decision focus moves to the Approval required heading", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockResolvedValueOnce(json({ ok: true }));
+  render(<Gates />);
+  const approve = await screen.findByRole("button", { name: "Approve" });
+  approve.focus();
+  fireEvent.click(approve);
+  await screen.findByText(/recorded in the audit log/i);
+  const heading = screen.getByRole("heading", { level: 2, name: "Approval required" });
+  await waitFor(() => expect(heading).toHaveFocus());
+  expect(heading).toHaveAttribute("tabindex", "-1");
+});
+
+test("page: after an already-decided answer focus also moves to the heading", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockResolvedValueOnce(json({ error: "decided" }, 409));
+  render(<Gates />);
+  fireEvent.click(await screen.findByRole("button", { name: "Deny" }));
+  await screen.findByText("Already decided");
+  await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "Approval required" })).toHaveFocus());
+});
+
+test("compact: after a recorded decision focus moves to the card's Approval required heading", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockResolvedValueOnce(json({ ok: true }));
+  render(<Gates variant="compact" onSeeAll={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  await screen.findByText(/recorded in the audit log/i);
+  const heading = screen.getByRole("heading", { level: 2, name: "Approval required" });
+  await waitFor(() => expect(heading).toHaveFocus());
+});
+
+test("a failed decision keeps the card and does not move focus", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockResolvedValueOnce(json({ error: "boom" }, 500));
+  render(<Gates />);
+  const approve = await screen.findByRole("button", { name: "Approve" });
+  fireEvent.click(approve);
+  await screen.findByText("Decision not recorded");
+  expect(screen.getByRole("heading", { level: 2, name: "Approval required" })).not.toHaveFocus();
+});
+
+test("a decision that lands after the user moved focus elsewhere does not steal it", async () => {
+  let resolve!: (r: Response) => void;
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(json([gate()]))
+    .mockReturnValueOnce(new Promise<Response>((r) => (resolve = r)));
+  render(
+    <>
+      <input aria-label="Elsewhere" />
+      <Gates />
+    </>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  const elsewhere = screen.getByRole("textbox", { name: "Elsewhere" });
+  act(() => elsewhere.focus());
+  resolve(json({ ok: true }));
+  await screen.findByText(/recorded in the audit log/i);
+  expect(elsewhere).toHaveFocus();
 });
 
 test("a gate decided in a view that was then unmounted stays hidden when the list comes back", async () => {

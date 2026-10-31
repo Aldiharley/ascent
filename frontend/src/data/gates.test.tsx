@@ -1,6 +1,6 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import { __resetGateDecisions, markGateDecided, usePendingGates } from "./gates";
+import { __resetGateDecisions, forgetAllGateDecisions, markGateDecided, usePendingGates } from "./gates";
 
 function json(body: unknown) {
   return new Response(JSON.stringify(body));
@@ -17,9 +17,10 @@ function Probe({ version = 0, label = "p" }: { version?: number; label?: string 
   );
 }
 
+// The decided set is reset by src/test/setup.ts after RTL's cleanup has unmounted every Probe;
+// resetting it here, before the cleanup, would update mounted Probes outside act().
 afterEach(() => {
   vi.restoreAllMocks();
-  __resetGateDecisions();
 });
 
 test("lists the pending gates", async () => {
@@ -92,6 +93,19 @@ test("__resetGateDecisions publishes: a mounted consumer shows the gate again", 
   act(() => markGateDecided("a"));
   expect(screen.getByTestId("p")).toHaveTextContent("b");
   act(() => __resetGateDecisions());
+  expect(screen.getByTestId("p")).toHaveTextContent("a,b");
+});
+
+test("forgetAllGateDecisions (a new engagement) shows every listed gate again", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => json([gate("a"), gate("b")]));
+  render(<Probe />);
+  await screen.findByText("a,b");
+  act(() => {
+    markGateDecided("a");
+    markGateDecided("b");
+  });
+  expect(screen.getByTestId("p")).toHaveTextContent("none");
+  act(() => forgetAllGateDecisions());
   expect(screen.getByTestId("p")).toHaveTextContent("a,b");
 });
 

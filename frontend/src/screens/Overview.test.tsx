@@ -209,17 +209,46 @@ test("while findings load: skeleton tiles under one status, no buttons", () => {
   expect(container.querySelector(".kpi-row button.kpi")).toBeNull();
 });
 
-test("when findings fail: one alert for the tiles, card alerts for charts and the list, and Retry recovers all", async () => {
+test("when findings fail: four error cards but only the KPI row's announces, and Retry recovers all", async () => {
   let fail = true;
   mockApi({ "/api/findings": () => (fail ? json({}, 500) : json([finding("a")])) });
-  overview();
-  await waitFor(() => expect(screen.getAllByRole("alert").length).toBeGreaterThanOrEqual(4));
+  const { container } = overview();
+  await waitFor(() => expect(screen.getAllByText("Could not load findings")).toHaveLength(4));
+  // One resource, one announcement: the first card (the KPI row) is the alert, the others are quiet.
+  // (The Approval card's always-mounted, empty toast alert region is not a load error.)
+  const alerts = screen.getAllByRole("alert").filter((a) => /Could not load/.test(a.textContent ?? ""));
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]).toHaveTextContent("Could not load findings");
+  expect(container.querySelector(".grid > :nth-child(2)")).toContainElement(alerts[0]);
+  expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(4);
   expect(screen.queryByRole("heading", { level: 2, name: "Findings by severity" })).toBeNull();
   fail = false;
   fireEvent.click(screen.getAllByRole("button", { name: "Retry" })[0]);
   expect(await screen.findByText("Title a")).toBeInTheDocument();
   expect(screen.getByRole("heading", { level: 2, name: "Findings by severity" })).toBeInTheDocument();
   expect(screen.queryByText("Could not load findings")).toBeNull();
+});
+
+test("with the backend down there is one alert per resource, not one per card", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => json({}, 500));
+  overview();
+  await waitFor(() => expect(screen.getAllByText("Could not load findings")).toHaveLength(4));
+  await screen.findByText("Could not load approval gates");
+  await screen.findByText("Could not load the audit log");
+  await screen.findByText("Could not load the policy gate");
+  // findings (KPI row), approval gates, audit log, policy gate: the engagement and the report fail quietly.
+  expect(screen.getAllByRole("alert")).toHaveLength(4);
+});
+
+// ---- card entrance (spec 1.9) ----
+
+test("the grid cells enter once, staggered by grid order (the stylesheet caps the stagger at six)", async () => {
+  mockApi();
+  const { container } = overview();
+  await screen.findByText("Title a");
+  const cells = Array.from(container.querySelectorAll(".grid > *"));
+  expect(cells.length).toBeGreaterThanOrEqual(8);
+  for (const cell of cells) expect(cell).toHaveClass("card--enter");
 });
 
 // ---- charts ----

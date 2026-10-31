@@ -46,18 +46,26 @@ function forgetUnlisted(listed: ReadonlySet<string>): void {
   if (keep.size !== decided.size) publish(keep);
 }
 
+/**
+ * Forget every recorded decision. Called when a new scan is created: the decided ids belong to the
+ * previous engagement, and a gate of the new one may reuse an id.
+ */
+export function forgetAllGateDecisions(): void {
+  if (decided.size > 0) publish(new Set());
+}
+
 /** Test hook: forget every recorded decision (called from `src/test/setup.ts` after each test). */
 export function __resetGateDecisions(): void {
-  if (decided.size > 0) publish(new Set());
+  forgetAllGateDecisions();
 }
 
 /**
  * The gates still awaiting a decision: the `gates` resource minus the ones decided in this
- * session. Same loading/error/ready contract (and stale-while-revalidate behaviour) as
- * `useStaleResource`; `data.length` is the one pending count to show anywhere.
+ * session. Same loading/error/ready contract (and stale-while-revalidate behaviour, reset by a new
+ * `epoch`) as `useStaleResource`; `data.length` is the one pending count to show anywhere.
  */
-export function usePendingGates(version = 0): Resource<Gate[]> {
-  const res = useStaleResource("gates", version);
+export function usePendingGates(version = 0, epoch = 0): Resource<Gate[]> {
+  const res = useStaleResource("gates", version, epoch);
   const ids = useSyncExternalStore(subscribe, snapshot);
   const list = res.status === "ready" && Array.isArray(res.data) ? res.data : undefined;
 

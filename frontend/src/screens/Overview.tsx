@@ -52,53 +52,62 @@ export function Overview({ versions, query, onClearQuery, onNavigate, onOpenFind
     decision: gate.status === "ready" ? (gate.data ? gate.data.decision : null) : undefined,
   };
 
+  // Every grid cell plays the card entrance once, when the Overview mounts (spec 1.9). The stagger
+  // (40ms by grid order, capped at the sixth cell) comes from `.card--enter:nth-child(...)`, the
+  // cells being the grid's children; reduced motion collapses it to an instant, undelayed paint.
   return (
     <div className="grid">
-      <div className="col-12">
+      <div className="col-12 card--enter">
         <ErrorBoundary>
           <OverviewHero engagement={heroEngagement(engagement)} summary={summary} onNavigate={onNavigate} />
         </ErrorBoundary>
       </div>
 
-      <div className="col-12">
+      {/* A findings failure shows in four cards; only the first (this row) is announced. */}
+      <div className="col-12 card--enter">
         <ErrorBoundary>
           <KpiRow res={findings} onOpen={onOpenFindings} />
         </ErrorBoundary>
       </div>
 
-      <div className="col-12">
+      <div className="col-12 card--enter">
         <ErrorBoundary>
           <PolicyGate version={versions.gate} />
         </ErrorBoundary>
       </div>
 
-      <div className="col-7">
+      <div className="col-7 card--enter">
         <ErrorBoundary>
-          <ChartSlot res={findings}>{(items) => <SeverityBarChart items={items} />}</ChartSlot>
+          <ChartSlot res={findings} announce={false}>
+            {(items) => <SeverityBarChart items={items} />}
+          </ChartSlot>
         </ErrorBoundary>
       </div>
-      <div className="col-5">
+      <div className="col-5 card--enter">
         <ErrorBoundary>
-          <ChartSlot res={findings}>{(items) => <DonutCard items={items} />}</ChartSlot>
+          <ChartSlot res={findings} announce={false}>
+            {(items) => <DonutCard items={items} />}
+          </ChartSlot>
         </ErrorBoundary>
       </div>
 
-      <div className="col-4">
+      <div className="col-4 card--enter">
         <ErrorBoundary>
           <TopFindingsCard
             res={findings}
             query={query}
             onClearQuery={onClearQuery}
             onSeeAll={() => onNavigate("findings")}
+            announce={false}
           />
         </ErrorBoundary>
       </div>
-      <div className="col-4">
+      <div className="col-4 card--enter">
         <ErrorBoundary>
           <Gates variant="compact" version={versions.gates} onDecided={onDecided} onSeeAll={() => onNavigate("gates")} />
         </ErrorBoundary>
       </div>
-      <div className="col-4 col-last">
+      <div className="col-4 col-last card--enter">
         <ErrorBoundary>
           <RecentAuditCard version={versions.audit} onSeeAll={() => onNavigate("audit")} />
         </ErrorBoundary>
@@ -106,7 +115,7 @@ export function Overview({ versions, query, onClearQuery, onNavigate, onOpenFind
 
       {/* No cell at all when the report failed to load: an empty cell would still add a row gap. */}
       {showsReportBanner(report) ? (
-        <div className="col-12">
+        <div className="col-12 card--enter">
           <ErrorBoundary>
             <ReportBanner
               res={report}

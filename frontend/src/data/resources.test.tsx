@@ -4,9 +4,11 @@ import {
   RESOURCE_KEYS,
   __resetResourceCache,
   useIsFetching,
+  useLastReady,
   useResource,
   useStaleResource,
 } from "./resources";
+import type { Resource } from "./resources";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
@@ -155,9 +157,14 @@ describe("useResource", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     let resolve!: (r: Response) => void;
     vi.spyOn(globalThis, "fetch").mockReturnValue(new Promise<Response>((r) => (resolve = r)));
+    const probe = renderHook(() => useIsFetching());
     const { unmount } = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(probe.result.current).toBe(true));
     unmount();
     resolve(json([]));
+    // A positive signal first: the request has settled (and the unmounted consumer's continuation,
+    // queued right behind it, has run), so the negative below is not vacuous.
+    await waitFor(() => expect(probe.result.current).toBe(false));
     await new Promise((r) => setTimeout(r, 0));
     expect(errors).not.toHaveBeenCalled();
   });
@@ -200,6 +207,29 @@ describe("retry", () => {
     await waitFor(() => expect(failed.result.current.status).toBe("ready"));
     // The healthy consumer never flashed back to loading, and nothing was fetched a third time.
     expect(healthy.result.current).toEqual({ status: "ready", data: [{ id: "g1" }] });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  test("a retry while another consumer's request is in flight joins it instead of sending a second GET", async () => {
+    let release!: (r: Response) => void;
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json({}, 500))
+      .mockReturnValueOnce(new Promise<Response>((r) => (release = r)));
+    const failed = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(failed.result.current.status).toBe("error"));
+    // A later mount finds the failure evicted and asks again; that request is still in flight.
+    const later = renderHook(() => useResource("gates"));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+    expect(later.result.current.status).toBe("loading");
+
+    act(() => {
+      if (failed.result.current.status === "error") failed.result.current.retry();
+    });
+    expect(spy).toHaveBeenCalledTimes(2);
+    release(json([{ id: "g1" }]));
+    await waitFor(() => expect(failed.result.current).toEqual({ status: "ready", data: [{ id: "g1" }] }));
+    await waitFor(() => expect(later.result.current).toEqual({ status: "ready", data: [{ id: "g1" }] }));
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
@@ -260,6 +290,51 @@ describe("useStaleResource", () => {
     const { result } = renderHook(() => useStaleResource("gates"));
     expect(result.current.status).toBe("loading");
     await waitFor(() => expect(result.current.status).toBe("error"));
+  });
+});
+
+describe("useLastReady", () => {
+  type R = Resource<string>;
+  const ready = (data: string): R => ({ status: "ready", data });
+  const loading: R = { status: "loading" };
+  const failed: R = { status: "error", retry: () => {} };
+
+  test("keeps the last payload through a reload and a failure within one epoch", () => {
+    const { result, rerender } = renderHook(({ res, epoch }: { res: R; epoch: number }) => useLastReady(res, false, epoch), {
+      initialProps: { res: ready("one"), epoch: 0 },
+    });
+    expect(result.current).toEqual({ data: "one" });
+    rerender({ res: loading, epoch: 0 });
+    expect(result.current).toEqual({ data: "one" });
+    rerender({ res: failed, epoch: 0 });
+    expect(result.current).toEqual({ data: "one" });
+  });
+
+  test("a new epoch forgets the payload: loading and a failure then have nothing to show", () => {
+    const { result, rerender } = renderHook(({ res, epoch }: { res: R; epoch: number }) => useLastReady(res, false, epoch), {
+      initialProps: { res: ready("one"), epoch: 0 },
+    });
+    rerender({ res: loading, epoch: 1 });
+    expect(result.current).toBeNull();
+    rerender({ res: failed, epoch: 1 });
+    expect(result.current).toBeNull();
+    rerender({ res: ready("two"), epoch: 1 });
+    expect(result.current).toEqual({ data: "two" });
+  });
+
+  test("useStaleResource does not serve the previous epoch's payload while the new one loads", async () => {
+    let release!: (r: Response) => void;
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json({ name: "one" }))
+      .mockReturnValueOnce(new Promise<Response>((r) => (release = r)));
+    const { result, rerender } = renderHook(({ v, epoch }) => useStaleResource("engagement", v, epoch), {
+      initialProps: { v: 0, epoch: 0 },
+    });
+    await waitFor(() => expect(result.current).toEqual({ status: "ready", data: { name: "one" } }));
+    rerender({ v: 1, epoch: 1 });
+    expect(result.current.status).toBe("loading");
+    release(json({ name: "two" }));
+    await waitFor(() => expect(result.current).toEqual({ status: "ready", data: { name: "two" } }));
   });
 });
 

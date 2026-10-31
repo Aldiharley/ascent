@@ -168,9 +168,11 @@ export function useResource<K extends ResourceKey>(
   }, [id]);
 
   const retry = useCallback(() => {
-    // Only a failed or still-unsettled entry is dropped: another consumer may have re-requested the
-    // key since this one failed, and its healthy entry must not be thrown away (nor refetched).
-    if (!cache.get(id)?.settled?.ok) cache.delete(id);
+    // Only a failed entry is dropped (failures normally evict themselves, so usually there is nothing
+    // to drop). Another consumer may have re-requested the key since this one failed: its entry, in
+    // flight or settled, is joined by the listeners below, never thrown away and fetched a second time.
+    const entry = cache.get(id);
+    if (entry?.settled && !entry.settled.ok) cache.delete(id);
     for (const listener of [...retryListeners]) listener(id);
   }, [id]);
 
@@ -194,9 +196,12 @@ export function useResource<K extends ResourceKey>(
 export function useStaleResource<K extends ResourceKey>(
   key: K,
   version = 0,
+  epoch = 0,
 ): Resource<ResourceMap[K]> {
   const res = useResource(key, version);
-  const last = useLastReady(res, true);
+  // A new `epoch` (a new engagement) has no stale payload worth showing: the old one is not "the
+  // same data, a moment ago" any more.
+  const last = useLastReady(res, true, epoch);
   if (res.status === "loading" && last) return { status: "ready", data: last.data };
   return res;
 }
@@ -206,12 +211,19 @@ export function useStaleResource<K extends ResourceKey>(
  * `null` payload from "nothing yet"), or `null` before the first one. With `clearOnError` a failure
  * forgets it; otherwise it is kept (a chip that must not lose a name it already showed).
  *
+ * Changing `epoch` forgets it too: App bumps the epoch when a new scan is created, because the last
+ * payload then describes an engagement the console no longer reflects. An ordinary refresh keeps the
+ * epoch, so it keeps the payload.
+ *
  * Kept in state and adjusted during render (React's "derive state from props" pattern) rather than
  * in a ref written during render, which concurrent rendering may discard or replay.
  */
-export function useLastReady<T>(res: Resource<T>, clearOnError = false): { data: T } | null {
-  const [last, setLast] = useState<{ data: T } | null>(null);
-  if (res.status === "ready" && (last === null || last.data !== res.data)) setLast({ data: res.data });
-  else if (res.status === "error" && clearOnError && last !== null) setLast(null);
-  return last;
+export function useLastReady<T>(res: Resource<T>, clearOnError = false, epoch = 0): { data: T } | null {
+  const [state, setState] = useState<{ epoch: number; last: { data: T } | null }>({ epoch, last: null });
+  const last = state.epoch === epoch ? state.last : null;
+  let next = last;
+  if (res.status === "ready" && (last === null || last.data !== res.data)) next = { data: res.data };
+  else if (res.status === "error" && clearOnError) next = null;
+  if (state.epoch !== epoch || next !== state.last) setState({ epoch, last: next });
+  return next;
 }

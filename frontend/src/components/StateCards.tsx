@@ -5,12 +5,23 @@ export const BACKEND_HINT = "check that the Ascent backend is running";
 
 /**
  * Load-failure card: fixed text only (a response body can carry scanned data) and a Retry.
- * `ErrorState` is the one `role="alert"`.
+ * `ErrorState` is the one `role="alert"`, unless `announce={false}` (another card already announces
+ * the same failure).
  */
-export function ErrorCard({ title, onRetry, detail = BACKEND_HINT }: { title: string; onRetry: () => void; detail?: string }) {
+export function ErrorCard({
+  title,
+  onRetry,
+  detail = BACKEND_HINT,
+  announce = true,
+}: {
+  title: string;
+  onRetry: () => void;
+  detail?: string;
+  announce?: boolean;
+}) {
   return (
     <section className="card">
-      <ErrorState title={title} detail={detail} onRetry={onRetry} />
+      <ErrorState title={title} detail={detail} onRetry={onRetry} announce={announce} />
     </section>
   );
 }

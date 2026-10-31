@@ -1,6 +1,12 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { NewScan } from "./NewScan";
+
+// navigator.clipboard is replaced per test and put back afterwards, so no test sees another's stub.
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+function stubClipboard(writeText: (text: string) => Promise<void>) {
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+}
 
 // The hint under the select for the Active profile: backend's standard profile excludes the
 // `intrusive` templates, active keeps them (and adds parameter fuzzing), so the warning says so.
@@ -26,6 +32,8 @@ function created(over: Record<string, unknown> = {}) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else delete (navigator as { clipboard?: unknown }).clipboard;
 });
 
 test("creating a scan posts parsed targets with the CSRF header and shows the run command", async () => {
@@ -268,7 +276,9 @@ test("the guidance card explains the three steps with the watchdog, and is repla
   // (a role="status" on top of that is read twice).
   const success = screen.getByRole("region", { name: "Scan defined: Acme" });
   expect(success).toHaveClass("ok-card");
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(success).not.toHaveAttribute("role");
+  // The only live region in it is the (still empty) copy confirmation, so nothing is read twice.
+  for (const s of screen.queryAllByRole("status")) expect(s).toBeEmptyDOMElement();
   // A sibling of the form card's h2, not an h3 hanging under it with a level skipped.
   expect(within(success).getByRole("heading", { level: 2 })).toHaveTextContent("Scan defined: Acme");
   expect(within(success).queryByRole("heading", { level: 3 })).toBeNull();
@@ -278,7 +288,7 @@ test("the guidance card explains the three steps with the watchdog, and is repla
 
 test("the success card shows the copyable run command and Copy turns into Copied", async () => {
   const writeText = vi.fn().mockResolvedValue(undefined);
-  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  stubClipboard(writeText);
   vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(created()));
   const { container } = render(<NewScan />);
   fill();
@@ -294,6 +304,50 @@ test("the success card shows the copyable run command and Copy turns into Copied
   // hosts, cidrs and urls are listed as text chips
   expect(container.querySelector(".ok-card")).toHaveTextContent("example.com");
   expect(container.querySelector(".ok-card")).toHaveTextContent("10.0.0.0/24");
+});
+
+test("a copy is announced in a polite status region, which empties again with the label", async () => {
+  stubClipboard(vi.fn().mockResolvedValue(undefined));
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(created()));
+  render(<NewScan />);
+  fill();
+  fireEvent.click(screen.getByRole("button", { name: /create scan/i }));
+  const success = await screen.findByRole("region", { name: "Scan defined: Acme" });
+  // Mounted (empty) with the card, so the text appearing in it is what gets announced.
+  const live = within(success).getByRole("status");
+  expect(live).toBeEmptyDOMElement();
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    });
+    expect(live).toHaveTextContent("Copied the run command to the clipboard");
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(live).toBeEmptyDOMElement();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a failed copy announces nothing", async () => {
+  stubClipboard(vi.fn().mockRejectedValue(new Error("denied")));
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(created()));
+  render(<NewScan />);
+  fill();
+  fireEvent.click(screen.getByRole("button", { name: /create scan/i }));
+  const success = await screen.findByRole("region", { name: "Scan defined: Acme" });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+  });
+  expect(within(success).getByRole("status")).toBeEmptyDOMElement();
+  expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+});
+
+test("the clipboard stub does not leak: navigator.clipboard is back to its original after each test", () => {
+  expect(Object.getOwnPropertyDescriptor(navigator, "clipboard")).toEqual(originalClipboard);
 });
 
 test("on success, focus moves to the success heading and the card is scrolled into view", async () => {

@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import { Shell } from "./Shell";
+import type { NavId } from "./Shell";
 
 // navigator.clipboard is replaced per test and put back afterwards, so no test sees another's stub.
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
@@ -284,6 +286,40 @@ test("View verdict goes to Overview and focuses the policy card heading", () => 
   expect(onNavigate).toHaveBeenCalledWith("overview");
   expect(target).toHaveFocus();
   expect(target.scrollIntoView).toHaveBeenCalledTimes(1);
+});
+
+test("a screen change moves focus to the page title; the first render does not", () => {
+  const { rerender } = render(<Shell active="overview" />);
+  const h1 = screen.getByRole("heading", { level: 1 });
+  expect(h1).toHaveAttribute("tabindex", "-1");
+  expect(h1).not.toHaveFocus();
+  rerender(<Shell active="findings" />);
+  expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+  // A re-render on the same screen leaves focus wherever the user put it.
+  const box = screen.getByRole("searchbox", { name: "Search findings" });
+  act(() => box.focus());
+  rerender(<Shell active="findings" status="engagement: lab" />);
+  expect(box).toHaveFocus();
+});
+
+test("View verdict from another screen lands on the policy card heading, not the page title", () => {
+  // The screen change and the verdict request commit together; the verdict focus must win.
+  function Harness() {
+    const [active, setActive] = useState<NavId>("audit");
+    return (
+      <Shell policy={{ decision: "PASS", exit_code: 0, policy: "ci" }} active={active} onNavigate={setActive}>
+        {active === "overview" ? (
+          <h2 id="policy-gate-title" tabIndex={-1}>
+            Policy gate
+          </h2>
+        ) : null}
+      </Shell>
+    );
+  }
+  render(<Harness />);
+  fireEvent.click(screen.getByRole("button", { name: "View verdict" }));
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Overview");
+  expect(document.getElementById("policy-gate-title")).toHaveFocus();
 });
 
 test("View verdict waits for the card to render before focusing it", () => {

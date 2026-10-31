@@ -46,6 +46,11 @@ export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: Ga
   const inFlight = useRef<Set<string>>(new Set());
   const live = useRef(true);
   const introId = useId();
+  // The "Approval required" heading of whichever variant is drawn, and (page variant) the view's
+  // root: after a decision the decided card disappears, and focus goes to the heading instead of
+  // dropping to <body>.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const pageRoot = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     live.current = true;
@@ -61,6 +66,19 @@ export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: Ga
       else next.delete(id);
       return next;
     });
+  }
+
+  /**
+   * Focus the heading, unless the user has since put focus somewhere outside this view (typing in
+   * the search box while the answer was on its way): only a focus that was lost (on <body>) or is
+   * still inside the view, on the card that is about to disappear, is moved.
+   */
+  function focusHeading() {
+    const el = heading.current;
+    if (!el) return;
+    const root = variant === "compact" ? el.closest("section") : pageRoot.current;
+    const at = document.activeElement;
+    if (!at || at === document.body || root?.contains(at)) el.focus();
   }
 
   async function decide(gate: Gate, decision: GateDecision) {
@@ -101,10 +119,13 @@ export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: Ga
           detail: `${gate.title}: could not record the decision. Try again.`,
         });
       }
+      // The decided card is gone (a failed one stays, and so does focus on its buttons).
+      if (outcome !== "failed") focusHeading();
     } catch {
       // Nothing above throws on a network or HTTP failure (postDecision reports those as an outcome),
       // so this is a bug or a throwing subscriber. It must not become an unhandled rejection of the
-      // click handler; it is not logged for the same data-leak reason as above.
+      // click handler. Logged as one constant line: the error itself could carry gate or target data.
+      console.error("gate decision handler failed");
     } finally {
       inFlight.current.delete(gate.id);
       if (live.current) setDecidingFor(gate.id, null);
@@ -156,6 +177,7 @@ export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: Ga
       <>
         <ListCard
           title="Approval required"
+          titleRef={heading}
           count={`${gates.length} pending`}
           seeAll={onSeeAll ? { label: "approval gates", onClick: onSeeAll } : undefined}
         >
@@ -183,14 +205,14 @@ export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: Ga
 
   return (
     <>
-      <div className="stack">
+      <div className="stack" ref={pageRoot}>
         <section className="card intro-strip" aria-labelledby={introId}>
           <IconBadge tone="ice">
             <IconShieldCheck />
           </IconBadge>
           <div className="intro-text">
             <div className="intro-head">
-              <h2 className="card-title" id={introId}>
+              <h2 className="card-title" id={introId} ref={heading} tabIndex={-1}>
                 Approval required
               </h2>
               <span className="count">{gates.length} pending</span>

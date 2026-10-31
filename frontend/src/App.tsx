@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Shell, navTitle } from "./components/Shell";
 import type { NavId, ShellPolicy } from "./components/Shell";
-import { usePendingGates } from "./data/gates";
+import { forgetAllGateDecisions, usePendingGates } from "./data/gates";
 import { RESOURCE_KEYS, useIsFetching, useLastReady, useResource } from "./data/resources";
 import type { ResourceKey } from "./data/resources";
 import type { Verdict } from "./api";
@@ -20,24 +20,26 @@ type Versions = Record<ResourceKey, number>;
 const INITIAL_VERSIONS = Object.fromEntries(RESOURCE_KEYS.map((k) => [k, 0])) as Versions;
 
 /** Sidebar status text; anything but a named engagement is the neutral fallback.
- *  Refetches whenever `version` changes (e.g. after a new scan is created). While a refetch is in
- *  flight, or if it fails, the last known text stays, so the chip neither flickers nor loses a
- *  name it already showed. */
-function useEngagementStatus(version: number): string {
+ *  Refetches whenever `version` changes. While a Refresh is in flight, or if it fails, the last
+ *  known text stays, so the chip neither flickers nor loses a name it already showed. A new
+ *  `epoch` (a scan was just created) drops it: that name belongs to the previous engagement, so
+ *  until the new one loads (or if it fails to) the chip shows the neutral fallback. */
+function useEngagementStatus(version: number, epoch: number): string {
   const res = useResource("engagement", version);
   // Before any payload (and after a failing first fetch) there is no name: the neutral fallback.
-  const last = useLastReady(res);
+  const last = useLastReady(res, false, epoch);
   const name = typeof last?.data?.name === "string" ? last.data.name.trim() : "";
   return name ? `engagement: ${name}` : NO_ENGAGEMENT;
 }
 
 /** Number of pending approval gates for the nav badge and the bell. Unknown (undefined) until the
- *  first load; a refetch or a failure keeps the last known count so the badge does not flicker.
+ *  first load; a refetch or a failure keeps the last known count so the badge does not flicker,
+ *  except across a new `epoch` (the count was the previous engagement's).
  *  It reads the same pending list as the Approval gates views (decided gates already subtracted), so
  *  the badge, the bell, the hero and the cards always show one number. */
-function usePendingCount(version: number): number | undefined {
-  const res = usePendingGates(version);
-  const last = useLastReady(res);
+function usePendingCount(version: number, epoch: number): number | undefined {
+  const res = usePendingGates(version, epoch);
+  const last = useLastReady(res, false, epoch);
   return last && Array.isArray(last.data) ? last.data.length : undefined;
 }
 
@@ -76,8 +78,17 @@ export default function App() {
   // navigation like the query.
   const [verdictFilter, setVerdictFilter] = useState<Verdict | "ALL">("ALL");
 
-  const status = useEngagementStatus(versions.engagement);
-  const pendingGates = usePendingCount(versions.gates);
+  // Bumped only when a new scan is created: what the shell remembers about the previous engagement
+  // (its name, its pending count) is dropped rather than carried over to the new one.
+  const [epoch, setEpoch] = useState(0);
+  const onCreated = () => {
+    forgetAllGateDecisions();
+    setEpoch((e) => e + 1);
+    bump(...RESOURCE_KEYS);
+  };
+
+  const status = useEngagementStatus(versions.engagement, epoch);
+  const pendingGates = usePendingCount(versions.gates, epoch);
   const policy = usePolicy(versions.gate);
   // The refresh icon spins while any request is in flight, whichever screen asked for it.
   const refreshing = useIsFetching();
@@ -108,7 +119,7 @@ export default function App() {
       return (
         <Shell {...shell}>
           <ErrorBoundary key="newscan">
-            <NewScan onCreated={() => bump(...RESOURCE_KEYS)} />
+            <NewScan onCreated={onCreated} />
           </ErrorBoundary>
         </Shell>
       );

@@ -109,34 +109,146 @@ test("topbar falls back to a neutral status when the engagement fetch fails", as
   await waitFor(() => expect(screen.getByText(/no engagement loaded/)).toBeInTheDocument());
 });
 
-test("a failed engagement refetch keeps the last known name", async () => {
-  let calls = 0;
-  mockApi({
-    "/api/engagement": () => (++calls === 1 ? json({ name: "ascent-local-lab" }) : json({ error: "x" }, 500)),
-    "/api/engagements": () =>
-      json({
-        ok: true,
-        name: "Acme",
-        path: "engagements/acme.yaml",
-        scope: { hosts: ["example.com"], cidrs: [], urls: [] },
-        source: "",
-        dast: { profile: "standard", auth_header: "" },
-        run_command: "ascent run --engagement engagements/acme.yaml --out out",
-      }),
+const createdAcme = () =>
+  json({
+    ok: true,
+    name: "Acme",
+    path: "engagements/acme.yaml",
+    scope: { hosts: ["example.com"], cidrs: [], urls: [] },
+    source: "",
+    dast: { profile: "standard", auth_header: "" },
+    run_command: "ascent run --engagement engagements/acme.yaml --out out",
   });
-  render(<App />);
-  expect(await screen.findByText(/engagement: ascent-local-lab/)).toBeInTheDocument();
 
+/** Fill the New scan form and create "Acme"; resolves once the success card is up. */
+async function createScan() {
   fireEvent.click(screen.getByRole("button", { name: "New scan" }));
   fireEvent.change(screen.getByLabelText("Engagement name"), { target: { value: "Acme" } });
   fireEvent.change(screen.getByLabelText("Targets"), { target: { value: "example.com" } });
   fireEvent.click(screen.getByRole("button", { name: /create scan/i }));
   expect(await screen.findByText(/Scan defined: Acme/)).toBeInTheDocument();
+}
 
-  // The creation bumped the engagement key; its refetch failed (second call).
-  await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+test("a failed engagement refetch on Refresh keeps the last known name", async () => {
+  let calls = 0;
+  mockApi({
+    "/api/engagement": () => (++calls === 1 ? json({ name: "ascent-local-lab" }) : json({ error: "x" }, 500)),
+  });
+  render(<App />);
+  expect(await screen.findByText(/engagement: ascent-local-lab/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh data" }));
+  // The refetch has failed once the request has been made and the busy state has ended.
+  await waitFor(() => expect(calls).toBe(2));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh data" })).not.toHaveAttribute("aria-busy"));
   expect(screen.getByText(/engagement: ascent-local-lab/)).toBeInTheDocument();
   expect(screen.queryByText(/no engagement loaded/)).not.toBeInTheDocument();
+});
+
+test("after creating a scan, a failed engagement refetch shows the neutral fallback, not the old name", async () => {
+  let calls = 0;
+  mockApi({
+    "/api/engagement": () => (++calls === 1 ? json({ name: "ascent-local-lab" }) : json({ error: "x" }, 500)),
+    "/api/engagements": createdAcme,
+  });
+  render(<App />);
+  expect(await screen.findByText(/engagement: ascent-local-lab/)).toBeInTheDocument();
+  await createScan();
+  // The creation bumped the engagement key; its refetch failed (second call). The old engagement
+  // is not the one the console now reflects, so its name must not linger.
+  await waitFor(() => expect(calls).toBe(2));
+  await waitFor(() => expect(screen.getByText(/no engagement loaded/)).toBeInTheDocument());
+  expect(screen.queryByText(/engagement: ascent-local-lab/)).not.toBeInTheDocument();
+});
+
+test("after creating a scan, a failed gates refetch drops the old pending count", async () => {
+  let reads = 0;
+  mockApi({
+    "/api/gates": () => (++reads === 1 ? json([gate]) : json({ error: "x" }, 500)),
+    "/api/engagements": createdAcme,
+  });
+  render(<App />);
+  expect(await screen.findByRole("button", { name: "Pending approvals: 1" })).toBeInTheDocument();
+  await createScan();
+  await waitFor(() => expect(reads).toBe(2));
+  expect(await screen.findByRole("button", { name: "Pending approvals" })).toBeInTheDocument();
+  expect(within(screen.getByRole("button", { name: "Approval gates" })).queryByText("1")).not.toBeInTheDocument();
+});
+
+test("a decision recorded before a new scan does not hide a gate of the new engagement", async () => {
+  // The new engagement's first gate happens to reuse the id g1 that was decided under the old one.
+  let created = false;
+  mockApi({
+    "/api/gates": () => json([gate]),
+    "/api/gates/g1/approve": () => json({ ok: true }),
+    "/api/engagements": () => {
+      created = true;
+      return createdAcme();
+    },
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+  expect(await screen.findByRole("button", { name: "Pending approvals: 0" })).toBeInTheDocument();
+  await createScan();
+  expect(created).toBe(true);
+  expect(await screen.findByRole("button", { name: "Pending approvals: 1" })).toBeInTheDocument();
+});
+
+test("creating a scan refetches each of the six endpoints exactly once", async () => {
+  const spy = mockApi({ "/api/engagements": createdAcme });
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  await screen.findByText("Hash chain OK");
+  await screen.findByText("Your report is ready");
+  await waitFor(() => expect(calls(spy, "/api/engagement")).toBe(1));
+  const paths = ["/api/findings", "/api/gates", "/api/audit", "/api/report", "/api/engagement", "/api/gate"];
+  for (const p of paths) expect(calls(spy, p), p).toBe(1);
+
+  await createScan();
+  // Back on the Overview every card reads its data again: one new request per endpoint, no more.
+  fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+  await screen.findByText("SSRF in fetch");
+  await waitFor(() => {
+    for (const p of paths) expect(calls(spy, p), p).toBe(2);
+  });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh data" })).not.toHaveAttribute("aria-busy"));
+  for (const p of paths) expect(calls(spy, p), p).toBe(2);
+});
+
+// ---- focus after in-screen navigation (WCAG 2.4.3, spec 5.1) ----
+
+test("a See all button that navigates moves focus to the page title", async () => {
+  mockApi();
+  render(<App />);
+  const seeAll = await screen.findByRole("button", { name: "See all findings" });
+  seeAll.focus();
+  fireEvent.click(seeAll);
+  expect(h1Name()).toBe("Ascent Console: Findings");
+  expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+});
+
+test("a KPI tile moves focus to the page title of the Findings screen", async () => {
+  mockApi();
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  const tile = screen.getByText("Needs human", { selector: ".kpi .l" }).closest("button") as HTMLElement;
+  tile.focus();
+  fireEvent.click(tile);
+  expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+});
+
+test("the hero CTA moves focus to the page title of New scan", async () => {
+  mockApi();
+  render(<App />);
+  const hero = (await screen.findByRole("region", { name: "Welcome" })) as HTMLElement;
+  fireEvent.click(within(hero).getByRole("button", { name: "Define a new scan" }));
+  expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+});
+
+test("the first render does not move focus to the page title", async () => {
+  mockApi();
+  render(<App />);
+  await screen.findByText("SSRF in fetch");
+  expect(screen.getByRole("heading", { level: 1 })).not.toHaveFocus();
 });
 
 test("deciding a gate refreshes the audit feed", async () => {

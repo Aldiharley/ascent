@@ -52,9 +52,12 @@ export function KpiRow({
 export function ChartSlot({
   res,
   children,
+  announce = true,
 }: {
   res: Resource<TriageItem[]>;
   children: (items: TriageItem[]) => ReactNode;
+  /** False when another card (the KPI row) already announces a findings failure. */
+  announce?: boolean;
 }) {
   if (res.status === "loading") {
     return (
@@ -67,7 +70,9 @@ export function ChartSlot({
       </section>
     );
   }
-  if (res.status === "error") return <ErrorCard title="Could not load findings" onRetry={res.retry} />;
+  if (res.status === "error") {
+    return <ErrorCard title="Could not load findings" onRetry={res.retry} announce={announce} />;
+  }
   return <>{children(res.data)}</>;
 }
 
@@ -80,14 +85,19 @@ export function TopFindingsCard({
   query,
   onClearQuery,
   onSeeAll,
+  announce = true,
 }: {
   res: Resource<TriageItem[]>;
   query: string;
   onClearQuery: () => void;
   onSeeAll: () => void;
+  /** False when another card (the KPI row) already announces a findings failure. */
+  announce?: boolean;
 }) {
   if (res.status === "loading") return <LoadingCard caption="Loading findings…" />;
-  if (res.status === "error") return <ErrorCard title="Could not load findings" onRetry={res.retry} />;
+  if (res.status === "error") {
+    return <ErrorCard title="Could not load findings" onRetry={res.retry} announce={announce} />;
+  }
 
   const q = query.trim();
   const ordered = orderFindings(res.data);
