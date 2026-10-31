@@ -1056,6 +1056,15 @@ pub fn run_dast(
             }
             if timed_out {
                 wall_clock_limit_hit = true;
+                // Audit the trace for the interrupted pass before breaking so that
+                // off-scope requests made during the partial pass are not missed.
+                // The log may be truncated; tolerate missing/unreadable files and
+                // incomplete JSON lines. Skip only when no requests were made.
+                if let Some(t) = &trace {
+                    if listed > 0 {
+                        let _ = audit.read(t, &guard, secret);
+                    }
+                }
                 break 'passes;
             }
             if let Some(t) = &trace {

@@ -120,37 +120,26 @@ fn scannable(urls: &[String]) -> (BTreeSet<String>, Vec<String>) {
     (hosts, listed)
 }
 
-/// How many of `urls` [`scan_rows`] lists for nuclei (0: nuclei is not run).
+/// How many of `urls` the nuclei scan would list (0: nuclei is not run).
 pub fn listed_count(urls: &[String]) -> usize {
     scannable(urls).1.len()
 }
 
-/// Runs nuclei with the caller's flags and returns its raw JSON rows. `args` are
-/// passed verbatim, followed by `-l <file>` listing the URLs (one `-u` per URL would
-/// overflow Windows' 32K command line on a real app).
-#[allow(dead_code)]
-pub fn scan_rows(
-    runner: &dyn Runner,
-    urls: &[String],
-    args: &[String],
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let (hosts, listed) = scannable(urls);
-    if hosts.is_empty() {
-        return Ok(vec![]);
-    }
-    let list = ListFile::create(&listed)?;
-    let mut args: Vec<String> = args.to_vec();
-    args.push("-l".into());
-    args.push(list.0.to_string_lossy().into_owned());
-    let hv: Vec<String> = hosts.into_iter().collect();
-    runner.run_json("nuclei", &args, &hv)
-}
-
-/// Like [`scan_rows`] but with an optional wall-clock deadline.
+/// Runs nuclei and returns its raw JSON rows, with an optional wall-clock deadline.
+///
+/// **Invariant:** Caller guarantees all URLs in `urls` have already been filtered
+/// through the scope guard (see `filter_in_scope` in `dast.rs`).
+///
+/// **Dry-run handling:** If `runner.supports_timeout()` is false, or `deadline` is
+/// `None`, the call is forwarded to `runner.run_json`, which enforces any dry-run
+/// check. When `runner.supports_timeout()` is true the caller (`run_dast`) must
+/// have set `deadline = None` for a dry run — the real-spawn path below is never
+/// reached for dry runs because `run_dast` passes `deadline = None` whenever
+/// `!live`.
 ///
 /// Returns `(rows, timed_out)`.  When the runner does not support timeouts
 /// (`runner.supports_timeout()` is false) or `deadline` is `None`, this
-/// behaves identically to [`scan_rows`] and always returns `timed_out = false`.
+/// falls through to `runner.run_json` and always returns `timed_out = false`.
 ///
 /// When the deadline is reached while nuclei is still running:
 /// 1. Send `SIGTERM` to the nuclei process.
@@ -189,11 +178,14 @@ pub fn scan_rows_with_deadline(
     let mut child = std::process::Command::new("nuclei")
         .args(&full_args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()?;
 
     // Read stdout in a background thread (nuclei may flush lazily).
-    let child_stdout = child.stdout.take().expect("piped stdout");
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| -> Box<dyn std::error::Error> { "nuclei stdout pipe missing".into() })?;
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         use std::io::Read;
@@ -206,8 +198,10 @@ pub fn scan_rows_with_deadline(
     let timed_out = loop {
         match child.try_wait()? {
             Some(status) => {
-                // Process exited normally (or non-zero — we'll still return rows).
-                let _ = status;
+                if !status.success() {
+                    let code = status.code().unwrap_or(-1);
+                    return Err(format!("nuclei exited with code {code}").into());
+                }
                 break false;
             }
             None => {
@@ -263,158 +257,8 @@ fn send_sigterm(_pid: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::normalise::normalise_nuclei;
     use crate::runner::Runner;
-    use serde_json::{json, Value};
-    struct Fake;
-    impl Runner for Fake {
-        fn run_json(
-            &self,
-            _t: &str,
-            _a: &[String],
-            _g: &[String],
-        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-            Ok(vec![
-                json!({"template-id":"CVE-1","info":{"name":"x","severity":"high"},
-                "matched-at":"https://app.example.com/"}),
-            ])
-        }
-        fn run_text(
-            &self,
-            _t: &str,
-            _a: &[String],
-            _g: &[String],
-        ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(String::new())
-        }
-    }
-    fn jsonl() -> Vec<String> {
-        vec!["-silent".into(), "-jsonl".into()]
-    }
-
-    #[test]
-    fn scan_rows_returns_raw_rows() {
-        let rows = scan_rows(&Fake, &["https://app.example.com/".into()], &jsonl()).unwrap();
-        assert_eq!(rows[0]["template-id"], "CVE-1");
-        let out = normalise_nuclei(&rows);
-        assert_eq!(out[0].tool, "nuclei");
-        assert_eq!(out[0].severity, "HIGH");
-    }
-
-    #[test]
-    fn caller_args_pass_verbatim_then_a_list_file() {
-        let rec = Rec::default();
-        let mut args = jsonl();
-        args.extend(["-tags".into(), "xss".into()]);
-        scan_rows(&rec, &["https://app.example.com/".to_string()], &args).unwrap();
-        let calls = rec.calls.borrow();
-        let (_, got, targets) = &calls[0];
-        assert_eq!(got.len(), 6, "{got:?}");
-        assert_eq!(&got[..5], &["-silent", "-jsonl", "-tags", "xss", "-l"]);
-        assert!(!got.iter().any(|a| a == "-u"), "{got:?}");
-        assert_eq!(targets, &vec!["app.example.com".to_string()]);
-        assert_eq!(rec.lists.borrow()[0], vec!["https://app.example.com/"]);
-        assert!(
-            !std::path::Path::new(&got[5]).exists(),
-            "list file left behind"
-        );
-    }
-
-    #[test]
-    fn a_long_surface_goes_through_one_list_file() {
-        let rec = Rec::default();
-        let urls: Vec<String> = (0..3000)
-            .map(|i| format!("https://app.example.com/p/{i}?q=1"))
-            .collect();
-        scan_rows(&rec, &urls, &jsonl()).unwrap();
-        let calls = rec.calls.borrow();
-        let (_, got, _) = &calls[0];
-        assert!(
-            got.iter().map(String::len).sum::<usize>() < 1024,
-            "command line grows with the surface"
-        );
-        assert_eq!(rec.lists.borrow()[0], urls);
-    }
-
-    #[test]
-    fn list_file_is_removed_when_nuclei_fails_and_names_are_unique() {
-        let rec = Rec {
-            fail: true,
-            ..Default::default()
-        };
-        assert!(scan_rows(&rec, &["https://app.example.com/".to_string()], &jsonl()).is_err());
-        assert!(scan_rows(&rec, &["https://app.example.com/".to_string()], &jsonl()).is_err());
-        let calls = rec.calls.borrow();
-        let (a, b) = (calls[0].1.last().unwrap(), calls[1].1.last().unwrap());
-        assert_ne!(a, b);
-        assert!(!std::path::Path::new(a).exists() && !std::path::Path::new(b).exists());
-    }
-
-    use std::cell::RefCell;
-    type Call = (String, Vec<String>, Vec<String>);
-    #[derive(Default)]
-    struct Rec {
-        calls: RefCell<Vec<Call>>,
-        /// The `-l` file's lines, read while the call runs.
-        lists: RefCell<Vec<Vec<String>>>,
-        fail: bool,
-    }
-    impl Runner for Rec {
-        fn run_json(
-            &self,
-            t: &str,
-            a: &[String],
-            g: &[String],
-        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-            self.calls
-                .borrow_mut()
-                .push((t.to_string(), a.to_vec(), g.to_vec()));
-            if let Some(w) = a.windows(2).find(|w| w[0] == "-l") {
-                let text = std::fs::read_to_string(&w[1]).unwrap();
-                self.lists
-                    .borrow_mut()
-                    .push(text.lines().map(String::from).collect());
-            }
-            if self.fail {
-                return Err("nuclei crashed".into());
-            }
-            Ok(vec![])
-        }
-        fn run_text(
-            &self,
-            _t: &str,
-            _a: &[String],
-            _g: &[String],
-        ) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(String::new())
-        }
-    }
-
-    #[test]
-    fn host_less_url_is_neither_scanned_nor_gate_bypassing() {
-        let rec = Rec::default();
-        let urls = vec![
-            "https://app.example.com/".to_string(),
-            "evil.com:8080/x".to_string(),
-        ];
-        scan_rows(&rec, &urls, &jsonl()).unwrap();
-        let calls = rec.calls.borrow();
-        assert_eq!(calls.len(), 1);
-        let (tool, args, targets) = &calls[0];
-        assert_eq!(tool, "nuclei");
-        assert_eq!(targets, &vec!["app.example.com".to_string()]);
-        assert!(!args.iter().any(|a| a.contains("evil.com")));
-        assert_eq!(rec.lists.borrow()[0], vec!["https://app.example.com/"]);
-    }
-
-    #[test]
-    fn all_host_less_input_does_not_call_runner() {
-        let rec = Rec::default();
-        let urls = vec!["evil.com/x".to_string(), "evil.com:8080/x".to_string()];
-        let out = scan_rows(&rec, &urls, &jsonl()).unwrap();
-        assert!(out.is_empty());
-        assert!(rec.calls.borrow().is_empty());
-    }
+    use serde_json::Value;
 
     #[test]
     fn temp_dir_is_fresh_and_removed_with_its_contents() {
