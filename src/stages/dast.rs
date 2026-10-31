@@ -192,12 +192,20 @@ pub fn flow_loads_modules(template: &str) -> bool {
 
 /// The template read as YAML, so no valid spelling evades the text scans
 /// (`javascript : []`, `"javascript": []`, an indented or flow-style root mapping, a
-/// comment between `flow:` and its value, `require (`). Excluded when it does not
-/// parse, its root is not a mapping, any top-level key is a non-http protocol, or a
-/// `flow` is not a string or mentions `require` at all (any case, any spacing).
+/// comment between `flow:` and its value, `require (`, a `<<:` merge key). Excluded
+/// when it does not parse, its root is not a mapping, any top-level key is a non-http
+/// protocol, or a `flow` is not a string or mentions `require` at all (any case, any
+/// spacing).
 pub fn yaml_structure_excluded(template: &str) -> bool {
     let text = template.strip_prefix('\u{feff}').unwrap_or(template);
-    let Ok(serde_yaml_ng::Value::Mapping(root)) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text) else {
+    let Ok(mut doc) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text) else {
+        return true;
+    };
+    // nuclei's YAML library applies merge keys, so read the root as nuclei will.
+    if doc.apply_merge().is_err() {
+        return true;
+    }
+    let serde_yaml_ng::Value::Mapping(root) = doc else {
         return true;
     };
     root.iter().any(|(k, v)| {
@@ -1910,6 +1918,8 @@ mod tests {
         // valid YAML spellings a line scanner misses
         for t in [
             format!("id: x\njavascript : []\n{http}"),
+            // a merge key: nuclei's YAML merges `javascript` into the root
+            format!("id: x\nbase: &a\n  javascript: []\n<<: *a\n{http}"),
             format!("id: x\n\"javascript\": []\n{http}"),
             format!("id: x\n'network': []\n{http}"),
             "  id: x\n  javascript: []\n  http: []\n".to_string(),
