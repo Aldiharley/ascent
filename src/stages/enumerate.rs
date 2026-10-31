@@ -114,11 +114,15 @@ mod tests {
 
     #[test]
     fn unrecognised_katana_output_fails_closed() {
-        let f = Fake(vec![json!({"url":"https://app.example.com/x"}), json!({"request":{}})]);
+        let f = Fake(vec![
+            json!({"url":"https://app.example.com/x"}),
+            json!({"request":{}}),
+        ]);
         let e = enumerate_surface(&f, &["https://app.example.com".into()], &[]).unwrap_err();
         assert_eq!(e.to_string(), "katana output format not recognised");
         // no rows at all is a normal empty crawl, not format drift
-        let out = enumerate_surface(&Fake(vec![]), &["https://app.example.com".into()], &[]).unwrap();
+        let out =
+            enumerate_surface(&Fake(vec![]), &["https://app.example.com".into()], &[]).unwrap();
         assert_eq!(out, vec!["https://app.example.com".to_string()]);
     }
 

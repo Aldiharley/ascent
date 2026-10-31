@@ -53,14 +53,17 @@ pub struct DastConfig {
 }
 
 fn is_header_token(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
 }
 
 fn is_env_name(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
         && (b[0].is_ascii_uppercase() || b[0] == b'_')
-        && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+        && b.iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
 }
 
 /// Errors name the field and the rule only, never the offending text: a token pasted
@@ -648,13 +651,27 @@ mod tests {
             if !(name.starts_with("engagement") && name.ends_with(".yaml")) {
                 continue;
             }
-            let e = load_engagement(p.to_str().unwrap()).unwrap_or_else(|err| panic!("{name}: {err}"));
-            let all = e.hosts.iter().chain(&e.urls).map(|s| s.to_ascii_lowercase());
-            assert!(all.into_iter().all(|t| !t.contains("localhost")), "{name} targets localhost");
-            assert!(!e.urls.is_empty() && e.urls.iter().all(|u| ScopeGuard::new(&e).in_scope(u)), "{name}");
+            let e =
+                load_engagement(p.to_str().unwrap()).unwrap_or_else(|err| panic!("{name}: {err}"));
+            let all = e
+                .hosts
+                .iter()
+                .chain(&e.urls)
+                .map(|s| s.to_ascii_lowercase());
+            assert!(
+                all.into_iter().all(|t| !t.contains("localhost")),
+                "{name} targets localhost"
+            );
+            assert!(
+                !e.urls.is_empty() && e.urls.iter().all(|u| ScopeGuard::new(&e).in_scope(u)),
+                "{name}"
+            );
             n += 1;
         }
-        assert!(n >= 2, "expected the example and juice-shop samples, found {n}");
+        assert!(
+            n >= 2,
+            "expected the example and juice-shop samples, found {n}"
+        );
     }
 
     #[test]
@@ -672,10 +689,7 @@ mod tests {
             classify_target("  10.0.0.5 "),
             Some(("hosts", "10.0.0.5".to_string()))
         );
-        assert_eq!(
-            classify_target("::1"),
-            Some(("hosts", "::1".to_string()))
-        );
+        assert_eq!(classify_target("::1"), Some(("hosts", "::1".to_string())));
         assert_eq!(
             classify_target("10.0.0.0/24"),
             Some(("cidrs", "10.0.0.0/24".to_string()))
@@ -710,7 +724,10 @@ mod tests {
             "not-a-cidr/24",
             "10.0.0.0/999",
         ] {
-            assert!(classify_target(bad).is_none(), "classified bad target {bad:?}");
+            assert!(
+                classify_target(bad).is_none(),
+                "classified bad target {bad:?}"
+            );
         }
     }
 
@@ -738,39 +755,65 @@ mod tests {
             format!("{BASE}dast:\n  auth:\n    header: X\n    value: secret\n"),
             format!("{BASE}dast:\n  profile: aggressive\n"),
         ] {
-            assert!(serde_yaml_ng::from_str::<Engagement>(&bad).is_err(), "accepted {bad:?}");
+            assert!(
+                serde_yaml_ng::from_str::<Engagement>(&bad).is_err(),
+                "accepted {bad:?}"
+            );
         }
     }
     #[test]
     fn validate_dast_checks_names() {
         let mk = |h: &str, v: &str| DastConfig {
             profile: DastProfile::Standard,
-            auth: Some(DastAuth { header: h.into(), value_env: v.into() }),
+            auth: Some(DastAuth {
+                header: h.into(),
+                value_env: v.into(),
+            }),
         };
         assert!(validate_dast(&mk("Authorization", "ASCENT_DAST_AUTH")).is_ok());
         assert!(validate_dast(&mk("Cookie", "_X1")).is_ok());
-        for (h, v) in [("", "A"), ("Bad Header", "A"), ("X:Y", "A"), ("X", ""), ("X", "lower"), ("X", "1A"), ("X", "A-B")] {
-            assert!(validate_dast(&mk(h, v)).is_err(), "accepted header={h:?} env={v:?}");
+        for (h, v) in [
+            ("", "A"),
+            ("Bad Header", "A"),
+            ("X:Y", "A"),
+            ("X", ""),
+            ("X", "lower"),
+            ("X", "1A"),
+            ("X", "A-B"),
+        ] {
+            assert!(
+                validate_dast(&mk(h, v)).is_err(),
+                "accepted header={h:?} env={v:?}"
+            );
         }
     }
     #[test]
     fn resolve_auth_reads_env_and_fails_closed() {
         let d = DastConfig {
             profile: DastProfile::Standard,
-            auth: Some(DastAuth { header: "Authorization".into(), value_env: "TOK".into() }),
+            auth: Some(DastAuth {
+                header: "Authorization".into(),
+                value_env: "TOK".into(),
+            }),
         };
         let got = resolve_auth(&d, &|k| (k == "TOK").then(|| "Bearer abc".to_string())).unwrap();
         assert_eq!(got, Some(("Authorization".into(), "Bearer abc".into())));
         assert!(resolve_auth(&d, &|_| None).unwrap_err().contains("TOK"));
         assert!(resolve_auth(&d, &|_| Some(String::new())).is_err());
         assert!(resolve_auth(&d, &|_| Some("a\r\nX-Injected: 1".into())).is_err());
-        assert_eq!(resolve_auth(&DastConfig::default(), &|_| None).unwrap(), None);
+        assert_eq!(
+            resolve_auth(&DastConfig::default(), &|_| None).unwrap(),
+            None
+        );
     }
     #[test]
     fn resolve_auth_error_never_contains_the_value() {
         let d = DastConfig {
             profile: DastProfile::Standard,
-            auth: Some(DastAuth { header: "Authorization".into(), value_env: "TOK".into() }),
+            auth: Some(DastAuth {
+                header: "Authorization".into(),
+                value_env: "TOK".into(),
+            }),
         };
         let e = resolve_auth(&d, &|_| Some("Bearer s3cr3t\nmore".into())).unwrap_err();
         assert!(!e.contains("s3cr3t"), "{e}");
@@ -778,10 +821,16 @@ mod tests {
     #[test]
     fn validate_dast_never_echoes_the_offending_string() {
         // a token pasted into a name field must not reach stderr or a 422 body
-        for (h, v) in [("Bearer s3cr3t-tok", "ASCENT_DAST_AUTH"), ("Authorization", "Bearer s3cr3t-tok")] {
+        for (h, v) in [
+            ("Bearer s3cr3t-tok", "ASCENT_DAST_AUTH"),
+            ("Authorization", "Bearer s3cr3t-tok"),
+        ] {
             let d = DastConfig {
                 profile: DastProfile::Standard,
-                auth: Some(DastAuth { header: h.into(), value_env: v.into() }),
+                auth: Some(DastAuth {
+                    header: h.into(),
+                    value_env: v.into(),
+                }),
             };
             let e = validate_dast(&d).unwrap_err();
             assert!(!e.contains("s3cr3t"), "{e}");
@@ -792,17 +841,30 @@ mod tests {
     fn resolve_auth_rejects_every_control_character_but_tab() {
         let d = DastConfig {
             profile: DastProfile::Standard,
-            auth: Some(DastAuth { header: "Authorization".into(), value_env: "TOK".into() }),
+            auth: Some(DastAuth {
+                header: "Authorization".into(),
+                value_env: "TOK".into(),
+            }),
         };
-        for bad in ["s3cr3t\u{0}", "s3cr3t\u{1b}[0m", "s3cr3t\u{7f}", "s3cr3t\u{85}", "a\rb", "a\nb"] {
+        for bad in [
+            "s3cr3t\u{0}",
+            "s3cr3t\u{1b}[0m",
+            "s3cr3t\u{7f}",
+            "s3cr3t\u{85}",
+            "a\rb",
+            "a\nb",
+        ] {
             let e = resolve_auth(&d, &|_| Some(bad.to_string())).unwrap_err();
             assert!(!e.contains("s3cr3t") && e.contains("TOK"), "{e}");
         }
-        assert!(resolve_auth(&d, &|_| Some("Bearer\tabc".to_string())).unwrap().is_some());
+        assert!(resolve_auth(&d, &|_| Some("Bearer\tabc".to_string()))
+            .unwrap()
+            .is_some());
     }
     #[test]
     fn load_engagement_rejects_invalid_dast_auth() {
-        let p = std::env::temp_dir().join(format!("ascent_scope_baddast_{}.yaml", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("ascent_scope_baddast_{}.yaml", std::process::id()));
         std::fs::write(
             &p,
             format!("{BASE}dast:\n  auth:\n    header: \"Bad Header\"\n    value_env: TOK\n"),

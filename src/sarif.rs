@@ -7,7 +7,11 @@ use serde_json::{json, Map, Value};
 use std::path::Path;
 
 const SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
-const CODE_RUNS: [(&str, &str); 3] = [("sast", "ascent/sast/"), ("secret", "ascent/secrets/"), ("sca", "ascent/sca/")];
+const CODE_RUNS: [(&str, &str); 3] = [
+    ("sast", "ascent/sast/"),
+    ("secret", "ascent/secrets/"),
+    ("sca", "ascent/sca/"),
+];
 
 fn s(f: &Value, k: &str) -> String {
     f[k].as_str().unwrap_or("").to_string()
@@ -45,7 +49,11 @@ fn rank(sev: &str) -> u8 {
 fn result(item: &Value, fp: &str, root: Option<&str>) -> Value {
     let f = &item["finding"];
     let sev = s(f, "severity").to_ascii_uppercase();
-    let text = if s(f, "message").is_empty() { s(f, "title") } else { s(f, "message") };
+    let text = if s(f, "message").is_empty() {
+        s(f, "title")
+    } else {
+        s(f, "message")
+    };
     let location = if kind(f) == "dast" {
         json!({"physicalLocation": {"artifactLocation": {"uri": s(f, "url")}}})
     } else {
@@ -60,7 +68,10 @@ fn result(item: &Value, fp: &str, root: Option<&str>) -> Value {
     props.insert("ascent.remediation".into(), item["remediation"].clone());
     if kind(f) == "sca" {
         // The trivy version string is the only evidence ever exported.
-        props.insert("ascent.sca".into(), Value::from(f["code"].as_str().or(f["evidence"].as_str()).unwrap_or("")));
+        props.insert(
+            "ascent.sca".into(),
+            Value::from(f["code"].as_str().or(f["evidence"].as_str()).unwrap_or("")),
+        );
     }
     let mut r = json!({
         "ruleId": s(f, "rule_id"),
@@ -123,14 +134,25 @@ pub fn to_sarif(items: &[Value], source_root: Option<&str>) -> (Value, Value) {
     let fps = fingerprints(&findings, source_root);
     let pairs: Vec<(&Value, &String)> = items.iter().zip(fps.iter()).collect();
     let of_kind = |k: &str| -> Vec<(&Value, &String)> {
-        pairs.iter().filter(|(it, _)| kind(&it["finding"]) == k).cloned().collect()
+        pairs
+            .iter()
+            .filter(|(it, _)| kind(&it["finding"]) == k)
+            .cloned()
+            .collect()
     };
-    let code = doc(CODE_RUNS.iter().map(|(k, id)| run(&of_kind(k), id, source_root)).collect());
+    let code = doc(CODE_RUNS
+        .iter()
+        .map(|(k, id)| run(&of_kind(k), id, source_root))
+        .collect());
     let dast = doc(vec![run(&of_kind("dast"), "ascent/dast/", source_root)]);
     (code, dast)
 }
 
-pub fn write_sarif(out_dir: &str, items: &[Value], source_root: Option<&str>) -> std::io::Result<()> {
+pub fn write_sarif(
+    out_dir: &str,
+    items: &[Value],
+    source_root: Option<&str>,
+) -> std::io::Result<()> {
     let (code, dast) = to_sarif(items, source_root);
     for (name, d) in [("ascent.sarif", code), ("ascent-dast.sarif", dast)] {
         let text = serde_json::to_string_pretty(&d).map_err(std::io::Error::other)? + "\n";
@@ -143,9 +165,11 @@ pub fn write_sarif(out_dir: &str, items: &[Value], source_root: Option<&str>) ->
 pub fn item_values(items: &[crate::triage::TriageItem]) -> Vec<Value> {
     items
         .iter()
-        .map(|it| json!({"finding": it.finding, "verdict": it.verdict, "confidence": it.confidence,
+        .map(|it| {
+            json!({"finding": it.finding, "verdict": it.verdict, "confidence": it.confidence,
                          "fp_likelihood": it.fp_likelihood, "rationale": it.rationale,
-                         "remediation": it.remediation}))
+                         "remediation": it.remediation})
+        })
         .collect()
 }
 
@@ -154,7 +178,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn it(tool: &str, sev: &str, file: &str, line: i64, url: &str, verdict: &str, code: &str) -> Value {
+    fn it(
+        tool: &str,
+        sev: &str,
+        file: &str,
+        line: i64,
+        url: &str,
+        verdict: &str,
+        code: &str,
+    ) -> Value {
         json!({"finding": {"id": format!("{tool}:{file}{url}"), "tool": tool,
             "rule_id": format!("{tool}.rule"), "severity": sev, "title": "Title",
             "message": "Message", "url": url, "file": file, "line": line,
@@ -170,15 +202,30 @@ mod tests {
             assert_eq!(d["version"], "2.1.0");
             assert!(d["$schema"].as_str().unwrap().contains("sarif"));
         }
-        let ids: Vec<&str> = code["runs"].as_array().unwrap().iter()
-            .map(|r| r["automationDetails"]["id"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = code["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["automationDetails"]["id"].as_str().unwrap())
+            .collect();
         assert_eq!(ids, vec!["ascent/sast/", "ascent/secrets/", "ascent/sca/"]);
         assert_eq!(dast["runs"][0]["automationDetails"]["id"], "ascent/dast/");
         assert_eq!(code["runs"][0]["tool"]["driver"]["name"], "Ascent");
     }
     #[test]
     fn maps_levels_locations_and_fingerprints() {
-        let (code, _) = to_sarif(&[it("opengrep", "HIGH", "./src/db.rs", 0, "", "TRUE_POSITIVE", "q()")], Some("./src"));
+        let (code, _) = to_sarif(
+            &[it(
+                "opengrep",
+                "HIGH",
+                "./src/db.rs",
+                0,
+                "",
+                "TRUE_POSITIVE",
+                "q()",
+            )],
+            Some("./src"),
+        );
         let run = &code["runs"][0];
         let r = &run["results"][0];
         assert_eq!(r["ruleId"], "opengrep.rule");
@@ -187,7 +234,10 @@ mod tests {
         let loc = &r["locations"][0]["physicalLocation"];
         assert_eq!(loc["artifactLocation"]["uri"], "db.rs");
         assert_eq!(loc["region"]["startLine"], 1); // line 0 clamps to 1
-        assert!(r["partialFingerprints"]["ascentFindingHash/v1"].as_str().unwrap().starts_with("ascent/v1:"));
+        assert!(r["partialFingerprints"]["ascentFindingHash/v1"]
+            .as_str()
+            .unwrap()
+            .starts_with("ascent/v1:"));
         let rule = &run["tool"]["driver"]["rules"][0];
         assert_eq!(rule["id"], "opengrep.rule");
         assert_eq!(rule["properties"]["security-severity"], "8.0");
@@ -196,16 +246,31 @@ mod tests {
     }
     #[test]
     fn severity_table() {
-        for (sev, level, score) in [("CRITICAL", "error", Some("9.5")), ("HIGH", "error", Some("8.0")),
-                                    ("MEDIUM", "warning", Some("5.5")), ("LOW", "note", Some("2.0")),
-                                    ("INFO", "note", None)] {
+        for (sev, level, score) in [
+            ("CRITICAL", "error", Some("9.5")),
+            ("HIGH", "error", Some("8.0")),
+            ("MEDIUM", "warning", Some("5.5")),
+            ("LOW", "note", Some("2.0")),
+            ("INFO", "note", None),
+        ] {
             assert_eq!(level_of(sev), level);
             assert_eq!(security_severity(sev), score);
         }
     }
     #[test]
     fn likely_false_positive_is_suppressed_under_review() {
-        let (code, _) = to_sarif(&[it("opengrep", "HIGH", "a.py", 3, "", "LIKELY_FALSE_POSITIVE", "")], None);
+        let (code, _) = to_sarif(
+            &[it(
+                "opengrep",
+                "HIGH",
+                "a.py",
+                3,
+                "",
+                "LIKELY_FALSE_POSITIVE",
+                "",
+            )],
+            None,
+        );
         let sup = &code["runs"][0]["results"][0]["suppressions"][0];
         assert_eq!(sup["kind"], "external");
         assert_eq!(sup["status"], "underReview");
@@ -213,10 +278,28 @@ mod tests {
     }
     #[test]
     fn dast_goes_only_to_the_dast_document() {
-        let (code, dast) = to_sarif(&[it("nuclei", "HIGH", "", 0, "https://app.example.com/login", "TRUE_POSITIVE", "")], None);
-        assert!(code["runs"].as_array().unwrap().iter().all(|r| r["results"].as_array().unwrap().is_empty()));
+        let (code, dast) = to_sarif(
+            &[it(
+                "nuclei",
+                "HIGH",
+                "",
+                0,
+                "https://app.example.com/login",
+                "TRUE_POSITIVE",
+                "",
+            )],
+            None,
+        );
+        assert!(code["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["results"].as_array().unwrap().is_empty()));
         let r = &dast["runs"][0]["results"][0];
-        assert_eq!(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "https://app.example.com/login");
+        assert_eq!(
+            r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "https://app.example.com/login"
+        );
     }
     #[test]
     fn categories_split_and_rules_dedupe() {
@@ -224,22 +307,55 @@ mod tests {
             it("opengrep", "HIGH", "a.py", 1, "", "TRUE_POSITIVE", "x"),
             it("opengrep", "LOW", "b.py", 2, "", "TRUE_POSITIVE", "y"),
             it("gitleaks", "HIGH", "c.py", 3, "", "TRUE_POSITIVE", ""),
-            it("trivy", "MEDIUM", "package-lock.json", 0, "", "TRUE_POSITIVE", "pkg=axios installed=0.21.1 fixed=0.21.2 purl="),
+            it(
+                "trivy",
+                "MEDIUM",
+                "package-lock.json",
+                0,
+                "",
+                "TRUE_POSITIVE",
+                "pkg=axios installed=0.21.1 fixed=0.21.2 purl=",
+            ),
         ];
         let (code, _) = to_sarif(&items, None);
         let runs = code["runs"].as_array().unwrap();
         assert_eq!(runs[0]["results"].as_array().unwrap().len(), 2);
-        assert_eq!(runs[0]["tool"]["driver"]["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            runs[0]["tool"]["driver"]["rules"].as_array().unwrap().len(),
+            1
+        );
         // the rule takes the highest severity of its results
-        assert_eq!(runs[0]["tool"]["driver"]["rules"][0]["properties"]["security-severity"], "8.0");
+        assert_eq!(
+            runs[0]["tool"]["driver"]["rules"][0]["properties"]["security-severity"],
+            "8.0"
+        );
         assert_eq!(runs[1]["results"].as_array().unwrap().len(), 1);
-        assert_eq!(runs[2]["results"][0]["properties"]["ascent.sca"], "pkg=axios installed=0.21.1 fixed=0.21.2 purl=");
+        assert_eq!(
+            runs[2]["results"][0]["properties"]["ascent.sca"],
+            "pkg=axios installed=0.21.1 fixed=0.21.2 purl="
+        );
     }
     #[test]
     fn never_exports_code_or_secret_material() {
         let items = [
-            it("gitleaks", "HIGH", "c.py", 3, "", "TRUE_POSITIVE", "AKIASECRETVALUE"),
-            it("opengrep", "HIGH", "d.py", 1, "", "TRUE_POSITIVE", "password = 'hunter2'"),
+            it(
+                "gitleaks",
+                "HIGH",
+                "c.py",
+                3,
+                "",
+                "TRUE_POSITIVE",
+                "AKIASECRETVALUE",
+            ),
+            it(
+                "opengrep",
+                "HIGH",
+                "d.py",
+                1,
+                "",
+                "TRUE_POSITIVE",
+                "password = 'hunter2'",
+            ),
         ];
         let (code, dast) = to_sarif(&items, None);
         let all = format!("{code}{dast}");
@@ -250,9 +366,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ascent_sarif_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        write_sarif(dir.to_str().unwrap(), &[it("opengrep", "HIGH", "a.py", 1, "", "TRUE_POSITIVE", "")], None).unwrap();
+        write_sarif(
+            dir.to_str().unwrap(),
+            &[it("opengrep", "HIGH", "a.py", 1, "", "TRUE_POSITIVE", "")],
+            None,
+        )
+        .unwrap();
         for f in ["ascent.sarif", "ascent-dast.sarif"] {
-            let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(f)).unwrap()).unwrap();
+            let v: Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.join(f)).unwrap()).unwrap();
             assert_eq!(v["version"], "2.1.0");
         }
     }

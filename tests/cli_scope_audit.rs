@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nuclei-templates");
+const FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/nuclei-templates"
+);
 const POLICY: &str = "version: 1\nname: ci\nfail_on:\n  severity: [CRITICAL, HIGH]\n";
 /// Where the fake nuclei appends one JSON line per scan call (its argv and `-et` file).
 const LOG_ENV: &str = "ASCENT_FAKE_NUCLEI_LOG";
@@ -20,7 +23,11 @@ const OFF_SCOPE_ENV: &str = "ASCENT_FAKE_NUCLEI_OFF_SCOPE";
 
 fn main() {
     let me = std::env::current_exe().expect("own path");
-    let name = me.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let name = me
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match name.as_str() {
         "httpx" => fake_httpx(&args),
@@ -54,14 +61,22 @@ fn fake_nuclei(args: &[String]) {
         return;
     }
     if args.iter().any(|a| a == "-tl") {
-        println!("\nListing available v10.4.9 nuclei templates for {}", Path::new(FIXTURES).display());
+        println!(
+            "\nListing available v10.4.9 nuclei templates for {}",
+            Path::new(FIXTURES).display()
+        );
         println!("http/benign.yaml\nhttp\\cves\\off-target.yaml");
         return;
     }
     // With an auth header, report one finding whose evidence carries it (as real
     // nuclei's curl-command does), so the test can prove Ascent scrubs it.
     if let (Some(h), Some(list)) = (value_of(args, "-H"), value_of(args, "-l")) {
-        let url = std::fs::read_to_string(list).unwrap().lines().next().unwrap_or("").to_string();
+        let url = std::fs::read_to_string(list)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
         println!(
             "{}",
             json!({"template-id": "fake-tech", "matched-at": url, "host": url,
@@ -71,7 +86,11 @@ fn fake_nuclei(args: &[String]) {
     }
     let et = value_of(args, "-et").map(|p| std::fs::read_to_string(p).expect("-et file readable"));
     if let Ok(log) = std::env::var(LOG_ENV) {
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .unwrap();
         writeln!(f, "{}", json!({"args": args, "et": et})).unwrap();
     }
     let (Some(list), Some(trace)) = (value_of(args, "-l"), value_of(args, "-tlog")) else {
@@ -120,7 +139,11 @@ fn fake_bin(d: &Path) -> PathBuf {
     let bin = d.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     for t in ["httpx", "katana", "nuclei"] {
-        std::fs::copy(&me, bin.join(format!("{t}{}", std::env::consts::EXE_SUFFIX))).unwrap();
+        std::fs::copy(
+            &me,
+            bin.join(format!("{t}{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
     }
     bin
 }
@@ -151,12 +174,18 @@ fn run_ascent_with(off_scope: Option<&str>, engagement: &str, auth: Option<&str>
     let out_dir = d.join("out");
     let log = d.join("nuclei-calls.jsonl");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ascent"));
-    cmd.args(["run", "--engagement", eng.to_str().unwrap(), "--out", out_dir.to_str().unwrap()])
-        .args(["--policy", policy.to_str().unwrap()])
-        .env("PATH", &bin)
-        .env(LOG_ENV, &log)
-        .env_remove(OFF_SCOPE_ENV)
-        .env_remove(AUTH_ENV);
+    cmd.args([
+        "run",
+        "--engagement",
+        eng.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+    ])
+    .args(["--policy", policy.to_str().unwrap()])
+    .env("PATH", &bin)
+    .env(LOG_ENV, &log)
+    .env_remove(OFF_SCOPE_ENV)
+    .env_remove(AUTH_ENV);
     if let Some(a) = off_scope {
         cmd.env(OFF_SCOPE_ENV, a);
     }
@@ -169,7 +198,12 @@ fn run_ascent_with(off_scope: Option<&str>, engagement: &str, auth: Option<&str>
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    Run { out, dir: out_dir, calls, _scratch: scratch }
+    Run {
+        out,
+        dir: out_dir,
+        calls,
+        _scratch: scratch,
+    }
 }
 
 /// Every file under `dir`, recursively.
@@ -199,7 +233,12 @@ fn code(o: &Output) -> i32 {
 fn assert_scan_calls(calls: &[Value]) {
     assert_eq!(calls.len(), 1, "standard profile: one pass: {calls:?}");
     for c in calls {
-        let args: Vec<&str> = c["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+        let args: Vec<&str> = c["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
         assert!(args.contains(&"-nmhe"), "{args:?}");
         assert!(args.windows(2).any(|w| w == ["-pt", "http"]), "{args:?}");
         let et = c["et"].as_str().expect("-et passed");
@@ -207,13 +246,24 @@ fn assert_scan_calls(calls: &[Value]) {
         assert_eq!(excluded.len(), 1, "{et}");
         assert!(excluded[0].ends_with("off-target.yaml"), "{et}");
         for flag in ["-et", "-tlog", "-l"] {
-            let i = args.iter().position(|a| *a == flag).unwrap_or_else(|| panic!("{flag} missing: {args:?}"));
-            assert!(!Path::new(args[i + 1]).exists(), "{flag} file {} left behind", args[i + 1]);
+            let i = args
+                .iter()
+                .position(|a| *a == flag)
+                .unwrap_or_else(|| panic!("{flag} missing: {args:?}"));
+            assert!(
+                !Path::new(args[i + 1]).exists(),
+                "{flag} file {} left behind",
+                args[i + 1]
+            );
         }
         // the private scratch dir holding -et and -tlog is gone too
         let i = args.iter().position(|a| *a == "-tlog").unwrap();
         let scratch = Path::new(args[i + 1]).parent().unwrap();
-        assert!(!scratch.exists(), "scratch dir {} left behind", scratch.display());
+        assert!(
+            !scratch.exists(),
+            "scratch dir {} left behind",
+            scratch.display()
+        );
     }
 }
 
@@ -222,7 +272,10 @@ fn request_outside_scope_is_incomplete_exit_3() {
     let stderr = String::from_utf8_lossy(&r.out.stderr);
     assert_eq!(code(&r.out), 3, "stderr: {stderr}");
     let want = "DAST: nuclei sent requests outside scope to: checkip.amazonaws.com";
-    assert!(stderr.contains("run INCOMPLETE") && stderr.contains(want), "{stderr}");
+    assert!(
+        stderr.contains("run INCOMPLETE") && stderr.contains(want),
+        "{stderr}"
+    );
     let g = read_json(&r.dir, "gate.json");
     assert_eq!(g["decision"], "INCOMPLETE", "{g}");
     assert_eq!(g["incomplete_reasons"], json!([want]), "{g}");
@@ -250,13 +303,17 @@ fn clean_trace_passes_exit_0() {
         ),
         "{report}"
     );
-    assert!(report.contains("nuclei sent 1 request; 0 failed"), "{report}");
+    assert!(
+        report.contains("nuclei sent 1 request; 0 failed"),
+        "{report}"
+    );
     assert_scan_calls(&r.calls);
 }
 
 fn auth_value_never_reaches_any_output() {
     let value = format!("Bearer cli-audit-{}-tok", std::process::id());
-    let eng = format!("{ENG}dast:\n  auth:\n    header: Authorization\n    value_env: {AUTH_ENV}\n");
+    let eng =
+        format!("{ENG}dast:\n  auth:\n    header: Authorization\n    value_env: {AUTH_ENV}\n");
     let r = run_ascent_with(None, &eng, Some(&value));
     let stdout = String::from_utf8_lossy(&r.out.stdout);
     let stderr = String::from_utf8_lossy(&r.out.stderr);
@@ -265,22 +322,39 @@ fn auth_value_never_reaches_any_output() {
     assert!(!stderr.contains(&value), "auth value on stderr");
     // non-vacuous: nuclei did get the header, and its finding evidence carried it
     let args = r.calls[0]["args"].to_string();
-    assert!(args.contains(&value), "the fake nuclei never saw the header");
+    assert!(
+        args.contains(&value),
+        "the fake nuclei never saw the header"
+    );
     let files = files_under(&r.dir);
     assert!(files.len() >= 5, "{files:?}");
     for p in &files {
         let text = String::from_utf8_lossy(&std::fs::read(p).unwrap()).into_owned();
-        assert!(!text.contains(&value), "auth value leaked into {}", p.display());
+        assert!(
+            !text.contains(&value),
+            "auth value leaked into {}",
+            p.display()
+        );
     }
     let queue = std::fs::read_to_string(r.dir.join("queue.json")).unwrap();
-    assert!(queue.contains("curl -H") && queue.contains("***"), "{queue}");
+    assert!(
+        queue.contains("curl -H") && queue.contains("***"),
+        "{queue}"
+    );
     assert_eq!(read_json(&r.dir, "run.json")["dast"]["authenticated"], true);
 }
 
 /// libtest-style filters: positional args select tests by substring, `--skip X`
 /// excludes; the values of other option flags are never mistaken for filters.
 fn selected(name: &str, args: &[String]) -> bool {
-    const TAKES_VALUE: [&str; 6] = ["--test-threads", "--format", "--color", "--logfile", "--shuffle-seed", "-Z"];
+    const TAKES_VALUE: [&str; 6] = [
+        "--test-threads",
+        "--format",
+        "--color",
+        "--logfile",
+        "--shuffle-seed",
+        "-Z",
+    ];
     let (mut filters, mut skips) = (Vec::new(), Vec::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -298,11 +372,20 @@ fn selected(name: &str, args: &[String]) -> bool {
 
 fn run_tests(args: &[String]) {
     let tests: [(&str, fn()); 3] = [
-        ("request_outside_scope_is_incomplete_exit_3", request_outside_scope_is_incomplete_exit_3),
+        (
+            "request_outside_scope_is_incomplete_exit_3",
+            request_outside_scope_is_incomplete_exit_3,
+        ),
         ("clean_trace_passes_exit_0", clean_trace_passes_exit_0),
-        ("auth_value_never_reaches_any_output", auth_value_never_reaches_any_output),
+        (
+            "auth_value_never_reaches_any_output",
+            auth_value_never_reaches_any_output,
+        ),
     ];
-    assert!(selected("abc", &["--test-threads".into(), "4".into()]), "an option value is not a filter");
+    assert!(
+        selected("abc", &["--test-threads".into(), "4".into()]),
+        "an option value is not a filter"
+    );
     assert!(!selected("abc", &["--skip".into(), "ab".into()]));
     assert!(!selected("abc", &["xyz".into()]) && selected("abc", &["b".into()]));
     if args.iter().any(|a| a == "--list") {
@@ -323,7 +406,10 @@ fn run_tests(args: &[String]) {
     }
     let passed = selected.len() - failed.len();
     let verdict = if failed.is_empty() { "ok" } else { "FAILED" };
-    println!("\ntest result: {verdict}. {passed} passed; {} failed\n", failed.len());
+    println!(
+        "\ntest result: {verdict}. {passed} passed; {} failed\n",
+        failed.len()
+    );
     if !failed.is_empty() {
         std::process::exit(101);
     }

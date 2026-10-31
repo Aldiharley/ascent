@@ -36,7 +36,9 @@ pub fn read_run_status(out_dir: &str) -> Option<RunStatus> {
 }
 
 pub fn now_ts() -> String {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     crux::audit::format_ts(d.as_secs(), d.subsec_micros())
 }
 
@@ -50,10 +52,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let d = dir.to_str().unwrap();
         assert_eq!(read_run_status(d), None);
-        let s = RunStatus { complete: true, dry_run: false, failed_tools: vec![],
-            skipped_tools: vec!["gitleaks".into()], finished_at: now_ts(),
-            dast: Some(crate::stages::dast::DastSummary { scanned: 2, ..Default::default() }),
-            incomplete_reasons: vec!["DAST: no in-scope URL was reachable".into()] };
+        let s = RunStatus {
+            complete: true,
+            dry_run: false,
+            failed_tools: vec![],
+            skipped_tools: vec!["gitleaks".into()],
+            finished_at: now_ts(),
+            dast: Some(crate::stages::dast::DastSummary {
+                scanned: 2,
+                ..Default::default()
+            }),
+            incomplete_reasons: vec!["DAST: no in-scope URL was reachable".into()],
+        };
         write_run_status(d, &s).unwrap();
         assert_eq!(read_run_status(d), Some(s));
         std::fs::write(dir.join("run.json"), "not json").unwrap();

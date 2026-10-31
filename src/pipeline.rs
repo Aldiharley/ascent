@@ -48,17 +48,18 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 /// Outputs a previous run may have left behind that must never outlive a new run.
-const STALE_OUTPUTS: [&str; 4] =
-    ["gate.json", "ascent.sarif", "ascent-dast.sarif", "dast-coverage.json"];
+const STALE_OUTPUTS: [&str; 4] = [
+    "gate.json",
+    "ascent.sarif",
+    "ascent-dast.sarif",
+    "dast-coverage.json",
+];
 
 /// Effective SAST source root: the `--source` override if non-empty, else the
 /// engagement's `source`, else none. An override must lie within the engagement's
 /// source root (when one is set). The result is canonical, existing, and cannot
 /// be read as a tool flag.
-fn resolve_source(
-    eng: &Engagement,
-    source: Option<&str>,
-) -> Result<Option<String>, ConfigError> {
+fn resolve_source(eng: &Engagement, source: Option<&str>) -> Result<Option<String>, ConfigError> {
     let raw = match source {
         Some(s) if !s.is_empty() => {
             if !eng.source.is_empty() && !is_within(Path::new(&eng.source), Path::new(s)) {
@@ -126,14 +127,24 @@ pub fn run_pipeline(
     write_atomic(&Path::new(out_dir).join("queue.json"), b"[]\n")?;
     // Reset the run status to "incomplete" so a run that dies part-way can never
     // leave a previous run's "complete" behind for the policy gate to trust.
-    write_run_status(out_dir, &RunStatus { complete: false, dry_run, ..Default::default() })?;
+    write_run_status(
+        out_dir,
+        &RunStatus {
+            complete: false,
+            dry_run,
+            ..Default::default()
+        },
+    )?;
     // In dry-run the runner returns empty output, which would always fail the version
     // check. nuclei is needed only with DAST scope; `run_dast` checks httpx itself.
     if !dry_run && (!eng.hosts.is_empty() || !eng.urls.is_empty()) {
         ensure_nuclei_version(runner)?;
     }
     let dast = run_dast(eng, runner, auth.as_ref(), !dry_run)?;
-    let mut findings = dast.as_ref().map(|d| d.findings.clone()).unwrap_or_default();
+    let mut findings = dast
+        .as_ref()
+        .map(|d| d.findings.clone())
+        .unwrap_or_default();
     // SAST track (white-box): only when a source root is resolved; never in dry-run.
     let mut failed_tools = Vec::new();
     let mut skipped_tools = Vec::new();
@@ -160,19 +171,35 @@ pub fn run_pipeline(
     if let Some(d) = &dast {
         report.push_str(&coverage_markdown(&d.coverage));
         let cov = serde_json::to_string_pretty(&d.coverage).map_err(std::io::Error::other)? + "\n";
-        write_atomic(&Path::new(out_dir).join("dast-coverage.json"), cov.as_bytes())?;
+        write_atomic(
+            &Path::new(out_dir).join("dast-coverage.json"),
+            cov.as_bytes(),
+        )?;
     }
     std::fs::write(&report_path, report)?;
-    crate::sarif::write_sarif(out_dir, &crate::sarif::item_values(&items), eff_source.as_deref())?;
+    crate::sarif::write_sarif(
+        out_dir,
+        &crate::sarif::item_values(&items),
+        eff_source.as_deref(),
+    )?;
     let dast_summary = dast.as_ref().map(|d| d.summary.clone());
     let incomplete_reasons = match &dast_summary {
         Some(d) if !dry_run => dast_incomplete_reasons(eng, d),
         _ => vec![],
     };
     let complete = !dry_run && failed_tools.is_empty() && incomplete_reasons.is_empty();
-    write_run_status(out_dir, &RunStatus { complete, dry_run, failed_tools: failed_tools.clone(),
-        skipped_tools, finished_at: now_ts(), dast: dast_summary.clone(),
-        incomplete_reasons: incomplete_reasons.clone() })?;
+    write_run_status(
+        out_dir,
+        &RunStatus {
+            complete,
+            dry_run,
+            failed_tools: failed_tools.clone(),
+            skipped_tools,
+            finished_at: now_ts(),
+            dast: dast_summary.clone(),
+            incomplete_reasons: incomplete_reasons.clone(),
+        },
+    )?;
     Ok(Summary {
         urls: dast_summary.as_ref().map_or(0, |d| d.scanned),
         dast: dast_summary,
@@ -213,7 +240,10 @@ fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
         reasons.push(r);
     }
     if !d.unreachable_urls.is_empty() {
-        let mut r = format!("DAST: declared URL(s) unreachable: {}", d.unreachable_urls.join(", "));
+        let mut r = format!(
+            "DAST: declared URL(s) unreachable: {}",
+            d.unreachable_urls.join(", ")
+        );
         if d.unreachable_urls.iter().any(|u| is_localhost(u)) {
             r.push_str(LOCALHOST_HINT);
         }
@@ -300,8 +330,10 @@ mod tests {
                     "response":{"status_code":200}})],
                 "nuclei" => {
                     write_default_trace(a);
-                    vec![json!({"template-id":"sqli","info":{"name":"SQLi","severity":"high"},
-                        "matched-at":"https://app.example.com/login"})]
+                    vec![
+                        json!({"template-id":"sqli","info":{"name":"SQLi","severity":"high"},
+                        "matched-at":"https://app.example.com/login"}),
+                    ]
                 }
                 _ => vec![],
             })
@@ -321,7 +353,9 @@ mod tests {
     fn version_of(tool: &str, args: &[String]) -> String {
         match tool {
             "httpx" => "projectdiscovery.io\n[INF] Current Version: v1.12.0".into(),
-            "nuclei" if args.iter().any(|a| a == "-tl") => crate::stages::dast::test_support::benign_listing(),
+            "nuclei" if args.iter().any(|a| a == "-tl") => {
+                crate::stages::dast::test_support::benign_listing()
+            }
             _ => "nuclei v3.10.1".into(),
         }
     }
@@ -398,11 +432,20 @@ mod tests {
         let dir = unique_dir();
         run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
         let read = |n: &str| -> Value {
-            serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(&dir).join(n)).unwrap()).unwrap()
+            serde_json::from_str(
+                &std::fs::read_to_string(std::path::Path::new(&dir).join(n)).unwrap(),
+            )
+            .unwrap()
         };
         assert_eq!(read("ascent.sarif")["version"], "2.1.0");
         // FakeRun's nuclei finding is a URL finding: it lands in the DAST file
-        assert_eq!(read("ascent-dast.sarif")["runs"][0]["results"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            read("ascent-dast.sarif")["runs"][0]["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// Every DAST tool call errors (as a crashed scanner now does); version gate passes.
@@ -465,7 +508,9 @@ mod tests {
     #[test]
     fn recon_refuses_a_non_projectdiscovery_httpx() {
         let dir = unique_dir();
-        let e = run_pipeline(&engagement(), &PyHttpxRun, &FakeTri, &dir, false, None).err().unwrap();
+        let e = run_pipeline(&engagement(), &PyHttpxRun, &FakeTri, &dir, false, None)
+            .err()
+            .unwrap();
         assert!(e.to_string().contains("not ProjectDiscovery httpx"), "{e}");
         // dry-run skips the identity check (the runner returns "")
         assert!(run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).is_ok());
@@ -499,7 +544,10 @@ mod tests {
         }
         assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
         for n in STALE_OUTPUTS {
-            assert!(!std::path::Path::new(&dir).join(n).exists(), "stale {n} survived an aborted run");
+            assert!(
+                !std::path::Path::new(&dir).join(n).exists(),
+                "stale {n} survived an aborted run"
+            );
         }
     }
 
@@ -509,7 +557,9 @@ mod tests {
         seed_stale_queue(&dir);
         let audit = std::path::Path::new(&dir).join("audit.jsonl");
         std::fs::write(&audit, "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n").unwrap();
-        let e = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).err().unwrap();
+        let e = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None)
+            .err()
+            .unwrap();
         assert!(e.downcast_ref::<IntegrityError>().is_some(), "{e}");
         assert_eq!(queue(&dir)[0]["finding"]["title"], "stale from last run");
         assert!(!std::path::Path::new(&dir).join("run.json").exists());
@@ -520,7 +570,9 @@ mod tests {
         let out = unique_dir();
         let mut eng = sast_engagement(std::path::Path::new(&out));
         eng.source = String::new();
-        let e = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, Some("--config=evil")).err().unwrap();
+        let e = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, Some("--config=evil"))
+            .err()
+            .unwrap();
         assert!(e.downcast_ref::<ConfigError>().is_some(), "{e}");
     }
 
@@ -632,8 +684,10 @@ mod tests {
             if tool == "opengrep" {
                 let root = a.last().unwrap();
                 let path = std::path::Path::new(root).join("sub").join("a.rs");
-                return Ok(vec![json!({"results":[{"check_id":"r","path":path.to_string_lossy(),
-                    "start":{"line":1},"extra":{"severity":"ERROR","message":"m","lines":"q(x)"}}]})]);
+                return Ok(vec![
+                    json!({"results":[{"check_id":"r","path":path.to_string_lossy(),
+                    "start":{"line":1},"extra":{"severity":"ERROR","message":"m","lines":"q(x)"}}]}),
+                ]);
             }
             SastRun.run_json(tool, a, t)
         }
@@ -669,7 +723,10 @@ mod tests {
         let tri = RecTri::default();
         run_pipeline(&eng, &AbsSastRun, &tri, dir.to_str().unwrap(), false, None).unwrap();
         let items = tri.0.borrow().clone();
-        let sast_item = items.iter().find(|it| it["finding"]["tool"] == "opengrep").unwrap();
+        let sast_item = items
+            .iter()
+            .find(|it| it["finding"]["tool"] == "opengrep")
+            .unwrap();
         assert_eq!(sast_item["finding"]["file"], "sub/a.rs");
         // The gate fingerprint must equal the SARIF partialFingerprints value.
         let policy = crate::gate::policy::parse_policy(
@@ -679,10 +736,18 @@ mod tests {
         let st = crate::runstatus::read_run_status(dir.to_str().unwrap()).unwrap();
         let r = crate::gate::evaluate::evaluate(&items, &policy, Some(&st), false);
         assert_eq!(r.failed.len(), 1);
-        let sarif: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("ascent.sarif")).unwrap()).unwrap();
+        let sarif: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("ascent.sarif")).unwrap())
+                .unwrap();
         let res = &sarif["runs"][0]["results"][0];
-        assert_eq!(res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "sub/a.rs");
-        assert_eq!(res["partialFingerprints"]["ascentFindingHash/v1"], r.failed[0].fingerprint.as_str());
+        assert_eq!(
+            res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "sub/a.rs"
+        );
+        assert_eq!(
+            res["partialFingerprints"]["ascentFindingHash/v1"],
+            r.failed[0].fingerprint.as_str()
+        );
     }
 
     /// opengrep is installed but crashes; the other analysers work.
@@ -882,7 +947,15 @@ mod tests {
     #[test]
     fn dast_runs_over_every_host_and_url() {
         let dir = unique_dir();
-        let s = run_pipeline(&dast_engagement(), &HostRun { leak: None }, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(
+            &dast_engagement(),
+            &HostRun { leak: None },
+            &FakeTri,
+            &dir,
+            false,
+            None,
+        )
+        .unwrap();
         let run = read_json(&dir, "run.json");
         assert_eq!(run["dast"]["seeded"], 3, "{run}");
         assert_eq!(run["dast"]["scanned"], 3, "{run}");
@@ -895,20 +968,32 @@ mod tests {
     /// `HostRun`, but every nuclei pass's trace log holds exactly `0`.
     struct TraceRun(Vec<String>);
     impl Runner for TraceRun {
-        fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+        fn run_json(
+            &self,
+            t: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
             let rows = HostRun { leak: None }.run_json(t, a, g)?;
             if let Some(p) = flag_value(a, "-tlog") {
                 std::fs::write(p, self.0.join("\n")).unwrap();
             }
             Ok(rows)
         }
-        fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+        fn run_text(
+            &self,
+            t: &str,
+            a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
             Ok(version_of(t, a))
         }
     }
 
     fn gate_decision(dir: &str) -> (crate::gate::evaluate::Decision, u8) {
-        let policy = crate::gate::policy::parse_policy("version: 1\nfail_on:\n  severity: [CRITICAL]\n").unwrap();
+        let policy =
+            crate::gate::policy::parse_policy("version: 1\nfail_on:\n  severity: [CRITICAL]\n")
+                .unwrap();
         let st = crate::runstatus::read_run_status(dir).unwrap();
         let r = crate::gate::evaluate::evaluate(&[], &policy, Some(&st), false);
         (r.decision, r.exit_code)
@@ -924,26 +1009,46 @@ mod tests {
         ]);
         let s = run_pipeline(&dast_engagement(), &r, &FakeTri, &dir, false, None).unwrap();
         assert!(!s.complete);
-        let want = vec!["DAST: nuclei sent requests outside scope to: checkip.amazonaws.com".to_string()];
+        let want =
+            vec!["DAST: nuclei sent requests outside scope to: checkip.amazonaws.com".to_string()];
         assert_eq!(s.incomplete_reasons, want);
         let run = read_json(&dir, "run.json");
         assert_eq!(run["complete"], false);
         assert_eq!(run["incomplete_reasons"], json!(want));
-        assert_eq!(run["dast"]["out_of_scope_requests"], json!(["checkip.amazonaws.com"]));
+        assert_eq!(
+            run["dast"]["out_of_scope_requests"],
+            json!(["checkip.amazonaws.com"])
+        );
         assert_eq!(run["dast"]["off_scope_request_count"], 2);
         assert_eq!(run["dast"]["requests_sent"], 3);
         assert_eq!(run["dast"]["request_errors"], 1);
-        assert_eq!(gate_decision(&dir), (crate::gate::evaluate::Decision::Incomplete, 3));
+        assert_eq!(
+            gate_decision(&dir),
+            (crate::gate::evaluate::Decision::Incomplete, 3)
+        );
         let report = std::fs::read_to_string(Path::new(&dir).join("report.md")).unwrap();
-        assert!(report.contains("outside the scope: checkip.amazonaws.com"), "{report}");
+        assert!(
+            report.contains("outside the scope: checkip.amazonaws.com"),
+            "{report}"
+        );
     }
 
     #[test]
     fn a_host_where_most_requests_failed_makes_the_run_incomplete() {
         let dir = unique_dir();
-        let mut lines: Vec<String> = (0..10).map(|_| trace_line("c.example.com:443", "none")).collect();
+        let mut lines: Vec<String> = (0..10)
+            .map(|_| trace_line("c.example.com:443", "none"))
+            .collect();
         lines.extend((0..10).map(|_| trace_line("c.example.com:443", "context deadline exceeded")));
-        let s = run_pipeline(&dast_engagement(), &TraceRun(lines), &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(
+            &dast_engagement(),
+            &TraceRun(lines),
+            &FakeTri,
+            &dir,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(!s.complete);
         assert_eq!(
             s.incomplete_reasons,
@@ -955,7 +1060,12 @@ mod tests {
     /// `HostRun`, but once nuclei has run the httpx URL probe gets no answer.
     struct CrashRun(std::cell::Cell<bool>);
     impl Runner for CrashRun {
-        fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+        fn run_json(
+            &self,
+            t: &str,
+            a: &[String],
+            g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
             if t == "nuclei" {
                 self.0.set(true);
             }
@@ -964,7 +1074,12 @@ mod tests {
             }
             HostRun { leak: None }.run_json(t, a, g)
         }
-        fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+        fn run_text(
+            &self,
+            t: &str,
+            a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
             Ok(version_of(t, a))
         }
     }
@@ -984,42 +1099,70 @@ mod tests {
                 gone.join(", ")
             )]
         );
-        assert_eq!(read_json(&dir, "run.json")["dast"]["stopped_answering"], json!(gone));
+        assert_eq!(
+            read_json(&dir, "run.json")["dast"]["stopped_answering"],
+            json!(gone)
+        );
         assert_eq!(gate_decision(&dir).1, 3);
     }
 
     #[test]
     fn a_clean_trace_adds_no_reason_and_records_the_counts() {
         let dir = unique_dir();
-        let mut lines: Vec<String> = (0..11).map(|_| trace_line("c.example.com:443", "none")).collect();
+        let mut lines: Vec<String> = (0..11)
+            .map(|_| trace_line("c.example.com:443", "none"))
+            .collect();
         lines.extend((0..9).map(|_| trace_line("c.example.com:443", "i/o timeout")));
-        let s = run_pipeline(&dast_engagement(), &TraceRun(lines), &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(
+            &dast_engagement(),
+            &TraceRun(lines),
+            &FakeTri,
+            &dir,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(s.complete, "{:?}", s.incomplete_reasons);
         let run = read_json(&dir, "run.json");
         assert_eq!(run["dast"]["requests_sent"], 20);
         assert_eq!(run["dast"]["request_errors"], 9);
         assert_eq!(run["dast"]["off_scope_request_count"], 0);
         let report = std::fs::read_to_string(Path::new(&dir).join("report.md")).unwrap();
-        assert!(report.contains("nuclei sent 20 requests; 9 failed (timeouts/connection errors)"), "{report}");
+        assert!(
+            report.contains("nuclei sent 20 requests; 9 failed (timeouts/connection errors)"),
+            "{report}"
+        );
     }
 
     #[test]
     fn a_missing_trace_log_aborts_the_run_incomplete() {
         struct NoTrace;
         impl Runner for NoTrace {
-            fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            fn run_json(
+                &self,
+                t: &str,
+                a: &[String],
+                g: &[String],
+            ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
                 let rows = HostRun { leak: None }.run_json(t, a, g)?;
                 if let Some(p) = flag_value(a, "-tlog") {
                     let _ = std::fs::remove_file(p);
                 }
                 Ok(rows)
             }
-            fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+            fn run_text(
+                &self,
+                t: &str,
+                a: &[String],
+                _g: &[String],
+            ) -> Result<String, Box<dyn std::error::Error>> {
                 Ok(version_of(t, a))
             }
         }
         let dir = unique_dir();
-        let e = run_pipeline(&dast_engagement(), &NoTrace, &FakeTri, &dir, false, None).err().unwrap();
+        let e = run_pipeline(&dast_engagement(), &NoTrace, &FakeTri, &dir, false, None)
+            .err()
+            .unwrap();
         assert_eq!(e.to_string(), "nuclei trace log missing");
         assert!(!crate::runstatus::read_run_status(&dir).unwrap().complete);
     }
@@ -1027,7 +1170,15 @@ mod tests {
     #[test]
     fn dast_writes_coverage_and_report_section() {
         let dir = unique_dir();
-        run_pipeline(&dast_engagement(), &HostRun { leak: None }, &FakeTri, &dir, false, None).unwrap();
+        run_pipeline(
+            &dast_engagement(),
+            &HostRun { leak: None },
+            &FakeTri,
+            &dir,
+            false,
+            None,
+        )
+        .unwrap();
         let cov = read_json(&dir, "dast-coverage.json");
         assert_eq!(cov["categories"].as_array().unwrap().len(), 12);
         let report = std::fs::read_to_string(Path::new(&dir).join("report.md")).unwrap();
@@ -1054,7 +1205,10 @@ mod tests {
         let p = Path::new(&dir).join("dast-coverage.json");
         std::fs::write(&p, r#"{"stale":true}"#).unwrap();
         assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
-        assert!(!p.exists(), "stale dast-coverage.json survived an aborted run");
+        assert!(
+            !p.exists(),
+            "stale dast-coverage.json survived an aborted run"
+        );
     }
 
     fn auth_engagement(var: &str) -> Engagement {
@@ -1069,10 +1223,16 @@ mod tests {
     #[test]
     fn auth_value_never_reaches_any_output() {
         const VAR: &str = "ASCENT_T4_AUTH_NEVER_LEAKS";
-        let value = format!("Bearer tok-{}-{}", std::process::id(), COUNTER.load(Ordering::SeqCst));
+        let value = format!(
+            "Bearer tok-{}-{}",
+            std::process::id(),
+            COUNTER.load(Ordering::SeqCst)
+        );
         std::env::set_var(VAR, &value);
         let dir = unique_dir();
-        let runner = HostRun { leak: Some(value.clone()) };
+        let runner = HostRun {
+            leak: Some(value.clone()),
+        };
         let s = run_pipeline(&auth_engagement(VAR), &runner, &QueueTri, &dir, false, None).unwrap();
         assert!(s.dast.as_ref().unwrap().authenticated);
         assert_eq!(s.dast.as_ref().unwrap().auth_header, "Authorization");
@@ -1082,7 +1242,11 @@ mod tests {
             if p.is_file() {
                 let bytes = std::fs::read(&p).unwrap();
                 let text = String::from_utf8_lossy(&bytes);
-                assert!(!text.contains(&value), "auth value leaked into {}", p.display());
+                assert!(
+                    !text.contains(&value),
+                    "auth value leaked into {}",
+                    p.display()
+                );
                 checked += 1;
             }
         }
@@ -1115,9 +1279,16 @@ mod tests {
         const VAR: &str = "ASCENT_T4_AUTH_UNSET";
         std::env::remove_var(VAR);
         let dir = unique_dir();
-        let e = run_pipeline(&auth_engagement(VAR), &HostRun { leak: None }, &FakeTri, &dir, false, None)
-            .err()
-            .unwrap();
+        let e = run_pipeline(
+            &auth_engagement(VAR),
+            &HostRun { leak: None },
+            &FakeTri,
+            &dir,
+            false,
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(e.downcast_ref::<ConfigError>().is_some(), "{e}");
         assert!(!Path::new(&dir).join("queue.json").exists());
         assert!(!Path::new(&dir).join("run.json").exists());
@@ -1131,7 +1302,10 @@ mod tests {
         let out = unique_dir();
         let mut eng = sast_engagement(&src);
         eng.urls = vec![];
-        eng.dast.auth = Some(crate::scope::DastAuth { header: "Authorization".into(), value_env: VAR.into() });
+        eng.dast.auth = Some(crate::scope::DastAuth {
+            header: "Authorization".into(),
+            value_env: VAR.into(),
+        });
         let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None).unwrap();
         assert!(s.complete && s.dast.is_none());
     }
@@ -1180,7 +1354,15 @@ mod tests {
     #[test]
     fn unreachable_declared_url_makes_the_run_incomplete() {
         let dir = unique_dir();
-        let s = run_pipeline(&urls_engagement(&["http://127.0.0.1:9/"]), &DeadRun, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(
+            &urls_engagement(&["http://127.0.0.1:9/"]),
+            &DeadRun,
+            &FakeTri,
+            &dir,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(!s.complete);
         let want = [
             "DAST: no in-scope URL was reachable".to_string(),
@@ -1190,7 +1372,10 @@ mod tests {
         let st = crate::runstatus::read_run_status(&dir).unwrap();
         assert!(!st.complete && !st.dry_run);
         assert_eq!(st.incomplete_reasons, want);
-        assert_eq!(st.dast.unwrap().unreachable_urls, vec!["http://127.0.0.1:9/"]);
+        assert_eq!(
+            st.dast.unwrap().unreachable_urls,
+            vec!["http://127.0.0.1:9/"]
+        );
         // coverage agrees: nothing was tested
         let cov = read_json(&dir, "dast-coverage.json");
         assert_eq!(cov["scanned"], 0);
@@ -1204,26 +1389,54 @@ mod tests {
         // HostRun echoes every probe; make d.example.com dead by wrapping it
         struct OneDead;
         impl Runner for OneDead {
-            fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            fn run_json(
+                &self,
+                t: &str,
+                a: &[String],
+                g: &[String],
+            ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
                 let rows = HostRun { leak: None }.run_json(t, a, g)?;
-                Ok(rows.into_iter().filter(|r| r["input"] != "https://d.example.com/").collect())
+                Ok(rows
+                    .into_iter()
+                    .filter(|r| r["input"] != "https://d.example.com/")
+                    .collect())
             }
-            fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+            fn run_text(
+                &self,
+                t: &str,
+                a: &[String],
+                _g: &[String],
+            ) -> Result<String, Box<dyn std::error::Error>> {
                 Ok(version_of(t, a))
             }
         }
         let s = run_pipeline(&eng, &OneDead, &FakeTri, &dir, false, None).unwrap();
         assert!(s.urls > 0);
         assert!(!s.complete);
-        assert_eq!(s.incomplete_reasons, vec!["DAST: declared URL(s) unreachable: https://d.example.com/".to_string()]);
+        assert_eq!(
+            s.incomplete_reasons,
+            vec!["DAST: declared URL(s) unreachable: https://d.example.com/".to_string()]
+        );
     }
 
     #[test]
     fn unreachable_localhost_url_gets_the_resolver_hint() {
         let dir = unique_dir();
-        let s = run_pipeline(&urls_engagement(&["http://localhost:3000/"]), &DeadRun, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(
+            &urls_engagement(&["http://localhost:3000/"]),
+            &DeadRun,
+            &FakeTri,
+            &dir,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(!s.complete);
-        let r = s.incomplete_reasons.iter().find(|r| r.contains("unreachable")).unwrap();
+        let r = s
+            .incomplete_reasons
+            .iter()
+            .find(|r| r.contains("unreachable"))
+            .unwrap();
         assert_eq!(
             r,
             "DAST: declared URL(s) unreachable: http://localhost:3000/ — ProjectDiscovery tools may not resolve localhost; use 127.0.0.1"
@@ -1234,13 +1447,23 @@ mod tests {
     fn all_off_scope_surface_is_incomplete() {
         struct OffRun;
         impl Runner for OffRun {
-            fn run_json(&self, t: &str, _a: &[String], _g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            fn run_json(
+                &self,
+                t: &str,
+                _a: &[String],
+                _g: &[String],
+            ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
                 Ok(match t {
                     "httpx" => vec![json!({"url":"https://evil.test/"})],
                     _ => vec![],
                 })
             }
-            fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+            fn run_text(
+                &self,
+                t: &str,
+                a: &[String],
+                _g: &[String],
+            ) -> Result<String, Box<dyn std::error::Error>> {
                 Ok(version_of(t, a))
             }
         }
@@ -1249,19 +1472,40 @@ mod tests {
         eng.urls.clear();
         let s = run_pipeline(&eng, &OffRun, &FakeTri, &dir, false, None).unwrap();
         assert!(!s.complete);
-        assert_eq!(s.incomplete_reasons, vec!["DAST: no in-scope URL was reachable".to_string()]);
+        assert_eq!(
+            s.incomplete_reasons,
+            vec!["DAST: no in-scope URL was reachable".to_string()]
+        );
     }
 
     #[test]
     fn dry_run_coverage_says_nothing_was_sent() {
         let dir = unique_dir();
-        let s = run_pipeline(&dast_engagement(), &HostRun { leak: None }, &FakeTri, &dir, true, None).unwrap();
+        let s = run_pipeline(
+            &dast_engagement(),
+            &HostRun { leak: None },
+            &FakeTri,
+            &dir,
+            true,
+            None,
+        )
+        .unwrap();
         assert!(!s.complete);
         // a dry run is incomplete by itself; no DAST reachability reasons are invented
-        assert!(s.incomplete_reasons.is_empty(), "{:?}", s.incomplete_reasons);
+        assert!(
+            s.incomplete_reasons.is_empty(),
+            "{:?}",
+            s.incomplete_reasons
+        );
         let cov = read_json(&dir, "dast-coverage.json");
         assert_eq!(cov["scanned"], 0);
-        let sqli = cov["categories"].as_array().unwrap().iter().find(|c| c["id"] == "sqli").unwrap().clone();
+        let sqli = cov["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "sqli")
+            .unwrap()
+            .clone();
         assert_eq!(sqli["status"], "not_tested");
         assert_eq!(sqli["reason"], "dry run: nothing was sent");
     }

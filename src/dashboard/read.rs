@@ -102,7 +102,11 @@ mod tests {
         let dir = tmp();
         let d = dir.to_str().unwrap();
         assert_eq!(read_gate(d), Value::Null);
-        std::fs::write(dir.join("gate.json"), r#"{"decision":"FAIL","exit_code":1}"#).unwrap();
+        std::fs::write(
+            dir.join("gate.json"),
+            r#"{"decision":"FAIL","exit_code":1}"#,
+        )
+        .unwrap();
         assert_eq!(read_gate(d)["decision"], "FAIL");
         std::fs::write(dir.join("gate.json"), "garbage").unwrap();
         assert_eq!(read_gate(d), Value::Null);

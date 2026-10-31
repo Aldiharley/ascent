@@ -29,7 +29,11 @@ pub struct FailRule {
 }
 impl Default for FailRule {
     fn default() -> Self {
-        FailRule { severity: vec![], categories: all_categories(), cwe: vec![] }
+        FailRule {
+            severity: vec![],
+            categories: all_categories(),
+            cwe: vec![],
+        }
     }
 }
 
@@ -75,7 +79,10 @@ fn upper_all(v: &mut [String]) {
 
 fn check_in(field: &str, vals: &[String], allowed: &[&str]) -> Result<(), String> {
     match vals.iter().find(|v| !allowed.contains(&v.as_str())) {
-        Some(bad) => Err(format!("{field}: unknown value {bad:?} (allowed: {})", allowed.join(", "))),
+        Some(bad) => Err(format!(
+            "{field}: unknown value {bad:?} (allowed: {})",
+            allowed.join(", ")
+        )),
         None => Ok(()),
     }
 }
@@ -93,7 +100,8 @@ pub fn canonical_cwe(v: &str) -> Option<String> {
 
 fn canonicalise_cwes(field: &str, vals: &mut [String]) -> Result<(), String> {
     for v in vals.iter_mut() {
-        *v = canonical_cwe(v).ok_or_else(|| format!("{field}: {v:?} is not a CWE id like CWE-89"))?;
+        *v = canonical_cwe(v)
+            .ok_or_else(|| format!("{field}: {v:?} is not a CWE id like CWE-89"))?;
     }
     Ok(())
 }
@@ -106,7 +114,10 @@ fn sort_dedupe(v: &mut Vec<String>) {
 pub fn parse_policy(text: &str) -> Result<Policy, String> {
     let mut p: Policy = serde_yaml_ng::from_str(text).map_err(|e| e.to_string())?;
     if p.version != 1 {
-        return Err(format!("unsupported policy version {} (expected 1)", p.version));
+        return Err(format!(
+            "unsupported policy version {} (expected 1)",
+            p.version
+        ));
     }
     upper_all(&mut p.fail_on.severity);
     upper_all(&mut p.fail_on.categories);
@@ -122,15 +133,21 @@ pub fn parse_policy(text: &str) -> Result<Policy, String> {
     canonicalise_cwes("fail_on.cwe", &mut p.fail_on.cwe)?;
     canonicalise_cwes("warn_on.cwe", &mut p.warn_on.cwe)?;
     // Order and duplicates carry no meaning: normalise them so policy_hash is semantic.
-    for v in [&mut p.fail_on.severity, &mut p.fail_on.categories, &mut p.fail_on.cwe,
-              &mut p.warn_on.severity, &mut p.warn_on.cwe] {
+    for v in [
+        &mut p.fail_on.severity,
+        &mut p.fail_on.categories,
+        &mut p.fail_on.cwe,
+        &mut p.warn_on.severity,
+        &mut p.warn_on.cwe,
+    ] {
         sort_dedupe(v);
     }
     Ok(p)
 }
 
 pub fn load_policy(path: &str) -> Result<Policy, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read policy {path}: {e}"))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read policy {path}: {e}"))?;
     parse_policy(&text).map_err(|e| format!("invalid policy {path}: {e}"))
 }
 
@@ -146,7 +163,11 @@ mod tests {
 
     #[test]
     fn example_policy_parses() {
-        let p = load_policy(concat!(env!("CARGO_MANIFEST_DIR"), "/samples/ascent-policy.example.yaml")).unwrap();
+        let p = load_policy(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/samples/ascent-policy.example.yaml"
+        ))
+        .unwrap();
         assert_eq!(p.name, "default");
         assert_eq!(p.fail_on.severity, vec!["CRITICAL", "HIGH"]);
         assert_eq!(p.fail_on.cwe, vec!["CWE-798"]);
@@ -164,18 +185,27 @@ mod tests {
     }
     #[test]
     fn values_are_case_normalised() {
-        let p = parse_policy("version: 1\nfail_on:\n  severity: [high]\n  categories: [sast]\n  cwe: [cwe-89]\n").unwrap();
+        let p = parse_policy(
+            "version: 1\nfail_on:\n  severity: [high]\n  categories: [sast]\n  cwe: [cwe-89]\n",
+        )
+        .unwrap();
         assert_eq!(p.fail_on.severity, vec!["HIGH"]);
         assert_eq!(p.fail_on.categories, vec!["SAST"]);
         assert_eq!(p.fail_on.cwe, vec!["CWE-89"]);
     }
     #[test]
     fn cwe_ids_are_canonical() {
-        let p = parse_policy("version: 1\nfail_on:\n  cwe: [CWE-089, cwe-0798]\nwarn_on:\n  cwe: [CWE-0022]\n").unwrap();
+        let p = parse_policy(
+            "version: 1\nfail_on:\n  cwe: [CWE-089, cwe-0798]\nwarn_on:\n  cwe: [CWE-0022]\n",
+        )
+        .unwrap();
         assert_eq!(p.fail_on.cwe, vec!["CWE-798", "CWE-89"]);
         assert_eq!(p.warn_on.cwe, vec!["CWE-22"]);
         for bad in ["CWE-", "CWE-8a9", "CWE--89", "CWE-+89", "89"] {
-            assert!(parse_policy(&format!("version: 1\nfail_on:\n  cwe: ['{bad}']\n")).is_err(), "{bad}");
+            assert!(
+                parse_policy(&format!("version: 1\nfail_on:\n  cwe: ['{bad}']\n")).is_err(),
+                "{bad}"
+            );
         }
     }
     #[test]
@@ -183,23 +213,27 @@ mod tests {
         let a = parse_policy("version: 1\nfail_on:\n  severity: [HIGH, CRITICAL]\n").unwrap();
         let b = parse_policy("version: 1\nfail_on:\n  severity: [CRITICAL, HIGH, HIGH]\n").unwrap();
         assert_eq!(policy_hash(&a), policy_hash(&b));
-        let c = parse_policy("version: 1\nfail_on:\n  categories: [SCA, SAST, SAST]\n  cwe: [CWE-89, CWE-089]\n").unwrap();
-        let d = parse_policy("version: 1\nfail_on:\n  categories: [SAST, SCA]\n  cwe: [CWE-89]\n").unwrap();
+        let c = parse_policy(
+            "version: 1\nfail_on:\n  categories: [SCA, SAST, SAST]\n  cwe: [CWE-89, CWE-089]\n",
+        )
+        .unwrap();
+        let d = parse_policy("version: 1\nfail_on:\n  categories: [SAST, SCA]\n  cwe: [CWE-89]\n")
+            .unwrap();
         assert_eq!(policy_hash(&c), policy_hash(&d));
     }
     #[test]
     fn rejects_everything_suspicious() {
         for bad in [
             "version: 2\n",
-            "name: x\n",                                           // version missing
-            "version: 1\ngrace_days: {HIGH: 7}\n",                 // future key, top level
-            "version: 1\nfail_on:\n  sevrity: [HIGH]\n",           // typo
+            "name: x\n",                                 // version missing
+            "version: 1\ngrace_days: {HIGH: 7}\n",       // future key, top level
+            "version: 1\nfail_on:\n  sevrity: [HIGH]\n", // typo
             "version: 1\nfail_on:\n  severity: [SEVERE]\n",
             "version: 1\nfail_on:\n  categories: [LICENSE]\n",
             "version: 1\nfail_on:\n  cwe: ['89']\n",
-            "version: 1\nwarn_on:\n  categories: [SAST]\n",        // warn_on has no categories
+            "version: 1\nwarn_on:\n  categories: [SAST]\n", // warn_on has no categories
             "version: 1\ntriage:\n  likely_false_positive: ignore\n",
-            "version: 1\nfail_on:\n  categories: []\n",            // would evaluate nothing
+            "version: 1\nfail_on:\n  categories: []\n", // would evaluate nothing
             ": : :",
         ] {
             assert!(parse_policy(bad).is_err(), "accepted bad policy: {bad:?}");

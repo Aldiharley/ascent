@@ -23,7 +23,11 @@ pub fn normalise_nuclei(rows: &[Value]) -> Vec<Finding> {
                 .unwrap_or("")
                 .to_string();
             let rid = r["template-id"].as_str().unwrap_or("nuclei").to_string();
-            let tool = if r["ascent-pass"] == "dast" { "nuclei-dast" } else { "nuclei" };
+            let tool = if r["ascent-pass"] == "dast" {
+                "nuclei-dast"
+            } else {
+                "nuclei"
+            };
             let name = info["name"].as_str().unwrap_or("finding");
             let (id, title) = match r["matcher-name"].as_str().filter(|m| !m.is_empty()) {
                 Some(m) => (format!("{tool}:{rid}:{m}:{loc}"), format!("{name} ({m})")),
@@ -210,7 +214,10 @@ pub fn normalise_trivy(rows: &[Value]) -> Vec<Finding> {
                     evidence: format!(
                         "pkg={pkg} installed={} fixed={} purl={}",
                         v["InstalledVersion"].as_str().unwrap_or(""),
-                        v["FixedVersion"].as_str().filter(|s| !s.is_empty()).unwrap_or("none"),
+                        v["FixedVersion"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("none"),
                         v["PkgIdentifier"]["PURL"].as_str().unwrap_or(""),
                     ),
                 });
@@ -250,8 +257,13 @@ mod tests {
         assert_eq!(out[0].title, "Panel (grafana)");
         assert_ne!(out[0].id, out[1].id);
         // without a matcher name nothing changes
-        let plain = normalise_nuclei(&[serde_json::json!({"template-id":"t","info":{"name":"N"},"matched-at":"http://h/"})]);
-        assert_eq!((plain[0].id.as_str(), plain[0].title.as_str()), ("nuclei:t:http://h/", "N"));
+        let plain = normalise_nuclei(&[
+            serde_json::json!({"template-id":"t","info":{"name":"N"},"matched-at":"http://h/"}),
+        ]);
+        assert_eq!(
+            (plain[0].id.as_str(), plain[0].title.as_str()),
+            ("nuclei:t:http://h/", "N")
+        );
     }
 
     #[test]
@@ -272,10 +284,12 @@ mod sast_tests {
 
     #[test]
     fn trivy_keeps_installed_and_fixed_versions() {
-        let rows = vec![json!({"Results":[{"Target":"package-lock.json","Vulnerabilities":[{
+        let rows = vec![
+            json!({"Results":[{"Target":"package-lock.json","Vulnerabilities":[{
             "VulnerabilityID":"CVE-2021-3749","PkgName":"axios","InstalledVersion":"0.21.1",
             "FixedVersion":"0.21.2","PkgIdentifier":{"PURL":"pkg:npm/axios@0.21.1"},
-            "Severity":"HIGH","Title":"axios ReDoS"}]}]})];
+            "Severity":"HIGH","Title":"axios ReDoS"}]}]}),
+        ];
         let out = normalise_trivy(&rows);
         assert_eq!(
             out[0].evidence,
@@ -289,7 +303,10 @@ mod sast_tests {
     fn trivy_without_a_fix_says_none() {
         let rows = vec![json!({"Results":[{"Target":"go.mod","Vulnerabilities":[{
             "VulnerabilityID":"CVE-1","PkgName":"x","InstalledVersion":"1.0.0","Severity":"LOW"}]}]})];
-        assert_eq!(normalise_trivy(&rows)[0].evidence, "pkg=x installed=1.0.0 fixed=none purl=");
+        assert_eq!(
+            normalise_trivy(&rows)[0].evidence,
+            "pkg=x installed=1.0.0 fixed=none purl="
+        );
     }
 
     #[test]
