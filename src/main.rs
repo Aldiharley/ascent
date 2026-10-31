@@ -59,6 +59,12 @@ enum Cmd {
         /// Treat a CONDITIONAL verdict (warnings only) as a failure (exit 1).
         #[arg(long)]
         fail_on_warn: bool,
+        /// Wall-clock limit in seconds for all nuclei DAST passes combined (default 2 h).
+        /// When hit, nuclei is stopped (SIGTERM then SIGKILL) and findings collected so
+        /// far are kept, but the run is marked INCOMPLETE with reason
+        /// `wall_clock_limit_hit`. The engagement file cannot set this.
+        #[arg(long, default_value_t = 7200)]
+        dast_timeout: u64,
     },
     /// Evaluate a policy against an existing output directory (CI step).
     Gate {
@@ -177,6 +183,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
             min_confidence,
             policy,
             fail_on_warn,
+            dast_timeout,
         } => {
             // Load the policy BEFORE scanning so a bad policy fails fast (exit 2).
             let policy = policy
@@ -193,6 +200,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
                 &out,
                 dry_run,
                 source.as_deref(),
+                dast_timeout,
             )
             .map_err(|e| {
                 // Typed errors pick the exit code; never match on message text.
@@ -255,7 +263,15 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
             }
             match policy {
                 Some(p) => gate_step(&out, &p, fail_on_warn),
-                None => Ok(0),
+                None => {
+                    // Dry-run: incomplete but no scanner failures → exit 0.
+                    // Real incomplete run (timed out, scanner error, …) → exit 3.
+                    if s.incomplete_reasons.is_empty() {
+                        Ok(0)
+                    } else {
+                        Ok(3)
+                    }
+                }
             }
         }
         Cmd::Gate {

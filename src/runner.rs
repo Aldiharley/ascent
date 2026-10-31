@@ -15,6 +15,11 @@ pub trait Runner {
         args: &[String],
         targets: &[String],
     ) -> Result<String, Box<dyn std::error::Error>>;
+    /// Returns true when this runner spawns real processes and can honour a
+    /// wall-clock deadline on nuclei (false for all in-process fake runners).
+    fn supports_timeout(&self) -> bool {
+        false
+    }
 }
 
 pub fn parse_jsonl(stdout: &str) -> Vec<Value> {
@@ -52,6 +57,10 @@ impl ToolRunner {
 }
 
 impl Runner for ToolRunner {
+    fn supports_timeout(&self) -> bool {
+        !self.dry_run
+    }
+
     fn run_text(
         &self,
         tool: &str,

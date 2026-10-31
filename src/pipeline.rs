@@ -94,6 +94,7 @@ pub fn run_pipeline(
     out_dir: &str,
     dry_run: bool,
     source: Option<&str>,
+    dast_timeout_secs: u64,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     // A tampered audit chain stops the run before anything is reset or written.
     let (ok, msg) = crux::AuditLog::new(Path::new(out_dir).join("audit.jsonl")).verify();
@@ -140,7 +141,7 @@ pub fn run_pipeline(
     if !dry_run && (!eng.hosts.is_empty() || !eng.urls.is_empty()) {
         ensure_nuclei_version(runner)?;
     }
-    let dast = run_dast(eng, runner, auth.as_ref(), !dry_run)?;
+    let dast = run_dast(eng, runner, auth.as_ref(), !dry_run, dast_timeout_secs)?;
     let mut findings = dast
         .as_ref()
         .map(|d| d.findings.clone())
@@ -232,6 +233,9 @@ fn is_localhost(target: &str) -> bool {
 /// stopped answering during the scan.
 fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
     let mut reasons = Vec::new();
+    if d.wall_clock_limit_hit {
+        reasons.push("wall_clock_limit_hit".to_string());
+    }
     if d.scanned == 0 {
         let mut r = "DAST: no in-scope URL was reachable".to_string();
         if eng.hosts.iter().any(|h| is_localhost(h)) {
@@ -404,7 +408,7 @@ mod tests {
     #[test]
     fn pipeline_runs() {
         let dir = unique_dir();
-        let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None, 7200).unwrap();
         assert!(s.findings >= 1);
         assert!(std::path::Path::new(&s.report_path).exists());
     }
@@ -412,7 +416,7 @@ mod tests {
     #[test]
     fn dry_run_writes_an_incomplete_run_status() {
         let dir = unique_dir();
-        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).unwrap();
+        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None, 7200).unwrap();
         assert!(!s.complete);
         let st = crate::runstatus::read_run_status(&dir).unwrap();
         assert!(!st.complete && st.dry_run);
@@ -421,7 +425,7 @@ mod tests {
     #[test]
     fn full_run_writes_a_complete_run_status() {
         let dir = unique_dir();
-        let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None, 7200).unwrap();
         assert!(s.complete && s.failed_tools.is_empty());
         let st = crate::runstatus::read_run_status(&dir).unwrap();
         assert!(st.complete && !st.dry_run && !st.finished_at.is_empty());
@@ -430,7 +434,7 @@ mod tests {
     #[test]
     fn pipeline_writes_sarif() {
         let dir = unique_dir();
-        run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None).unwrap();
+        run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None, 7200).unwrap();
         let read = |n: &str| -> Value {
             serde_json::from_str(
                 &std::fs::read_to_string(std::path::Path::new(&dir).join(n)).unwrap(),
@@ -476,7 +480,7 @@ mod tests {
         let mut eng = sast_engagement(&src);
         eng.urls = vec![];
         // EmptyRun's run_text returns "": the nuclei version gate would fail if it ran.
-        let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None).unwrap();
+        let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None, 7200).unwrap();
         assert_eq!(s.findings, 0);
         assert!(s.complete);
     }
@@ -508,12 +512,20 @@ mod tests {
     #[test]
     fn recon_refuses_a_non_projectdiscovery_httpx() {
         let dir = unique_dir();
-        let e = run_pipeline(&engagement(), &PyHttpxRun, &FakeTri, &dir, false, None)
-            .err()
-            .unwrap();
+        let e = run_pipeline(
+            &engagement(),
+            &PyHttpxRun,
+            &FakeTri,
+            &dir,
+            false,
+            None,
+            7200,
+        )
+        .err()
+        .unwrap();
         assert!(e.to_string().contains("not ProjectDiscovery httpx"), "{e}");
         // dry-run skips the identity check (the runner returns "")
-        assert!(run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).is_ok());
+        assert!(run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None, 7200).is_ok());
     }
 
     #[test]
@@ -531,7 +543,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
+        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None, 7200).is_err());
         let st = crate::runstatus::read_run_status(&dir).unwrap();
         assert!(!st.complete, "stale complete=true survived an aborted run");
     }
@@ -542,7 +554,7 @@ mod tests {
         for n in STALE_OUTPUTS {
             std::fs::write(std::path::Path::new(&dir).join(n), r#"{"decision":"PASS"}"#).unwrap();
         }
-        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
+        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None, 7200).is_err());
         for n in STALE_OUTPUTS {
             assert!(
                 !std::path::Path::new(&dir).join(n).exists(),
@@ -557,7 +569,7 @@ mod tests {
         seed_stale_queue(&dir);
         let audit = std::path::Path::new(&dir).join("audit.jsonl");
         std::fs::write(&audit, "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n").unwrap();
-        let e = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None)
+        let e = run_pipeline(&engagement(), &FakeRun, &FakeTri, &dir, false, None, 7200)
             .err()
             .unwrap();
         assert!(e.downcast_ref::<IntegrityError>().is_some(), "{e}");
@@ -570,9 +582,17 @@ mod tests {
         let out = unique_dir();
         let mut eng = sast_engagement(std::path::Path::new(&out));
         eng.source = String::new();
-        let e = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, Some("--config=evil"))
-            .err()
-            .unwrap();
+        let e = run_pipeline(
+            &eng,
+            &SastRun,
+            &FakeTri,
+            &out,
+            false,
+            Some("--config=evil"),
+            7200,
+        )
+        .err()
+        .unwrap();
         assert!(e.downcast_ref::<ConfigError>().is_some(), "{e}");
     }
 
@@ -595,7 +615,7 @@ mod tests {
     fn rerun_with_no_findings_resets_queue_json() {
         let dir = unique_dir();
         seed_stale_queue(&dir);
-        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).unwrap();
+        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None, 7200).unwrap();
         assert_eq!(s.findings, 0);
         assert_eq!(queue(&dir), json!([]));
         assert!(!std::path::Path::new(&dir).join("queue.json.tmp").exists());
@@ -616,14 +636,14 @@ mod tests {
     fn failed_triage_leaves_empty_queue_json() {
         let dir = unique_dir();
         seed_stale_queue(&dir);
-        assert!(run_pipeline(&engagement(), &FakeRun, &FailTri, &dir, false, None).is_err());
+        assert!(run_pipeline(&engagement(), &FakeRun, &FailTri, &dir, false, None, 7200).is_err());
         assert_eq!(queue(&dir), json!([]));
     }
 
     #[test]
     fn dry_run_skips_version_check() {
         let dir = unique_dir();
-        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None).unwrap();
+        let s = run_pipeline(&engagement(), &EmptyRun, &FakeTri, &dir, true, None, 7200).unwrap();
         assert_eq!(s.findings, 0);
         assert!(std::path::Path::new(&s.report_path).exists());
     }
@@ -721,7 +741,16 @@ mod tests {
         let dir = std::path::PathBuf::from(unique_dir());
         let eng = sast_engagement(&dir);
         let tri = RecTri::default();
-        run_pipeline(&eng, &AbsSastRun, &tri, dir.to_str().unwrap(), false, None).unwrap();
+        run_pipeline(
+            &eng,
+            &AbsSastRun,
+            &tri,
+            dir.to_str().unwrap(),
+            false,
+            None,
+            7200,
+        )
+        .unwrap();
         let items = tri.0.borrow().clone();
         let sast_item = items
             .iter()
@@ -779,7 +808,7 @@ mod tests {
         let dir = std::path::PathBuf::from(unique_dir());
         let eng = sast_engagement(&dir);
         let d = dir.to_str().unwrap();
-        let s = run_pipeline(&eng, &CrashingOpengrepRun, &FakeTri, d, false, None).unwrap();
+        let s = run_pipeline(&eng, &CrashingOpengrepRun, &FakeTri, d, false, None, 7200).unwrap();
         assert!(!s.complete);
         assert_eq!(s.failed_tools, vec!["opengrep".to_string()]);
         let st = crate::runstatus::read_run_status(d).unwrap();
@@ -791,7 +820,16 @@ mod tests {
     fn pipeline_merges_sast_and_dast_findings() {
         let dir = std::path::PathBuf::from(unique_dir());
         let eng = sast_engagement(&dir);
-        let s = run_pipeline(&eng, &SastRun, &FakeTri, dir.to_str().unwrap(), false, None).unwrap();
+        let s = run_pipeline(
+            &eng,
+            &SastRun,
+            &FakeTri,
+            dir.to_str().unwrap(),
+            false,
+            None,
+            7200,
+        )
+        .unwrap();
         // 1 DAST (nuclei) + 1 SAST (opengrep) finding both reach triage.
         assert_eq!(s.findings, 2);
         assert_eq!(s.triaged, 2);
@@ -802,7 +840,7 @@ mod tests {
         let out = unique_dir();
         let mut eng = sast_engagement(std::path::Path::new(&out));
         eng.source = String::new();
-        let s = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, None).unwrap();
+        let s = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, None, 7200).unwrap();
         assert_eq!(s.findings, 1); // nuclei only; opengrep never ran
     }
 
@@ -810,7 +848,16 @@ mod tests {
     fn dry_run_skips_sast() {
         let dir = std::path::PathBuf::from(unique_dir());
         let eng = sast_engagement(&dir);
-        let s = run_pipeline(&eng, &SastRun, &FakeTri, dir.to_str().unwrap(), true, None).unwrap();
+        let s = run_pipeline(
+            &eng,
+            &SastRun,
+            &FakeTri,
+            dir.to_str().unwrap(),
+            true,
+            None,
+            7200,
+        )
+        .unwrap();
         assert_eq!(s.findings, 1); // DAST scan still planned by fake; no SAST
     }
 
@@ -826,6 +873,7 @@ mod tests {
             root.to_str().unwrap(),
             false,
             Some(other.to_str().unwrap()),
+            7200,
         );
         assert!(r.is_err());
         assert!(r.err().unwrap().to_string().contains("outside"));
@@ -844,6 +892,7 @@ mod tests {
             root.to_str().unwrap(),
             false,
             Some(sub.to_str().unwrap()),
+            7200,
         )
         .unwrap();
         assert_eq!(s.findings, 2);
@@ -855,7 +904,7 @@ mod tests {
         let src = std::path::PathBuf::from(unique_dir());
         let mut eng = sast_engagement(&src);
         eng.source = String::new();
-        let s = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, src.to_str()).unwrap();
+        let s = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, src.to_str(), 7200).unwrap();
         assert_eq!(s.findings, 2);
     }
 
@@ -881,6 +930,7 @@ mod tests {
             &out,
             false,
             Some(missing.to_str().unwrap()),
+            7200,
         );
         assert!(r.is_err());
     }
@@ -954,6 +1004,7 @@ mod tests {
             &dir,
             false,
             None,
+            7200,
         )
         .unwrap();
         let run = read_json(&dir, "run.json");
@@ -1007,7 +1058,7 @@ mod tests {
             trace_line("checkip.amazonaws.com:443", "none"),
             trace_line("checkip.amazonaws.com:3000", "no address found for host"),
         ]);
-        let s = run_pipeline(&dast_engagement(), &r, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(&dast_engagement(), &r, &FakeTri, &dir, false, None, 7200).unwrap();
         assert!(!s.complete);
         let want =
             vec!["DAST: nuclei sent requests outside scope to: checkip.amazonaws.com".to_string()];
@@ -1047,6 +1098,7 @@ mod tests {
             &dir,
             false,
             None,
+            7200,
         )
         .unwrap();
         assert!(!s.complete);
@@ -1088,7 +1140,7 @@ mod tests {
     fn a_target_that_stops_answering_during_the_scan_makes_the_run_incomplete() {
         let dir = unique_dir();
         let r = CrashRun(std::cell::Cell::new(false));
-        let s = run_pipeline(&dast_engagement(), &r, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(&dast_engagement(), &r, &FakeTri, &dir, false, None, 7200).unwrap();
         assert!(!s.complete);
         let gone = &s.dast.as_ref().unwrap().stopped_answering;
         assert_eq!(gone.len(), 3, "{gone:?}");
@@ -1120,6 +1172,7 @@ mod tests {
             &dir,
             false,
             None,
+            7200,
         )
         .unwrap();
         assert!(s.complete, "{:?}", s.incomplete_reasons);
@@ -1160,9 +1213,17 @@ mod tests {
             }
         }
         let dir = unique_dir();
-        let e = run_pipeline(&dast_engagement(), &NoTrace, &FakeTri, &dir, false, None)
-            .err()
-            .unwrap();
+        let e = run_pipeline(
+            &dast_engagement(),
+            &NoTrace,
+            &FakeTri,
+            &dir,
+            false,
+            None,
+            7200,
+        )
+        .err()
+        .unwrap();
         assert_eq!(e.to_string(), "nuclei trace log missing");
         assert!(!crate::runstatus::read_run_status(&dir).unwrap().complete);
     }
@@ -1177,6 +1238,7 @@ mod tests {
             &dir,
             false,
             None,
+            7200,
         )
         .unwrap();
         let cov = read_json(&dir, "dast-coverage.json");
@@ -1191,7 +1253,7 @@ mod tests {
         let out = unique_dir();
         let mut eng = sast_engagement(&src);
         eng.urls = vec![];
-        run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None).unwrap();
+        run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None, 7200).unwrap();
         assert!(!Path::new(&out).join("dast-coverage.json").exists());
         let run = read_json(&out, "run.json");
         assert!(run["dast"].is_null(), "{run}");
@@ -1204,7 +1266,7 @@ mod tests {
         let dir = unique_dir();
         let p = Path::new(&dir).join("dast-coverage.json");
         std::fs::write(&p, r#"{"stale":true}"#).unwrap();
-        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None).is_err());
+        assert!(run_pipeline(&engagement(), &FailRun, &FakeTri, &dir, false, None, 7200).is_err());
         assert!(
             !p.exists(),
             "stale dast-coverage.json survived an aborted run"
@@ -1233,7 +1295,16 @@ mod tests {
         let runner = HostRun {
             leak: Some(value.clone()),
         };
-        let s = run_pipeline(&auth_engagement(VAR), &runner, &QueueTri, &dir, false, None).unwrap();
+        let s = run_pipeline(
+            &auth_engagement(VAR),
+            &runner,
+            &QueueTri,
+            &dir,
+            false,
+            None,
+            7200,
+        )
+        .unwrap();
         assert!(s.dast.as_ref().unwrap().authenticated);
         assert_eq!(s.dast.as_ref().unwrap().auth_header, "Authorization");
         let mut checked = 0;
@@ -1286,6 +1357,7 @@ mod tests {
             &dir,
             false,
             None,
+            7200,
         )
         .err()
         .unwrap();
@@ -1306,7 +1378,7 @@ mod tests {
             header: "Authorization".into(),
             value_env: VAR.into(),
         });
-        let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None).unwrap();
+        let s = run_pipeline(&eng, &EmptyRun, &FakeTri, &out, false, None, 7200).unwrap();
         assert!(s.complete && s.dast.is_none());
     }
 
@@ -1315,7 +1387,16 @@ mod tests {
         const VAR: &str = "ASCENT_T4_AUTH_UNSET_DRY";
         std::env::remove_var(VAR);
         let dir = unique_dir();
-        let s = run_pipeline(&auth_engagement(VAR), &EmptyRun, &FakeTri, &dir, true, None).unwrap();
+        let s = run_pipeline(
+            &auth_engagement(VAR),
+            &EmptyRun,
+            &FakeTri,
+            &dir,
+            true,
+            None,
+            7200,
+        )
+        .unwrap();
         assert!(!s.dast.as_ref().unwrap().authenticated);
     }
 
@@ -1361,6 +1442,7 @@ mod tests {
             &dir,
             false,
             None,
+            7200,
         )
         .unwrap();
         assert!(!s.complete);
@@ -1410,7 +1492,7 @@ mod tests {
                 Ok(version_of(t, a))
             }
         }
-        let s = run_pipeline(&eng, &OneDead, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(&eng, &OneDead, &FakeTri, &dir, false, None, 7200).unwrap();
         assert!(s.urls > 0);
         assert!(!s.complete);
         assert_eq!(
@@ -1429,6 +1511,7 @@ mod tests {
             &dir,
             false,
             None,
+            7200,
         )
         .unwrap();
         assert!(!s.complete);
@@ -1470,7 +1553,7 @@ mod tests {
         let dir = unique_dir();
         let mut eng = engagement();
         eng.urls.clear();
-        let s = run_pipeline(&eng, &OffRun, &FakeTri, &dir, false, None).unwrap();
+        let s = run_pipeline(&eng, &OffRun, &FakeTri, &dir, false, None, 7200).unwrap();
         assert!(!s.complete);
         assert_eq!(
             s.incomplete_reasons,
@@ -1488,6 +1571,7 @@ mod tests {
             &dir,
             true,
             None,
+            7200,
         )
         .unwrap();
         assert!(!s.complete);
@@ -1515,7 +1599,15 @@ mod tests {
         let out = unique_dir();
         let mut eng = sast_engagement(std::path::Path::new(&out));
         eng.source = String::new();
-        let r = run_pipeline(&eng, &SastRun, &FakeTri, &out, false, Some("--config=evil"));
+        let r = run_pipeline(
+            &eng,
+            &SastRun,
+            &FakeTri,
+            &out,
+            false,
+            Some("--config=evil"),
+            7200,
+        );
         assert!(r.is_err());
         assert!(r.err().unwrap().to_string().contains("'-'"));
     }

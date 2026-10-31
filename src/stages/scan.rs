@@ -128,6 +128,7 @@ pub fn listed_count(urls: &[String]) -> usize {
 /// Runs nuclei with the caller's flags and returns its raw JSON rows. `args` are
 /// passed verbatim, followed by `-l <file>` listing the URLs (one `-u` per URL would
 /// overflow Windows' 32K command line on a real app).
+#[allow(dead_code)]
 pub fn scan_rows(
     runner: &dyn Runner,
     urls: &[String],
@@ -143,6 +144,120 @@ pub fn scan_rows(
     args.push(list.0.to_string_lossy().into_owned());
     let hv: Vec<String> = hosts.into_iter().collect();
     runner.run_json("nuclei", &args, &hv)
+}
+
+/// Like [`scan_rows`] but with an optional wall-clock deadline.
+///
+/// Returns `(rows, timed_out)`.  When the runner does not support timeouts
+/// (`runner.supports_timeout()` is false) or `deadline` is `None`, this
+/// behaves identically to [`scan_rows`] and always returns `timed_out = false`.
+///
+/// When the deadline is reached while nuclei is still running:
+/// 1. Send `SIGTERM` to the nuclei process.
+/// 2. Wait up to 10 seconds for it to exit.
+/// 3. Send `SIGKILL` if still alive.
+/// 4. Return any JSONL rows nuclei already wrote to stdout (`timed_out = true`).
+pub fn scan_rows_with_deadline(
+    runner: &dyn Runner,
+    urls: &[String],
+    args: &[String],
+    deadline: Option<std::time::Instant>,
+) -> Result<(Vec<serde_json::Value>, bool), Box<dyn std::error::Error>> {
+    let (hosts, listed) = scannable(urls);
+    if hosts.is_empty() {
+        return Ok((vec![], false));
+    }
+    let list = ListFile::create(&listed)?;
+    let mut full_args: Vec<String> = args.to_vec();
+    full_args.push("-l".into());
+    full_args.push(list.0.to_string_lossy().into_owned());
+    let hv: Vec<String> = hosts.into_iter().collect();
+
+    // When the runner is not a real process-spawner, fall through to the normal path.
+    let Some(dl) = deadline.filter(|_| runner.supports_timeout()) else {
+        let rows = runner.run_json("nuclei", &full_args, &hv)?;
+        return Ok((rows, false));
+    };
+
+    // Already past the deadline before we even start.
+    let now = std::time::Instant::now();
+    if now >= dl {
+        return Ok((vec![], true));
+    }
+
+    // Spawn nuclei directly so we can kill it on timeout.
+    let mut child = std::process::Command::new("nuclei")
+        .args(&full_args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    // Read stdout in a background thread (nuclei may flush lazily).
+    let child_stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = std::io::BufReader::new(child_stdout).read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    // Poll until done or deadline.
+    let timed_out = loop {
+        match child.try_wait()? {
+            Some(status) => {
+                // Process exited normally (or non-zero — we'll still return rows).
+                let _ = status;
+                break false;
+            }
+            None => {
+                if std::time::Instant::now() >= dl {
+                    // Deadline reached: SIGTERM, wait up to 10 s, then SIGKILL.
+                    let _ = send_sigterm(child.id());
+                    let kill_at = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        if child.try_wait()?.is_some() || std::time::Instant::now() >= kill_at {
+                            break;
+                        }
+                    }
+                    let _ = child.kill(); // SIGKILL if still alive
+                    let _ = child.wait(); // reap zombie
+                    break true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+
+    // Collect whatever nuclei wrote before it was killed.
+    let stdout = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or_default();
+    let rows = crate::runner::parse_jsonl(&String::from_utf8_lossy(&stdout));
+    Ok((rows, timed_out))
+}
+
+/// Send SIGTERM to a process by PID. On non-Unix platforms this is a no-op;
+/// the subsequent SIGKILL (via `Child::kill`) will handle it.
+#[cfg(unix)]
+fn send_sigterm(pid: u32) -> std::io::Result<()> {
+    // `kill` is part of the C standard library: no extra crate needed.
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let ret = unsafe { kill(pid as i32, 15) }; // 15 = SIGTERM
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn send_sigterm(_pid: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
