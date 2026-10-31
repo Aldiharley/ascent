@@ -2,9 +2,9 @@
 
 Ascent is an open-source (Apache-2.0), scope-enforced, human-in-the-loop AppSec pipeline written in Rust. It drives external open-source scanners as subprocesses (opengrep, gitleaks and trivy for source code; nuclei with httpx and katana for running web targets), triages the findings with the offline [Crux](https://github.com/Aldiharley/crux) engine, and produces a ranked report, a hash-chained audit log and native SARIF 2.1.0. A YAML policy turns the result into a CI-friendly verdict. Every network target passes a fail-closed scope guard, and nothing is ever exploited automatically: a human approves each detect-only verification step in a local dashboard.
 
-![Ascent dashboard overview: the watchdog greeting, verdict KPI tiles, the policy gate verdict, severity and verdict charts, top findings, pending approval gates and the recent audit log](docs/images/dashboard-overview.png)
+![Ascent dashboard overview: the watchdog greeting, verdict KPI tiles and the policy gate verdict listing its failing findings](docs/images/dashboard-overview.png)
 
-*The Overview screen after a lab run (OWASP Juice Shop on 127.0.0.1 plus a planted SAST fixture): verdict tiles, the policy gate verdict with its failing findings, severity and verdict charts, top findings, pending detect-only approval gates and the recent audit log.*
+*The Overview screen after an authenticated lab run (OWASP Juice Shop on 127.0.0.1 plus a planted SAST fixture): 95 triaged findings in verdict tiles, and the policy gate failing on the planted secrets and vulnerable dependencies. Further down, the screen shows severity and verdict charts, top findings, pending approval gates and the recent audit log.*
 
 Use Ascent only against systems you own or have explicit written permission to test.
 
