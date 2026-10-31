@@ -819,6 +819,9 @@ pub struct DastSummary {
     pub off_scope_request_count: usize,
     /// In-scope hosts where at least half of at least 20 requests failed.
     pub failing_hosts: Vec<FailingHost>,
+    /// Live seed URLs that no longer answered the httpx probe after the scan: the
+    /// target went down part-way, so the checks after that point produced no result.
+    pub stopped_answering: Vec<String>,
 }
 
 pub struct DastOutcome {
@@ -873,6 +876,7 @@ pub fn run_dast(
     let mut rows = Vec::new();
     let mut templates_excluded = 0;
     let mut audit = TraceAudit::default();
+    let mut stopped_answering = Vec::new();
     if !surface.is_empty() {
         // Live only: a private scratch directory (removed on every path, also on error)
         // for the template exclusion list. A dry run lists nothing and excludes nothing.
@@ -923,6 +927,12 @@ pub fn run_dast(
                 let _ = std::fs::remove_file(t);
             }
         }
+        // A target that crashed part-way leaves only a minority of failed requests in
+        // the trace, so every live seed is probed again: one that no longer answers
+        // means the later checks never reached it.
+        if live {
+            stopped_answering = probe_urls(runner, &seed).map_err(scrubbed)?.1;
+        }
     }
     let rows = scrub_rows(dedupe_rows(rows), secret);
     let mut coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), !live, &rows);
@@ -951,6 +961,7 @@ pub fn run_dast(
             out_of_scope_requests,
             off_scope_request_count: audit.off_scope_count,
             failing_hosts: audit.failing_hosts(),
+            stopped_answering,
         },
         coverage,
     }))
@@ -1047,6 +1058,8 @@ mod tests {
         nuclei_twice: bool,
         /// Declared URLs the httpx probe gets no answer from.
         dead: Vec<&'static str>,
+        /// URLs that answer the httpx probe until nuclei has run, then no longer do.
+        down_after_scan: Vec<&'static str>,
         /// `httpx -version` output.
         httpx_version: &'static str,
         /// Names subfinder reports for example.com.
@@ -1087,6 +1100,7 @@ mod tests {
                 extra_httpx: None,
                 nuclei_twice: false,
                 dead: vec![],
+                down_after_scan: vec![],
                 httpx_version: "projectdiscovery.io\n[INF] Current Version: v1.12.0",
                 subs: vec![],
                 nuclei_lists: RefCell::new(vec![]),
@@ -1117,7 +1131,8 @@ mod tests {
                     for w in args.windows(2).filter(|w| w[0] == "-u") {
                         let u = w[1].as_str();
                         if u.contains("://") {
-                            if !self.dead.contains(&u) {
+                            let gone = self.down_after_scan.contains(&u) && self.count("nuclei") > 0;
+                            if !self.dead.contains(&u) && !gone {
                                 v.push(json!({"input": u, "url": u}));
                             }
                         } else if u == "example.com" {
@@ -2311,6 +2326,45 @@ mod tests {
         );
         assert_eq!(out.summary.requests_sent, 89);
         assert_eq!(out.summary.request_errors, 53);
+    }
+
+    #[test]
+    fn a_seed_that_stops_answering_during_the_scan_is_reported() {
+        let mut f = Fake::new();
+        f.down_after_scan = vec!["http://localhost:3000/"];
+        let auth = ("Authorization".to_string(), SECRET.to_string());
+        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
+        assert!(out.summary.unreachable_urls.is_empty());
+        assert_eq!(out.summary.stopped_answering, vec!["http://localhost:3000/"]);
+        // re-probed after the last nuclei pass, with every live seed and no auth header
+        let calls = f.calls.borrow();
+        let last_nuclei = calls.iter().rposition(|c| c.0 == "nuclei").unwrap();
+        let reprobe = calls
+            .iter()
+            .rposition(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://")))
+            .unwrap();
+        assert!(reprobe > last_nuclei, "re-probe runs after the scan");
+        let args = &calls[reprobe].1;
+        assert!(!args.iter().any(|a| a == "-H" || a.contains(SECRET)), "{args:?}");
+        for u in ["http://localhost:3000/", "https://example.com"] {
+            assert!(args.contains(&u.to_string()), "{u} re-probed: {args:?}");
+        }
+    }
+
+    #[test]
+    fn seeds_still_answering_after_the_scan_are_not_reported() {
+        let f = Fake::new();
+        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        assert!(out.summary.stopped_answering.is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_never_re_probes() {
+        let f = Fake::new();
+        run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        let calls = f.calls.borrow();
+        let probes = calls.iter().filter(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://"))).count();
+        assert_eq!(probes, 1, "only the up-front probe of the declared URLs");
     }
 
     #[test]

@@ -201,7 +201,8 @@ fn is_localhost(target: &str) -> bool {
 
 /// Declared DAST scope that was not tested fails closed: a real run that scanned no
 /// URL, or whose declared URLs did not all answer, is incomplete. So is one in which
-/// nuclei sent any request outside scope, or most requests to a host failed.
+/// nuclei sent any request outside scope, most requests to a host failed, or a seed
+/// stopped answering during the scan.
 fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
     let mut reasons = Vec::new();
     if d.scanned == 0 {
@@ -229,6 +230,12 @@ fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
         reasons.push(format!(
             "DAST: most requests to {} failed ({} of {}) — the target was overloaded or went down during the scan",
             h.host, h.failed, h.sent
+        ));
+    }
+    if !d.stopped_answering.is_empty() {
+        reasons.push(format!(
+            "DAST: stopped answering during the scan: {} — the checks after that point produced no result; restart the target and run again",
+            d.stopped_answering.join(", ")
         ));
     }
     reasons
@@ -942,6 +949,42 @@ mod tests {
             s.incomplete_reasons,
             vec!["DAST: most requests to c.example.com failed (10 of 20) — the target was overloaded or went down during the scan".to_string()]
         );
+        assert_eq!(gate_decision(&dir).1, 3);
+    }
+
+    /// `HostRun`, but once nuclei has run the httpx URL probe gets no answer.
+    struct CrashRun(std::cell::Cell<bool>);
+    impl Runner for CrashRun {
+        fn run_json(&self, t: &str, a: &[String], g: &[String]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            if t == "nuclei" {
+                self.0.set(true);
+            }
+            if t == "httpx" && self.0.get() {
+                return Ok(vec![]);
+            }
+            HostRun { leak: None }.run_json(t, a, g)
+        }
+        fn run_text(&self, t: &str, a: &[String], _g: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(version_of(t, a))
+        }
+    }
+
+    #[test]
+    fn a_target_that_stops_answering_during_the_scan_makes_the_run_incomplete() {
+        let dir = unique_dir();
+        let r = CrashRun(std::cell::Cell::new(false));
+        let s = run_pipeline(&dast_engagement(), &r, &FakeTri, &dir, false, None).unwrap();
+        assert!(!s.complete);
+        let gone = &s.dast.as_ref().unwrap().stopped_answering;
+        assert_eq!(gone.len(), 3, "{gone:?}");
+        assert_eq!(
+            s.incomplete_reasons,
+            vec![format!(
+                "DAST: stopped answering during the scan: {} — the checks after that point produced no result; restart the target and run again",
+                gone.join(", ")
+            )]
+        );
+        assert_eq!(read_json(&dir, "run.json")["dast"]["stopped_answering"], json!(gone));
         assert_eq!(gate_decision(&dir).1, 3);
     }
 
