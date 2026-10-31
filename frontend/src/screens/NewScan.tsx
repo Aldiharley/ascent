@@ -101,8 +101,10 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
   const [authHeader, setAuthHeader] = useState("");
   const [authEnv, setAuthEnv] = useState("");
   const [submit, setSubmit] = useState<Submit>({ status: "idle" });
-  const [copied, setCopied] = useState(false);
+  const [copy, setCopy] = useState<"idle" | "copied" | "blocked">("idle");
+  const copied = copy === "copied";
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const cmdRef = useRef<HTMLDivElement>(null);
   const successCard = useRef<HTMLElement>(null);
   const successTitle = useRef<HTMLHeadingElement>(null);
 
@@ -151,10 +153,20 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
     clearTimeout(copyTimer.current);
     try {
       await navigator.clipboard.writeText(cmd);
-      setCopied(true);
-      copyTimer.current = setTimeout(() => setCopied(false), 1500);
+      setCopy("copied");
+      copyTimer.current = setTimeout(() => setCopy("idle"), 1500);
     } catch {
-      setCopied(false);
+      // The browser refused the clipboard: never claim success; select the command instead so
+      // the user can copy it by hand.
+      setCopy("blocked");
+      const el = cmdRef.current;
+      const sel = window.getSelection();
+      if (el && sel) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
     }
   }
 
@@ -354,7 +366,9 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
           <div className="ok-run">
             <p className="hint">Run it from your terminal:</p>
             <div className="cmd-row">
-              <div className="cmd">{submit.result.run_command}</div>
+              <div className="cmd" ref={cmdRef}>
+                {submit.result.run_command}
+              </div>
               <Button variant="secondary" size="sm" onClick={() => copyCommand(submit.result.run_command)}>
                 {copied ? <IconTick /> : <IconCopy />}
                 {copied ? "Copied" : "Copy"}
@@ -362,8 +376,9 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
             </div>
             {/* The button's new name is not announced on its own. Mounted (empty) with the card, so
                 only the copy confirmation is ever spoken here, never the card itself. */}
-            <div role="status" className="sr-only">
+            <div role="status" className={copy === "blocked" ? "hint" : "sr-only"}>
               {copied ? "Copied the run command to the clipboard" : ""}
+              {copy === "blocked" ? "Couldn't copy. The command is selected: press Ctrl+C to copy it." : ""}
             </div>
             <p className="hint">
               Add <code>--policy samples/ascent-policy.example.yaml</code> to gate the run: the

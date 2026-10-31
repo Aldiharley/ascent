@@ -332,7 +332,7 @@ test("a copy is announced in a polite status region, which empties again with th
   }
 });
 
-test("a failed copy announces nothing", async () => {
+test("a blocked copy says so and selects the command so it can be copied by hand", async () => {
   stubClipboard(vi.fn().mockRejectedValue(new Error("denied")));
   vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json(created()));
   render(<NewScan />);
@@ -342,8 +342,12 @@ test("a failed copy announces nothing", async () => {
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
   });
-  expect(within(success).getByRole("status")).toBeEmptyDOMElement();
-  expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+  // never claims success
+  expect(screen.queryByRole("button", { name: "Copied" })).not.toBeInTheDocument();
+  expect(within(success).getByRole("status")).toHaveTextContent(
+    "Couldn't copy. The command is selected: press Ctrl+C to copy it.",
+  );
+  expect(window.getSelection()?.toString()).toBe("ascent run --engagement engagements/acme.yaml --out out");
 });
 
 test("the clipboard stub does not leak: navigator.clipboard is back to its original after each test", () => {

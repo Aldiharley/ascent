@@ -383,13 +383,16 @@ test("copying announces 'Copied' in one polite status region, from the card or t
   expect(document.querySelectorAll(".sb-card-live")).toHaveLength(1);
 });
 
-test("a clipboard failure announces nothing and leaves the label alone", async () => {
+test("a blocked clipboard is announced with the flag to type, never as a copy", async () => {
   stubClipboard(vi.fn().mockRejectedValue(new Error("denied")));
   const { container } = render(<Shell policy={null} />);
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Policy gate: not evaluated" }));
   });
-  expect(container.querySelector(".sb-card-live")).toBeEmptyDOMElement();
+  expect(container.querySelector(".sb-card-live")).toHaveTextContent(
+    "Couldn't copy. Add --policy ascent-policy.yaml to ascent run.",
+  );
+  expect(container.querySelector(".sb-card-live")).not.toHaveTextContent("Copied");
 });
 
 test("the live region is not drawn without a policy card", () => {
@@ -397,14 +400,23 @@ test("the live region is not drawn without a policy card", () => {
   expect(container.querySelector(".sb-card-live")).toBeNull();
 });
 
-test("a clipboard failure leaves the copy label alone", async () => {
+test("a clipboard failure says so on the button, then returns to the copy label", async () => {
   const writeText = vi.fn().mockRejectedValue(new Error("denied"));
   stubClipboard(writeText);
   render(<Shell policy={null} />);
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Copy --policy flag" }));
-  });
-  expect(screen.getByRole("button", { name: "Copy --policy flag" })).toBeInTheDocument();
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy --policy flag" }));
+    });
+    expect(screen.getByRole("button", { name: "Copy blocked" })).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    expect(screen.getByRole("button", { name: "Copy --policy flag" })).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("policy text from the API renders as text and unknown decisions fail safe", () => {

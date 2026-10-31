@@ -22,6 +22,7 @@ const POLICY_TONES: Record<GateDecisionKind, BadgeTone> = {
 
 const POLICY_FLAG = "--policy ascent-policy.yaml";
 const COPIED_MS = 1500;
+const BLOCKED_MS = 4000;
 
 /**
  * The sidebar's read-only policy verdict (spec 2.2.4), drawn only once /api/gate has loaded. At
@@ -38,18 +39,20 @@ export function SidebarPolicyCard({
   policy: ShellPolicy | null;
   onViewVerdict: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copy, setCopy] = useState<"idle" | "copied" | "blocked">("idle");
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
 
   async function copyFlag() {
+    clearTimeout(copyTimer.current);
     try {
       await navigator.clipboard.writeText(POLICY_FLAG);
-      setCopied(true);
-      clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), COPIED_MS);
+      setCopy("copied");
+      copyTimer.current = setTimeout(() => setCopy("idle"), COPIED_MS);
     } catch {
-      setCopied(false);
+      // The browser refused the clipboard: say so and name the flag, never claim a copy.
+      setCopy("blocked");
+      copyTimer.current = setTimeout(() => setCopy("idle"), BLOCKED_MS);
     }
   }
 
@@ -85,7 +88,7 @@ export function SidebarPolicyCard({
               Add --policy to <code>ascent run</code> for a CI exit code.
             </p>
             <Button variant="ghost-dark" size="sm" onClick={copyFlag}>
-              {copied ? "Copied" : "Copy --policy flag"}
+              {copy === "copied" ? "Copied" : copy === "blocked" ? "Copy blocked" : "Copy --policy flag"}
             </Button>
           </>
         )}
@@ -104,7 +107,8 @@ export function SidebarPolicyCard({
       {/* Outside the card, which the rail hides: the rail button's name never changes, so a copy
           there would otherwise be silent. Always mounted, so the text appearing is announced. */}
       <div role="status" className="sb-card-live sr-only">
-        {copied ? "Copied --policy flag to the clipboard" : ""}
+        {copy === "copied" ? "Copied --policy flag to the clipboard" : ""}
+        {copy === "blocked" ? `Couldn't copy. Add ${POLICY_FLAG} to ascent run.` : ""}
       </div>
     </>
   );
