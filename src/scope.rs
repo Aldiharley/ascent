@@ -198,7 +198,7 @@ fn valid_port(p: &str) -> bool {
 /// Extract and validate the host from a raw authority component
 /// (`host`, `host:port`, `[v6]`, `[v6]:port`, or a bare IP literal).
 /// Empty string on anything ambiguous or invalid.
-fn host_from_authority(auth: &str) -> String {
+pub(crate) fn host_from_authority(auth: &str) -> String {
     // Backslash and '@' (userinfo) are parser-differential vectors.
     if auth.is_empty() || auth.contains(['\\', '@']) {
         return String::new();
