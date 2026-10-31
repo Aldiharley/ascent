@@ -2951,4 +2951,67 @@ mod tests {
         assert!(s.out_of_scope_requests.is_empty() && s.failing_hosts.is_empty());
         assert!(s.stopped_answering.is_empty());
     }
+
+    // ── detect_crash_recover unit tests ──────────────────────────────────────
+
+    fn write_trace_file(lines: &[String]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ascent_crash_recover_{}_{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn detect_crash_recover_flags_20_consecutive_connection_errors_then_success() {
+        // 20 "connection refused" errors for 127.0.0.1:8080, then one success.
+        let mut lines: Vec<String> = (0..20)
+            .map(|_| trace_line("127.0.0.1:8080", "connection refused"))
+            .collect();
+        lines.push(trace_line("127.0.0.1:8080", "none"));
+        let path = write_trace_file(&lines);
+        let recovered = detect_crash_recover(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            recovered,
+            vec!["127.0.0.1".to_string()],
+            "20-error streak + success must flag the host"
+        );
+    }
+
+    #[test]
+    fn detect_crash_recover_does_not_flag_19_error_streak_then_success() {
+        // Exactly 19 errors — one short of the threshold — followed by a success.
+        let mut lines: Vec<String> = (0..19)
+            .map(|_| trace_line("127.0.0.1:8080", "connection refused"))
+            .collect();
+        lines.push(trace_line("127.0.0.1:8080", "none"));
+        let path = write_trace_file(&lines);
+        let recovered = detect_crash_recover(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            recovered.is_empty(),
+            "19-error streak must NOT be flagged; got {recovered:?}"
+        );
+    }
+
+    #[test]
+    fn detect_crash_recover_does_not_flag_20_error_streak_without_success() {
+        // 20 connection errors but the host never recovers (stopped_answering case).
+        let lines: Vec<String> = (0..20)
+            .map(|_| trace_line("127.0.0.1:8080", "connection refused"))
+            .collect();
+        let path = write_trace_file(&lines);
+        let recovered = detect_crash_recover(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            recovered.is_empty(),
+            "20-error streak without success must NOT be flagged; got {recovered:?}"
+        );
+    }
 }
