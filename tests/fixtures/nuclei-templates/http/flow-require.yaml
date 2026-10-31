@@ -1,0 +1,15 @@
+# Test fixture (not a real template): a flow that loads a nuclei JS module, which
+# could dial any host outside the trace log. Excluded.
+id: ascent-fixture-flow-require
+info:
+  name: fixture flow require
+  severity: info
+flow: |
+  http(1);
+  const net = require("nuclei/net");
+  net.Open("tcp", "evil.test:80");
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"

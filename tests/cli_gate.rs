@@ -129,6 +129,19 @@ fn missing_engagement_exits_2() {
     assert_eq!(code(&o), 2);
 }
 #[test]
+fn unknown_engagement_key_exits_2_and_writes_nothing() {
+    let d = tmp();
+    let out = d.join("out");
+    let eng = write(
+        &d,
+        "eng.yaml",
+        "name: t\nhost: [x.com]\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\n",
+    );
+    let o = ascent(&["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--dry-run"]);
+    assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(!out.join("queue.json").exists(), "nothing ran");
+}
+#[test]
 fn bad_source_exits_2() {
     let d = tmp();
     let out = d.join("out");
@@ -138,6 +151,76 @@ fn bad_source_exits_2() {
     assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
     assert!(!out.join("queue.json").exists(), "nothing ran");
 }
+const AUTH_ENG: &str = "name: t\nurls: ['http://127.0.0.1:9/']\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\ndast:\n  auth:\n    header: Authorization\n    value_env: ASCENT_CLI_TEST_UNSET_AUTH\n";
+
+#[test]
+fn dry_run_never_needs_the_auth_secret() {
+    let d = tmp();
+    let out = d.join("out");
+    let eng = write(&d, "eng.yaml", AUTH_ENG);
+    let o = Command::new(env!("CARGO_BIN_EXE_ascent"))
+        .args(["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--dry-run"])
+        .env_remove("ASCENT_CLI_TEST_UNSET_AUTH")
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(out.join("queue.json").exists());
+}
+
+#[test]
+fn missing_auth_secret_exits_2_before_scanning() {
+    let d = tmp();
+    let out = d.join("out");
+    let eng = write(&d, "eng.yaml", AUTH_ENG);
+    let o = Command::new(env!("CARGO_BIN_EXE_ascent"))
+        .args(["run", "--engagement", &eng, "--out", out.to_str().unwrap()])
+        .env_remove("ASCENT_CLI_TEST_UNSET_AUTH")
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(!out.join("queue.json").exists(), "nothing ran");
+}
+
+/// PATH with ProjectDiscovery's default install dir first (a pip-installed Python `httpx`
+/// can shadow ProjectDiscovery httpx on PATH).
+fn pd_path() -> std::ffi::OsString {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+    let mut dirs = vec![PathBuf::from(home).join(".pdtm").join("go").join("bin")];
+    dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    std::env::join_paths(dirs).unwrap()
+}
+
+#[test]
+fn unreachable_declared_url_is_incomplete_3() {
+    // Port 9 (discard) on loopback: nothing answers, so nothing can be scanned.
+    let d = tmp();
+    let p = write(&d, "policy.yaml", POLICY);
+    let out = d.join("out");
+    let eng = write(
+        &d,
+        "eng.yaml",
+        "name: t\nurls: ['http://127.0.0.1:9/']\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\n",
+    );
+    let o = Command::new(env!("CARGO_BIN_EXE_ascent"))
+        .args(["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--policy", &p])
+        .env("PATH", pd_path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(code(&o), 3, "stderr: {stderr}");
+    if out.join("gate.json").exists() {
+        // the scanners are installed: the verdict must name why nothing was tested
+        let g: Value = serde_json::from_str(&std::fs::read_to_string(out.join("gate.json")).unwrap()).unwrap();
+        assert_eq!(g["decision"], "INCOMPLETE");
+        let reasons = g["incomplete_reasons"].to_string();
+        assert!(reasons.contains("DAST: declared URL(s) unreachable: http://127.0.0.1:9/"), "{g}");
+        assert!(stderr.contains("run INCOMPLETE") && stderr.contains("DAST: no in-scope URL was reachable"), "{stderr}");
+    } else {
+        // no scanners on this machine: the run fails before a verdict, still exit 3
+        assert!(stderr.contains("error:"), "{stderr}");
+    }
+}
+
 #[test]
 fn tampered_audit_during_run_exits_4_and_rewrites_nothing() {
     let d = tmp();

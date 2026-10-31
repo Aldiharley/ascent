@@ -1,0 +1,9 @@
+# Test fixture (not a real template): an ordinary request to the scanned target.
+id: ascent-fixture-benign
+info:
+  name: fixture benign
+  severity: info
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"

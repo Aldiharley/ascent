@@ -1,0 +1,17 @@
+# Test fixture (not a real template): a flow orchestrating http requests only.
+# Every request it sends is http and lands in nuclei's trace log, so it is kept.
+id: ascent-fixture-flow-http
+info:
+  name: fixture flow http
+  severity: info
+flow: http(1) && http(2)
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/a"
+
+  - method: GET
+    path:
+      - "{{BaseURL}}/b"
+    body: 'require("child_process") is just a payload string here'

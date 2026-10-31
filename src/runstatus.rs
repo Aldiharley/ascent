@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct RunStatus {
     pub complete: bool,
     pub dry_run: bool,
@@ -15,6 +15,12 @@ pub struct RunStatus {
     pub skipped_tools: Vec<String>,
     #[serde(default)]
     pub finished_at: String,
+    /// What the DAST track covered; `None` (JSON null) when the engagement has no DAST scope.
+    #[serde(default)]
+    pub dast: Option<crate::stages::dast::DastSummary>,
+    /// Why a non-dry run is incomplete beyond failed tools (e.g. DAST scanned nothing).
+    #[serde(default)]
+    pub incomplete_reasons: Vec<String>,
 }
 
 pub fn write_run_status(out_dir: &str, s: &RunStatus) -> std::io::Result<()> {
@@ -45,10 +51,33 @@ mod tests {
         let d = dir.to_str().unwrap();
         assert_eq!(read_run_status(d), None);
         let s = RunStatus { complete: true, dry_run: false, failed_tools: vec![],
-            skipped_tools: vec!["gitleaks".into()], finished_at: now_ts() };
+            skipped_tools: vec!["gitleaks".into()], finished_at: now_ts(),
+            dast: Some(crate::stages::dast::DastSummary { scanned: 2, ..Default::default() }),
+            incomplete_reasons: vec!["DAST: no in-scope URL was reachable".into()] };
         write_run_status(d, &s).unwrap();
         assert_eq!(read_run_status(d), Some(s));
         std::fs::write(dir.join("run.json"), "not json").unwrap();
         assert_eq!(read_run_status(d), None);
+    }
+
+    #[test]
+    fn old_run_json_without_dast_or_reasons_parses() {
+        let s: RunStatus = serde_json::from_str(
+            r#"{"complete":true,"dry_run":false,"failed_tools":[],"skipped_tools":[],"finished_at":"t"}"#,
+        )
+        .unwrap();
+        assert!(s.complete && s.dast.is_none() && s.incomplete_reasons.is_empty());
+    }
+
+    #[test]
+    fn old_dast_object_without_the_new_fields_parses() {
+        let s: RunStatus = serde_json::from_str(
+            r#"{"complete":true,"dry_run":false,"dast":{"profile":"standard","authenticated":false,
+               "auth_header":"","seeded":1,"crawled":1,"out_of_scope_dropped":0,"scanned":1}}"#,
+        )
+        .unwrap();
+        let d = s.dast.unwrap();
+        assert_eq!((d.scanned, d.reachable, d.unreachable), (1, 0, 0));
+        assert!(d.unreachable_urls.is_empty());
     }
 }

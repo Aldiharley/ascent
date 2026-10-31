@@ -2,12 +2,19 @@
 name = "ascent"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 default-run = "ascent"
 license = "Apache-2.0"
 
 [[bin]]
 name = "dashboard"
 path = "src/bin/dashboard.rs"
+
+# The test binary doubles as fake httpx/katana/nuclei (see the file), so it has
+# its own `main` instead of libtest's.
+[[test]]
+name = "cli_scope_audit"
+harness = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

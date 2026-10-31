@@ -1,6 +1,20 @@
 import { useState } from "react";
 import { CreateEngagementError, createEngagement } from "../api";
-import type { CreatedEngagement } from "../api";
+import type { CreatedEngagement, NewScanInput } from "../api";
+
+type DastProfile = NonNullable<NewScanInput["dast_profile"]>;
+
+const PROFILE_OPTIONS: { value: DastProfile; label: string }[] = [
+  { value: "passive", label: "Passive — non-intrusive checks only" },
+  {
+    value: "standard",
+    label: "Standard — known-vulnerability and injection templates (default)",
+  },
+  {
+    value: "active",
+    label: "Active — adds parameter fuzzing; only for targets you may actively test",
+  },
+];
 
 export interface NewScanProps {
   /** Called after an engagement is created, so the shell can refresh the topbar. */
@@ -21,10 +35,31 @@ function parseTargets(text: string): string[] {
     .filter((l) => l !== "");
 }
 
+/** The lower-cased host of a raw target line (URL, host[:port][/path], or IP). */
+function hostOf(target: string): string {
+  if (target.includes("://")) {
+    try {
+      return new URL(target).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+  const authority = target.split(/[/?#]/)[0];
+  return (authority.startsWith("[") ? authority : authority.split(":")[0]).toLowerCase();
+}
+
+/** True when any target names `localhost`, which ProjectDiscovery tools may not resolve. */
+function mentionsLocalhost(text: string): boolean {
+  return parseTargets(text).some((t) => hostOf(t) === "localhost");
+}
+
 export function NewScan({ onCreated }: NewScanProps = {}) {
   const [name, setName] = useState("");
   const [targetsText, setTargetsText] = useState("");
   const [source, setSource] = useState("");
+  const [profile, setProfile] = useState<DastProfile>("standard");
+  const [authHeader, setAuthHeader] = useState("");
+  const [authEnv, setAuthEnv] = useState("");
   const [submit, setSubmit] = useState<Submit>({ status: "idle" });
   const [copied, setCopied] = useState(false);
 
@@ -37,6 +72,9 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
         name,
         targets: parseTargets(targetsText),
         source: source.trim(),
+        dast_profile: profile,
+        auth_header: authHeader.trim(),
+        auth_env: authEnv.trim(),
       });
       setSubmit({ status: "created", result });
       onCreated?.();
@@ -95,9 +133,14 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
             id="ns-targets"
             value={targetsText}
             onChange={(e) => setTargetsText(e.target.value)}
-            placeholder={"localhost\n127.0.0.0/8\nhttp://localhost:3000/"}
+            placeholder={"127.0.0.1\n127.0.0.0/8\nhttp://127.0.0.1:3000/"}
             spellCheck={false}
           />
+          {mentionsLocalhost(targetsText) && (
+            <span className="hint" role="note">
+              ProjectDiscovery tools may not resolve localhost; prefer 127.0.0.1
+            </span>
+          )}
         </div>
 
         <div className="fld">
@@ -113,6 +156,50 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
             placeholder="e.g. ./src"
             autoComplete="off"
           />
+        </div>
+
+        <div className="fld">
+          <label htmlFor="ns-profile">DAST profile</label>
+          <select
+            id="ns-profile"
+            value={profile}
+            onChange={(e) => setProfile(e.target.value as DastProfile)}
+          >
+            {PROFILE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="fld">
+          <label htmlFor="ns-auth-header">Auth header name</label>
+          <input
+            id="ns-auth-header"
+            value={authHeader}
+            onChange={(e) => setAuthHeader(e.target.value)}
+            placeholder="e.g. Authorization"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </div>
+
+        <div className="fld">
+          <label htmlFor="ns-auth-env">Env var holding its value</label>
+          <input
+            id="ns-auth-env"
+            value={authEnv}
+            onChange={(e) => setAuthEnv(e.target.value)}
+            placeholder="e.g. ASCENT_DAST_AUTH"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <span className="hint">
+            For authenticated scanning, name the header and the environment variable that holds its
+            value (for example Authorization and ASCENT_DAST_AUTH). Ascent never stores the value;
+            set the variable in the terminal that runs the scan.
+          </span>
         </div>
 
         <div className="note" style={{ textAlign: "left" }}>
@@ -152,6 +239,12 @@ export function NewScan({ onCreated }: NewScanProps = {}) {
                 <b>SAST source:</b> <span className="loc">{submit.result.source}</span>
               </div>
             )}
+            <div className="scope-list">
+              <span>{`Profile: ${submit.result.dast.profile}`}</span>
+              {submit.result.dast.auth_header !== "" && (
+                <span>{`Auth header: ${submit.result.dast.auth_header}`}</span>
+              )}
+            </div>
             <div>
               <div className="hint" style={{ marginBottom: 6 }}>
                 Run it from your terminal:

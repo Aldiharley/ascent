@@ -1,16 +1,38 @@
-# Lab engagement for a local OWASP Juice Shop on http://localhost:3000/.
-# AUTHORISED LAB TARGETS ONLY.
+# Lab engagement for a local OWASP Juice Shop on http://127.0.0.1:3000/.
+# AUTHORISED LAB TARGETS ONLY. The container must be running before the scan:
+# a declared URL that does not answer makes the run INCOMPLETE.
 #
-# `hosts` is deliberately empty. When a host is listed, the pipeline starts with
-# recon from that host and ignores `urls`, and recon probes only the default web
-# ports, so it would miss Juice Shop on :3000. With no hosts, the pipeline starts
-# from the URL below: katana crawl, then nuclei scan. Scope still covers
-# `localhost` (the URL's host) and 127.0.0.0/8.
+# The DAST track scans the whole declared scope: every host (via recon) and every
+# URL below. Recon probes only the default web ports, so a service on :3000 must
+# be listed as a URL, as it is here. Scope is 127.0.0.0/8. Links the crawl finds
+# outside this scope are dropped and counted, never scanned.
+#
+# The target is 127.0.0.1, not `localhost`: ProjectDiscovery tools (httpx,
+# katana, nuclei) may fail to resolve `localhost` ("no address found for host")
+# even where curl and browsers can, and nuclei then reports nothing.
 name: juice-shop-lab
 hosts: []
 cidrs:
   - 127.0.0.0/8
 urls:
-  - http://localhost:3000/
+  - http://127.0.0.1:3000/
 starts: "2026-01-01T00:00:00Z"
 ends: "2030-01-01T00:00:00Z"
+
+# DAST settings (optional; the default is `profile: standard` with no auth).
+#   passive  - non-intrusive checks only
+#   standard - adds known-vulnerability and injection templates, still
+#              non-intrusive (default)
+#   active   - standard plus intrusive templates (may change state) and a
+#              parameter-fuzzing pass; lab targets only
+# dast:
+#   profile: active
+#   # Authenticated scanning: the header NAME and the NAME of an environment
+#   # variable that holds its value, for example
+#   #   POSIX shell: export ASCENT_DAST_AUTH="Bearer <token>"
+#   #   PowerShell:  $env:ASCENT_DAST_AUTH = "Bearer <token>"
+#   # The value is never written to the engagement file or to any output. It is
+#   # read only when the engagement has hosts or urls (a source-only run ignores it).
+#   auth:
+#     header: Authorization
+#     value_env: ASCENT_DAST_AUTH

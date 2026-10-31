@@ -1,0 +1,17 @@
+# Test fixture (not a real template): @Host keeps the request on the target host,
+# also on another port of it.
+id: ascent-fixture-on-target
+info:
+  name: fixture on target
+  severity: info
+http:
+  - raw:
+      - |
+        @Host: {{Hostname}}
+        GET / HTTP/1.1
+        Host: {{Hostname}}
+
+      - |
+        @Host: http://{{Host}}:43800
+        GET / HTTP/1.1
+        Host: {{Hostname}}

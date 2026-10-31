@@ -1,0 +1,11 @@
+# Test fixture (not a real template): a literal localhost is not the target.
+id: ascent-fixture-off-localhost
+info:
+  name: fixture localhost
+  severity: info
+http:
+  - raw:
+      - |
+        @Host: localhost
+        GET /nginx_status HTTP/1.1
+        Host: localhost

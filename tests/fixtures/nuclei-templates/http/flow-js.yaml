@@ -1,0 +1,16 @@
+# Test fixture (not a real template): a flow over an http and a javascript
+# section. Excluded for the javascript section.
+id: ascent-fixture-flow-js
+info:
+  name: fixture flow js
+  severity: info
+flow: http(1) && javascript(1)
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+
+javascript:
+  - code: |
+      true;

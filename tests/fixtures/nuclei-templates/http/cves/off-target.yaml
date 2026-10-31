@@ -1,0 +1,16 @@
+# Test fixture (not a real template): @Host sends the second request to an
+# external host (as the MOVEit template does).
+id: ascent-fixture-off-target
+info:
+  name: fixture off target
+  severity: info
+http:
+  - raw:
+      - |
+        GET / HTTP/1.1
+        Host: {{Hostname}}
+
+      - |
+        @Host: https://checkip.amazonaws.com
+        GET / HTTP/1.1
+        Host: checkip.amazonaws.com
