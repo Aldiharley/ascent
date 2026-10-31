@@ -861,6 +861,88 @@ mod tests {
             .unwrap()
             .is_some());
     }
+    // ---- denylist tests (Task 5) ----
+    #[test]
+    fn denylist_authorization_is_valid() {
+        let d = DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth {
+                header: "Authorization".into(),
+                value_env: "ASCENT_DAST_AUTH".into(),
+            }),
+        };
+        assert!(validate_dast(&d).is_ok());
+    }
+
+    #[test]
+    fn denylist_host_is_rejected() {
+        let d = DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth {
+                header: "Host".into(),
+                value_env: "ASCENT_DAST_AUTH".into(),
+            }),
+        };
+        assert!(validate_dast(&d).is_err());
+    }
+
+    #[test]
+    fn denylist_content_length_lowercase_is_rejected() {
+        let d = DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth {
+                header: "content-length".into(),
+                value_env: "ASCENT_DAST_AUTH".into(),
+            }),
+        };
+        assert!(validate_dast(&d).is_err());
+    }
+
+    #[test]
+    fn denylist_x_custom_auth_is_valid() {
+        let d = DastConfig {
+            profile: DastProfile::Standard,
+            auth: Some(DastAuth {
+                header: "X-Custom-Auth".into(),
+                value_env: "ASCENT_DAST_AUTH".into(),
+            }),
+        };
+        assert!(validate_dast(&d).is_ok());
+    }
+
+    #[test]
+    fn denylist_error_names_the_forbidden_header() {
+        for denied in [
+            "Host",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Connection",
+            "Keep-Alive",
+            "Proxy-Authenticate",
+            "Proxy-Authorization",
+            "TE",
+            "Trailer",
+            "Upgrade",
+            // case variants
+            "host",
+            "CONTENT-LENGTH",
+            "transfer-encoding",
+        ] {
+            let d = DastConfig {
+                profile: DastProfile::Standard,
+                auth: Some(DastAuth {
+                    header: denied.into(),
+                    value_env: "ASCENT_DAST_AUTH".into(),
+                }),
+            };
+            let err = validate_dast(&d).expect_err(&format!("{denied:?} should be denied"));
+            assert!(
+                err.to_lowercase().contains(&denied.to_lowercase()),
+                "error does not name the forbidden header {denied:?}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn load_engagement_rejects_invalid_dast_auth() {
         let p =
