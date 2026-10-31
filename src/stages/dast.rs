@@ -3114,7 +3114,9 @@ mod tests {
         f.status_code_after_scan = vec![("http://localhost:3000/", 502)];
         let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert!(
-            out.summary.stopped_answering.contains(&"http://localhost:3000/".to_string()),
+            out.summary
+                .stopped_answering
+                .contains(&"http://localhost:3000/".to_string()),
             "502 re-probe must land in stopped_answering; got {:?}",
             out.summary.stopped_answering
         );
@@ -3126,7 +3128,9 @@ mod tests {
         f.status_code_after_scan = vec![("http://localhost:3000/", 503)];
         let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert!(
-            out.summary.stopped_answering.contains(&"http://localhost:3000/".to_string()),
+            out.summary
+                .stopped_answering
+                .contains(&"http://localhost:3000/".to_string()),
             "503 re-probe must land in stopped_answering; got {:?}",
             out.summary.stopped_answering
         );
