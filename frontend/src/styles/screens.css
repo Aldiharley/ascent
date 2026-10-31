@@ -156,7 +156,7 @@
 .gcard .acts{display:flex;gap:10px}
 .gcard .acts .approve{flex:1}
 .gcard .note{display:flex;gap:var(--s-2);align-items:flex-start;font:var(--t-small);color:var(--ink-2);text-align:left}
-.gdetails summary{cursor:pointer;font:700 13px/1.4 var(--font-ui);color:var(--link)}
+.gdetails summary{cursor:pointer;min-height:32px;padding:6px 0;box-sizing:border-box;font:700 13px/1.4 var(--font-ui);color:var(--link)}
 
 /* ---------- New scan (3.2) ---------- */
 .newscan-grid{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:var(--s-5);align-items:start}

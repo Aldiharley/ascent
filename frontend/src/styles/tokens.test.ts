@@ -231,6 +231,27 @@ test("no raw hex colour outside tokens.css: every other sheet reads a token", ()
   }
 });
 
+test("small text targets keep at least 24px of height (WCAG 2.5.8): text buttons and the gate details toggle", () => {
+  expect(Number.parseFloat(rule(componentsCss, ".btn-text")["min-height"])).toBeGreaterThanOrEqual(24);
+  expect(Number.parseFloat(rule(screensCss, ".gdetails summary")["min-height"])).toBeGreaterThanOrEqual(24);
+});
+
+test("the sidebar stacks above the content so the rail's label tooltips are not painted over", () => {
+  // Found in the keyboard pass: focusing a rail icon showed only a sliver of its label, because the
+  // frosted cards (stacking contexts) later in the DOM painted over the sidebar's.
+  expect(Number(rule(shellCss, ".sidebar")["z-index"])).toBeGreaterThan(0);
+  const tooltip = rule(shellCss, ".sb-nav button:hover .nav-label,.sb-nav button:focus-visible .nav-label");
+  expect(Number(tooltip["z-index"])).toBeGreaterThan(0);
+});
+
+test("the sidebar tightens on short viewports (and scrolls when even that is not enough) instead of clipping the policy card", () => {
+  expect(shellCss).toMatch(/@media \(min-width:1280px\) and \(max-height:800px\)\{[^@]*\.sb-card > \.ibadge\{display:none\}/);
+  expect(shellCss).toMatch(/@media \(max-width:1279px\) and \(max-height:620px\)\{[^@]*\.sb-nav button\{height:44px\}/);
+  expect(shellCss).toMatch(/@media \(max-width:1279px\) and \(max-height:480px\)\{\s*\.sidebar\{overflow-y:auto\}/);
+  // the tiers sit before the phone block, whose own sizes must keep winning at 640px and below
+  expect(shellCss.indexOf("max-height:620px")).toBeLessThan(shellCss.indexOf("max-width:640px"));
+});
+
 test("the donut draw-in starts from a custom property the chart sets, not a copied number", () => {
   expect(screensCss).toMatch(/@keyframes donut-draw\{from\{stroke-dashoffset:var\(--donut-circ\)\}\}/);
   expect(screensCss).not.toMatch(/stroke-dashoffset:\s*\d/);
