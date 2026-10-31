@@ -1,0 +1,308 @@
+/* Shared components (spec sections 1.5, 1.6, 4.1, 4.3, 4.6, 4.8, 4.9, 4.10, 4.12).
+   Colours, class names and icons come from fixed enum-keyed classes, never from data. */
+
+/* ---------- card primitive (1.5, replaces .glass) ---------- */
+.card{
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--r-xl);
+  box-shadow:var(--shadow-card); backdrop-filter:var(--blur-card); -webkit-backdrop-filter:var(--blur-card);
+  padding:var(--s-5) var(--s-6);
+}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .card{background:var(--surface-solid)}
+}
+.card-head{display:flex;align-items:center;gap:var(--s-3);margin-bottom:var(--s-4);flex-wrap:wrap}
+.card-title{font:var(--t-h2);letter-spacing:var(--tracking-tight);margin:0}   /* rendered as <h2> */
+.card h3{font:var(--t-h3)}
+/* card enter (first data paint): opacity + 6px rise, 40ms stagger by grid order, max 6 */
+@keyframes card-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.card--enter{animation:card-in var(--d-3) var(--ease-out) both}
+.card--enter:nth-child(2){animation-delay:40ms}.card--enter:nth-child(3){animation-delay:80ms}
+.card--enter:nth-child(4){animation-delay:120ms}.card--enter:nth-child(5){animation-delay:160ms}
+.card--enter:nth-child(n+6){animation-delay:200ms}
+
+/* ---------- clay icon badge (1.6) ---------- */
+.ibadge{position:relative;width:48px;height:48px;border-radius:16px;display:grid;place-items:center;flex:none;
+  background:var(--badge-teal);box-shadow:var(--shadow-clay);color:var(--white)}
+.ibadge svg{width:24px;height:24px;stroke:currentColor;stroke-width:2.2;fill:none;
+  stroke-linecap:round;stroke-linejoin:round;filter:var(--glyph-shadow)}
+.ibadge::after{ /* glossy top-left highlight */
+  content:"";position:absolute;inset:3px 50% 55% 3px;border-radius:13px 8px 14px 8px;
+  background:linear-gradient(160deg,rgba(255,255,255,.55),rgba(255,255,255,0));pointer-events:none}
+.ibadge--sm{width:36px;height:36px;border-radius:12px}.ibadge--sm svg{width:18px;height:18px}
+.ibadge--lg{width:56px;height:56px;border-radius:18px}.ibadge--lg svg{width:28px;height:28px}
+.ibadge--teal{background:var(--badge-teal)}
+.ibadge--bluegrey{background:var(--badge-bluegrey)}
+.ibadge--ice{background:var(--badge-ice)}
+.ibadge--lav{background:var(--badge-lav)}
+.ibadge--sand{background:var(--badge-sand)}
+.ibadge--coral{background:var(--badge-coral)}
+
+/* ---------- buttons (4.9) ---------- */
+.btn,.icon-btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:var(--s-2);
+  border-radius:var(--r-pill);cursor:pointer;text-decoration:none;white-space:nowrap;
+  transition:transform var(--d-1) var(--ease-out),box-shadow var(--d-1),background var(--d-1);
+}
+.btn{height:44px;padding:0 20px;font:700 14px/1 var(--font-ui);border:1px solid transparent}
+.btn svg,.icon-btn svg{width:18px;height:18px;flex:none;stroke:currentColor;stroke-width:2;fill:none;
+  stroke-linecap:round;stroke-linejoin:round}
+.btn:not(:disabled):hover,.icon-btn:not(:disabled):hover{transform:translateY(-1px)}
+.btn:not(:disabled):active,.icon-btn:not(:disabled):active{transform:translateY(1px);box-shadow:var(--shadow-pressed)}
+
+.btn-primary{
+  padding:0 22px;color:var(--white);border-color:transparent;
+  background:linear-gradient(180deg,var(--teal-550) 0%,var(--teal-800) 100%);box-shadow:var(--shadow-clay);
+}
+.btn-primary:not(:disabled):hover{background:linear-gradient(180deg,var(--teal-600) 0%,var(--teal-900) 100%)}
+
+.btn-secondary{
+  color:var(--ink);border-color:var(--border-soft);
+  background:linear-gradient(180deg,var(--white),var(--paper-75));
+  box-shadow:0 6px 12px -8px rgba(20,35,50,.30),inset 0 1px 0 rgba(255,255,255,.9);
+}
+.btn-secondary:not(:disabled):hover{background:var(--white)}
+
+.btn-danger{color:var(--coral-800);background:var(--coral-75);border-color:var(--coral-200)}
+.btn-danger:not(:disabled):hover{background:var(--coral-100)}
+
+.btn-ghost-dark{
+  height:40px;padding:0 18px;color:var(--ink-on-dark);
+  background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.28);
+}
+.btn-ghost-dark:not(:disabled):hover{background:rgba(255,255,255,.20)}
+.btn-ghost-dark:focus-visible{outline-color:var(--focus-on-dark)}
+
+/* a text button is still a 32px-tall target (WCAG 2.5.8); its side padding is the spec's 4px (4.9) */
+.btn-text{
+  height:auto;min-height:32px;padding:0 4px;color:var(--link);font:700 13.5px/1.4 var(--font-ui);
+  background:none;border:0;box-shadow:none;border-radius:var(--r-xs);
+}
+.btn-text:not(:disabled):hover{text-decoration:underline;transform:none}
+.btn-text:not(:disabled):active{box-shadow:none;transform:none}
+
+.btn-sm{height:36px;padding:0 16px}
+.btn-secondary.btn-sm{height:32px;padding:0 14px;font-size:12.5px}
+.btn-block{width:100%}
+
+.btn:disabled,.icon-btn:disabled{
+  background:var(--slate-100);color:var(--ink-3);border-color:var(--slate-200);
+  box-shadow:none;cursor:not-allowed;transform:none;
+}
+.btn-text:disabled{background:none;border:0}
+
+/* icon button: 44px circle (also used by the top bar) */
+.icon-btn{
+  position:relative;width:44px;height:44px;padding:0;color:var(--ink);
+  background:linear-gradient(180deg,var(--white) 0%,var(--paper-100) 100%);border:1px solid var(--border-soft);
+  box-shadow:0 6px 12px -6px rgba(20,35,50,.30),inset 0 2px 2px rgba(255,255,255,.9),inset 0 -2px 4px rgba(20,35,50,.10);
+}
+.icon-btn svg{width:20px;height:20px}
+.icon-btn-badge{
+  position:absolute;top:-4px;right:-4px;min-width:20px;height:20px;padding:0 5px;border-radius:var(--r-pill);
+  display:grid;place-items:center;background:var(--badge-count-bg);color:var(--badge-count-ink);
+  font:var(--t-micro);font-variant-numeric:tabular-nums;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.icon-btn[aria-busy="true"] svg,.spinner{animation:spin 1s linear infinite}
+/* busy also has a static cue (dimmed glyph + a teal dot), so it still shows when reduced motion
+   stops the spin */
+.icon-btn[aria-busy="true"] svg{opacity:.6}
+.icon-btn[aria-busy="true"]::after{content:"";position:absolute;right:7px;bottom:7px;width:8px;height:8px;
+  border-radius:50%;background:var(--teal-600)}
+.spinner{display:inline-block;width:14px;height:14px;border-radius:50%;
+  border:2px solid currentColor;border-right-color:transparent;flex:none}
+
+/* ---------- segmented control (4.9) ---------- */
+.segs{display:inline-flex;gap:4px;margin-left:auto;background:var(--surface-sunken);padding:4px;border-radius:var(--r-pill)}
+.segs button{
+  height:30px;padding:0 14px;border:0;border-radius:var(--r-pill);background:transparent;
+  font:700 12.5px/1 var(--font-ui);color:var(--ink-2);cursor:pointer;
+  transition:background var(--d-1),box-shadow var(--d-1);
+}
+.segs button[aria-pressed="true"]{background:var(--white);color:var(--ink);box-shadow:0 4px 10px -6px rgba(31,45,58,.35)}
+.segs button:disabled{color:var(--ink-3);cursor:not-allowed;opacity:.7}
+
+/* ---------- chips and pills (4.3) ---------- */
+.sev-chip,.vchip,.vpill,.tag,.count,.badge-detect,.scope-ok,.scope-bad{
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+}
+/* 1. severity chip: square-ish so it reads differently from verdict pills */
+.sev-chip{height:24px;padding:0 10px;border-radius:var(--r-xs);font:var(--t-micro);
+  text-transform:uppercase;letter-spacing:var(--tracking-caps)}
+.sev-chip--crit{background:var(--sev-crit-bg);color:var(--sev-crit-ink)}
+.sev-chip--high{background:var(--sev-high-bg);color:var(--sev-high-ink)}
+.sev-chip--med{background:var(--sev-med-bg);color:var(--sev-med-ink)}
+.sev-chip--low{background:var(--sev-low-bg);color:var(--sev-low-ink)}
+.sev-chip--info{background:var(--sev-info-bg);color:var(--sev-info-ink)}
+/* 2. verdict chip */
+.vchip{height:28px;padding:0 12px 0 10px;border-radius:var(--r-pill);font:700 12.5px/1 var(--font-ui)}
+.vchip::before{content:"";width:8px;height:8px;border-radius:50%;flex:none;background:currentColor}
+.vchip--tp{background:var(--v-tp-bg);color:var(--v-tp-ink)}.vchip--tp::before{background:var(--v-tp)}
+.vchip--hu{background:var(--v-hu-bg);color:var(--v-hu-ink)}.vchip--hu::before{background:var(--v-hu)}
+.vchip--fp{background:var(--v-fp-bg);color:var(--v-fp-ink)}.vchip--fp::before{background:var(--v-fp)}
+/* 3. policy verdict pill */
+.vpill{height:28px;padding:0 14px;border-radius:var(--r-pill);font:700 12px/1 var(--font-ui);
+  letter-spacing:.08em;text-transform:uppercase}
+.vpill--pass{background:var(--p-pass);color:var(--p-pass-ink)}
+.vpill--cond{background:var(--p-cond);color:var(--p-cond-ink)}
+.vpill--fail{background:var(--p-fail);color:var(--p-fail-ink);box-shadow:0 8px 18px -10px var(--coral-700)}
+.vpill--inc{background:var(--p-inc);color:var(--p-inc-ink)}
+.vpill--none{background:var(--p-inc);color:var(--p-inc-ink);border:1.5px dashed var(--slate-300)}
+/* 4. tag (CWE, category) */
+.tag{height:24px;padding:0 8px;border-radius:var(--r-xs);font:var(--t-mono-sm);font-weight:500;
+  color:var(--ink-2);background:var(--surface-sunken)}
+.tags{display:flex;gap:6px;flex-wrap:wrap}
+/* 5. count pill */
+.count{height:24px;padding:0 10px;border-radius:var(--r-pill);font:700 12px/1 var(--font-ui);
+  color:var(--ok-ink);background:var(--ok-bg)}
+/* 6. DETECT-ONLY badge */
+.badge-detect{height:22px;padding:0 9px;border-radius:var(--r-pill);font:700 12px/1 var(--font-ui);
+  letter-spacing:.06em;color:var(--ok-ink);background:var(--ok-bg);border:1px solid var(--ok-border)}
+/* 7. scope badges */
+.scope-ok{font:700 12.5px/1.3 var(--font-ui);color:var(--teal-650)}
+.scope-bad{font:700 12.5px/1.3 var(--font-ui);color:var(--coral-750)}
+/* 8. severity stripe (parent is position:relative) */
+.stripe{position:absolute;left:0;top:10px;bottom:10px;width:5px;border-radius:5px;background:var(--sev-info)}
+.stripe--crit{background:var(--sev-crit)}.stripe--high{background:var(--sev-high)}
+.stripe--med{background:var(--sev-med)}.stripe--low{background:var(--sev-low)}
+.stripe--info{background:var(--sev-info)}
+/* 9. confidence bar */
+.conf{display:flex;align-items:center;gap:var(--s-2)}
+.conf-track{flex:1;height:8px;border-radius:var(--r-pill);background:var(--surface-sunken);
+  box-shadow:inset 0 1px 2px rgba(31,45,58,.10);overflow:hidden;min-width:64px}
+.conf-fill{display:block;height:100%;border-radius:var(--r-pill);background:linear-gradient(90deg,var(--slate-400),var(--slate-300))}
+.conf-fill--tp{background:linear-gradient(90deg,var(--teal-600),var(--teal-500))}
+.conf-fill--hu{background:linear-gradient(90deg,var(--sand-500),var(--sand-400))}
+.conf-fill--fp{background:linear-gradient(90deg,var(--slate-400),var(--slate-300))}
+.conf-val{font:var(--t-mono-sm);font-weight:500;color:var(--ink-2);min-width:34px;text-align:right}
+
+/* ---------- status dot + hash chain ---------- */
+.dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--dot-active);box-shadow:0 0 0 4px rgba(111,208,193,.18)}
+.dot.idle{background:var(--slate-300);box-shadow:none}
+.chain{display:inline-flex;align-items:center;gap:var(--s-2);border-radius:var(--r-pill);padding:6px 14px;font:700 14px/1.3 var(--font-ui)}
+.chain-ok{color:var(--ok-ink);background:var(--ok-bg)}
+.chain-fail{color:var(--p-fail-ink);background:var(--p-fail);font-size:15px;box-shadow:var(--shadow-clay)}
+
+/* ---------- KPI tile (4.1) ---------- */
+.kpi{
+  display:flex;flex-direction:column;justify-content:flex-start;gap:var(--s-3);text-align:left;
+  min-height:168px;padding:var(--s-5);border-radius:24px;color:var(--ink);
+  background:var(--tile-teal);border:1px solid rgba(255,255,255,.55);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.8),0 10px 22px -12px rgba(20,35,50,.30);
+  position:relative;min-width:0;
+}
+.kpi--teal{background:var(--tile-teal)}
+.kpi--bluegrey{background:var(--tile-bluegrey)}
+.kpi--ice{background:var(--tile-ice)}
+.kpi--lav{background:var(--tile-lav)}
+.kpi .l{font:700 15px/1.3 var(--font-ui);color:var(--ink)}
+.kpi .n{font:var(--t-kpi);color:var(--ink);font-variant-numeric:tabular-nums}
+/* label and number sit at the same height in every tile; only the sub-line (which may wrap) gives
+   way, and it hangs from the bottom edge */
+.kpi .sub{font:600 13px/1.4 var(--font-ui);color:var(--ink-tile);margin:auto 0 0}
+.kpi--compact{min-height:132px}
+.kpi--compact .n{font-size:30px}
+.kpi--compact .ibadge{width:40px;height:40px;border-radius:14px}
+.kpi--compact .ibadge svg{width:20px;height:20px}
+button.kpi{font:inherit;cursor:pointer;
+  transition:transform var(--d-1) var(--ease-out),box-shadow var(--d-1)}
+button.kpi:hover{transform:translateY(-1px);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.8),0 12px 24px -12px rgba(20,35,50,.34)}
+button.kpi:active{transform:translateY(1px);box-shadow:var(--shadow-pressed)}
+button.kpi:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+button.kpi[aria-pressed="true"]{box-shadow:inset 0 0 0 2px var(--teal-600),var(--shadow-clay)}
+button.kpi[aria-pressed="true"]::after{ /* tick in the badge corner (data: URI art, img-src allows data:) */
+  content:"";position:absolute;top:14px;right:14px;width:22px;height:22px;border-radius:50%;
+  background:var(--teal-600) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 12.5 4 4 8-9'/%3E%3C/svg%3E") center / 14px no-repeat;
+}
+
+/* ---------- list card (4.6) ---------- */
+.list-card .card-head .btn{margin-left:auto}
+.list-row{display:flex;align-items:center;gap:var(--s-3);min-height:56px;padding:10px 4px;
+  border-bottom:1px solid var(--border-soft)}
+.list-row:last-child{border-bottom:0}
+.list-row .row-main{flex:1;min-width:0}
+.list-row .row-title{font:var(--t-h3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list-row .row-meta{font:var(--t-mono-sm);color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---------- form fields (4.8) ---------- */
+.field{display:flex;flex-direction:column;gap:var(--s-2);min-width:0}
+.field label,.field .label{font:700 13.5px/1.35 var(--font-ui);color:var(--ink)}
+.field .hint,.hint{font:var(--t-small);color:var(--ink-2)}
+.field :is(input,select,textarea),.input{
+  width:100%;height:46px;padding:0 14px;border-radius:14px;background:var(--surface-raised);
+  border:1.5px solid var(--border-input);box-shadow:inset 0 2px 4px rgba(31,45,58,.06);
+  font:var(--t-body);color:var(--ink);
+}
+.field textarea{height:auto;min-height:148px;padding:12px 14px;resize:vertical;
+  font:400 13px/1.6 var(--font-mono)}
+.field :is(input,select,textarea)::placeholder{color:var(--ink-3);opacity:1}
+.field :is(input,select,textarea):focus-visible,.input:focus-visible{
+  outline:3px solid var(--focus);outline-offset:2px;border-color:var(--teal-600);
+}
+.field :is(input,select,textarea)[aria-invalid="true"],.input[aria-invalid="true"]{
+  border-color:var(--coral-700);border-width:2px;
+}
+.field select,select.input{
+  appearance:none;-webkit-appearance:none;padding-right:44px;cursor:pointer;
+  background:var(--surface-raised) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231f2d3a' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") right 16px center / 18px no-repeat;
+}
+.fieldset{margin:0;min-width:0;border:1px solid var(--border-soft);border-radius:20px;
+  padding:16px 18px 18px;background:rgba(255,255,255,.45)}
+.fieldset legend{font:var(--t-h3);padding:0 6px}
+.callout{display:flex;gap:var(--s-3);align-items:flex-start;border-radius:var(--r-md);padding:12px 14px;font:var(--t-small)}
+.callout svg{width:18px;height:18px;flex:none;margin-top:1px;stroke:currentColor;stroke-width:2;fill:none;
+  stroke-linecap:round;stroke-linejoin:round}
+.callout--err{background:var(--err-bg);color:var(--err-ink);border:1px solid var(--err-border);font-weight:600}
+.callout--warn{background:var(--sand-50);color:var(--sand-800);border:1px solid var(--sand-300);border-radius:var(--r-sm)}
+.callout--info{color:var(--ink-2);padding:2px 0}   /* an info row, not a box */
+
+/* ---------- code / command blocks ---------- */
+.cmd{font:var(--t-mono);color:var(--code-ink);background:var(--code-bg);border:1px solid var(--code-border);
+  border-radius:14px;padding:12px 14px;white-space:pre-wrap;word-break:break-word}
+
+/* ---------- toasts (4.10) ---------- */
+.toast{
+  display:flex;align-items:center;gap:var(--s-3);width:360px;max-width:100%;padding:14px 14px 14px 16px;
+  background:var(--surface-raised);border-radius:20px;box-shadow:var(--shadow-toast);color:var(--ink);
+  animation:toast-in var(--d-2) var(--ease-out) both;
+}
+@keyframes toast-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.toast .ic{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;flex:none;color:var(--white);
+  font-weight:700;background:var(--badge-teal);box-shadow:var(--shadow-clay)}
+.toast-info .ic{background:var(--badge-bluegrey)}
+.toast-error .ic{background:var(--badge-coral)}
+.toast .m{flex:1;min-width:0}
+.toast .m b{font:700 14px/1.35 var(--font-ui);color:var(--ink)}
+.toast .m div{font:var(--t-small);color:var(--ink-2)}
+.toast-x{width:28px;height:28px;border-radius:50%;border:0;background:var(--surface-sunken);color:var(--ink);
+  display:grid;place-items:center;cursor:pointer;flex:none;font-size:16px;line-height:1}
+.toast-x:hover{background:var(--slate-150)}
+
+/* ---------- skeleton (4.12) ---------- */
+.skeleton{
+  display:block;border-radius:var(--r-sm);
+  background:linear-gradient(90deg,var(--surface-sunken) 0%,var(--paper-50) 50%,var(--surface-sunken) 100%);
+  background-size:200% 100%;animation:shimmer 1.4s linear infinite;
+}
+@keyframes shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+
+/* ---------- mascot, empty and error states (4.12) ----------
+   Art is always a CSS background on an aria-hidden element, never an <img> (spec 0.2). The
+   gradient disc behind each pose is also the fallback if a PNG is missing. */
+.mascot{display:inline-block;flex:none;position:relative;
+  background-repeat:no-repeat,no-repeat;background-position:center,center;background-size:contain,contain}
+.mascot--hero{background-image:url(/mascot/watchdog-hero.png);background-position:center bottom;
+  filter:drop-shadow(0 16px 18px rgba(20,35,50,.35))}
+.mascot--avatar{border-radius:50%;
+  background-image:url(/mascot/watchdog-avatar.png),var(--avatar-disc);
+  background-position:center 58%,center;background-size:92%,cover}
+.mascot--rest{background-image:url(/mascot/watchdog-rest.png),radial-gradient(circle,rgba(255,255,255,.7) 0%,rgba(255,255,255,0) 68%)}
+.mascot--puzzled{background-image:url(/mascot/watchdog-puzzled.png),radial-gradient(circle,rgba(255,255,255,.7) 0%,rgba(255,255,255,0) 68%)}
+.mascot--float{animation:mascot-float 6s var(--ease-in-out) infinite}
+@keyframes mascot-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+
+.empty-state,.error-state{display:flex;flex-direction:column;align-items:center;gap:var(--s-3);
+  padding:28px 16px;text-align:center}
+.empty-state .es-title,.error-state .es-title{font:var(--t-h3);color:var(--ink)}
+.empty-state .es-body,.error-state .es-body{font:var(--t-small);color:var(--ink-2);max-width:44ch}

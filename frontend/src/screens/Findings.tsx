@@ -1,10 +1,17 @@
-import { useEffect, useState } from "react";
-import { getFindings } from "../api";
+import { useId } from "react";
 import type { TriageItem, Verdict } from "../api";
+import { Button } from "../components/Button";
 import { ConfidenceBar } from "../components/ConfidenceBar";
-import { Kpi } from "../components/Kpi";
-import { SeverityBadge, SeverityStripe } from "../components/SeverityStripe";
+import { EmptyState } from "../components/EmptyState";
+import type { NavId } from "../components/Shell";
+import { SeverityChip, SeverityStripe } from "../components/SeverityChip";
+import { ErrorCard, LoadingCard } from "../components/StateCards";
 import { VerdictChip } from "../components/VerdictChip";
+import { VerdictTiles } from "../components/VerdictTiles";
+import type { VerdictFilter } from "../components/VerdictTiles";
+import { classifyVerdict, matchesVerdict } from "../data/findingStats";
+import { useStaleResource } from "../data/resources";
+import { findingLocus, matchFinding } from "../data/search";
 
 const VERDICT_RANK: Record<Verdict, number> = {
   TRUE_POSITIVE: 0,
@@ -12,92 +19,102 @@ const VERDICT_RANK: Record<Verdict, number> = {
   LIKELY_FALSE_POSITIVE: 2,
 };
 
-function rank(v: Verdict): number {
-  return VERDICT_RANK[v] ?? 1;
-}
-
 /** True positives first, then needs-human, then noise; higher confidence first. */
-function order(items: TriageItem[]): TriageItem[] {
-  return [...items].sort(
-    (a, b) => rank(a.verdict) - rank(b.verdict) || (b.confidence ?? 0) - (a.confidence ?? 0),
-  );
+export function orderFindings(items: readonly TriageItem[]): TriageItem[] {
+  // The same classification as the tiles and the filter, so an unknown verdict sorts as needs-human.
+  const rank = (it: TriageItem) => VERDICT_RANK[classifyVerdict(it.verdict)];
+  return [...items].sort((a, b) => rank(a) - rank(b) || (b.confidence ?? 0) - (a.confidence ?? 0));
 }
 
-function locus(item: TriageItem): string {
-  const { url, file, line } = item.finding;
-  if (url) return url;
-  if (file) return line ? `${file}:${line}` : file;
-  return "—";
+export interface FindingsProps {
+  /** Bump to refetch; the previous rows stay on screen until the new ones arrive. */
+  version?: number;
+  /** Which verdict the table is narrowed to. Anything but one of the three verdicts means "ALL". */
+  verdictFilter?: VerdictFilter;
+  /**
+   * Makes the tiles filter toggles; called with the new filter ("ALL" when the pressed tile is
+   * pressed again). Without it the tiles are plain statistics: no inert buttons.
+   */
+  onVerdictFilterChange?: (filter: VerdictFilter) => void;
+  /** The top-bar search text; every term must match a finding (see `matchFinding`). */
+  query?: string;
+  /** Resets the verdict filter and the search text. Without it no "Clear filters" button is drawn. */
+  onClearFilters?: () => void;
+  /** Lets the empty state offer "Define a new scan". */
+  onNavigate?: (id: NavId) => void;
 }
 
-function pct(n: number, total: number): number {
-  return total === 0 ? 0 : Math.round((n / total) * 100);
-}
+export function Findings({
+  version = 0,
+  verdictFilter = "ALL",
+  onVerdictFilterChange,
+  query = "",
+  onClearFilters,
+  onNavigate,
+}: FindingsProps = {}) {
+  const state = useStaleResource("findings", version);
+  const titleId = useId();
 
-type State =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "ready"; items: TriageItem[] };
-
-export function Findings() {
-  const [state, setState] = useState<State>({ status: "loading" });
-
-  useEffect(() => {
-    let live = true;
-    getFindings().then(
-      (items) => live && setState({ status: "ready", items }),
-      () => live && setState({ status: "error" }),
-    );
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  if (state.status === "loading") {
-    return (
-      <section className="panel glass" role="status">
-        <div className="phead">
-          <span className="ptitle">Loading findings…</span>
-        </div>
-      </section>
-    );
-  }
-
+  if (state.status === "loading") return <LoadingCard caption="Loading findings…" />;
   if (state.status === "error") {
     return (
-      <section className="panel glass" role="alert">
-        <div className="phead">
-          <span className="ptitle">Could not load findings</span>
-          <span className="count">check that the Ascent backend is running</span>
-        </div>
-      </section>
+      <ErrorCard title="Could not load findings" detail="Check that the Ascent backend is running." onRetry={state.retry} />
     );
   }
 
-  const items = order(state.items);
+  const items = orderFindings(state.data);
   const total = items.length;
-  const tp = items.filter((i) => i.verdict === "TRUE_POSITIVE").length;
-  const hu = items.filter((i) => i.verdict === "ABSTAIN").length;
-  const fp = items.filter((i) => i.verdict === "LIKELY_FALSE_POSITIVE").length;
+  // Only the three verdict values narrow the table; anything else (including inherited keys) is ALL.
+  const filter: VerdictFilter = Object.hasOwn(VERDICT_RANK, verdictFilter) ? verdictFilter : "ALL";
+  const q = query.trim();
+  const rows = items.filter((it) => matchesVerdict(it, filter) && (q === "" || matchFinding(it, q)));
+  const filtered = filter !== "ALL" || q !== "";
+
+  const clear = onClearFilters ? (
+    <Button variant="text" onClick={onClearFilters}>
+      Clear filters
+    </Button>
+  ) : null;
 
   return (
-    <>
-      <section className="kpis">
-        <Kpi label="Findings" value={total} sub="triaged by Crux" percent={100} ringText={String(total)} color="var(--accent)" />
-        <Kpi label="True positive" value={tp} sub="confirmed by triage" percent={pct(tp, total)} ringText={`${pct(tp, total)}%`} color="var(--crit)" />
-        <Kpi label="Needs human" value={hu} sub="awaiting your review" percent={pct(hu, total)} ringText={`${pct(hu, total)}%`} color="var(--med)" />
-        <Kpi label="Likely noise" value={fp} sub="cut by Crux" percent={pct(fp, total)} ringText={`${pct(fp, total)}%`} color="var(--faint)" />
-      </section>
+    <div className="stack">
+      <VerdictTiles
+        items={items}
+        compact
+        filter={filter}
+        onSelect={
+          onVerdictFilterChange
+            ? (target) => onVerdictFilterChange(target === filter ? "ALL" : target)
+            : undefined
+        }
+      />
 
-      <section className="panel glass">
-        <div className="phead">
-          <span className="ptitle">Findings</span>
+      <section className="card" aria-labelledby={titleId}>
+        <div className="card-head">
+          <h2 className="card-title" id={titleId}>
+            Findings
+          </h2>
           <span className="count">{total} triaged</span>
+          {filtered && total > 0 ? <span className="count">{rows.length} shown</span> : null}
+          {/* With no matching rows the message below carries the one reset, so it is not repeated here. */}
+          {filtered && rows.length > 0 ? clear : null}
         </div>
         {total === 0 ? (
-          <div className="phead">
-            <span className="sub">No findings yet</span>
-          </div>
+          <EmptyState
+            size={160}
+            title="No findings yet"
+            action={
+              onNavigate ? (
+                <Button variant="primary" onClick={() => onNavigate("newscan")}>
+                  Define a new scan
+                </Button>
+              ) : undefined
+            }
+          >
+            Define a scan, run it, and triaged findings land here.
+          </EmptyState>
+        ) : rows.length === 0 ? (
+          <EmptyState title="No findings match these filters" action={clear} />
         ) : (
           <div className="tbl">
             <table>
@@ -112,7 +129,7 @@ export function Findings() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((item, i) => {
+                {rows.map((item, i) => {
                   const f = item.finding;
                   return (
                     <tr key={f.id ?? i}>
@@ -121,19 +138,19 @@ export function Findings() {
                         <div className="fname">{f.title}</div>
                         <div className="frule">{f.rule_id}</div>
                       </td>
-                      <td>
-                        <SeverityBadge severity={f.severity} />
+                      <td data-label="Severity">
+                        <SeverityChip severity={f.severity} />
                       </td>
-                      <td>
+                      <td data-label="Confidence">
                         <ConfidenceBar confidence={item.confidence} verdict={item.verdict} />
                       </td>
-                      <td>
+                      <td data-label="Verdict">
                         <VerdictChip verdict={item.verdict} />
                       </td>
-                      <td>
-                        <span className="loc">{locus(item)}</span>
+                      <td data-label="Location">
+                        <span className="loc">{findingLocus(item) || "—"}</span>
                       </td>
-                      <td>
+                      <td data-label="Mapping">
                         <div className="tags">
                           {f.cwe ? <span className="tag">{f.cwe}</span> : null}
                           {f.category ? <span className="tag">{f.category}</span> : null}
@@ -147,6 +164,6 @@ export function Findings() {
           </div>
         )}
       </section>
-    </>
+    </div>
   );
 }

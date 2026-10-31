@@ -1,0 +1,55 @@
+/* Base: reset, page canvas (spec 1.4), typography rules (1.7), utilities, skip link, motion (1.9). */
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+
+body{
+  margin:0; font:var(--t-body); color:var(--ink); -webkit-font-smoothing:antialiased;
+  background:
+    radial-gradient(55% 45% at 8% 0%, var(--bg-glow-teal) 0%, transparent 60%),
+    radial-gradient(45% 40% at 95% 6%, var(--bg-glow-lav) 0%, transparent 60%),
+    radial-gradient(60% 55% at 100% 100%, var(--bg-glow-sand) 0%, transparent 60%),
+    var(--bg);
+  background-attachment:fixed;
+}
+body::before{ /* moodboard fabric, decorative */
+  content:""; position:fixed; inset:auto 0 0 auto; width:min(1400px,90vw); height:min(470px,40vh);
+  background:url(/textures/fabric-wave.jpg) right bottom / cover no-repeat;
+  opacity:.28; pointer-events:none; z-index:-1;
+  -webkit-mask-image:linear-gradient(to top,black 40%,transparent 100%);
+          mask-image:linear-gradient(to top,black 40%,transparent 100%);
+}
+
+/* form controls inherit the UI font instead of the browser default */
+button,input,select,textarea{font:inherit;color:inherit}
+
+/* typography: one h1 per screen (top-bar title), card titles h2, sub-sections h3 */
+h1,h2,h3,h4,p{margin:0}
+a{color:var(--link)}
+code,kbd,pre,samp{font-family:var(--font-mono)}
+b,strong{font-weight:700}
+.num{font-variant-numeric:tabular-nums}
+
+/* every text, count and number that aligns in columns */
+td,th,.n,.count{font-variant-numeric:tabular-nums}
+
+/* default keyboard focus ring (light surfaces); dark surfaces switch to --focus-on-dark */
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.sidebar :focus-visible,.hero :focus-visible{
+  outline-color:var(--focus-on-dark);
+}
+
+/* visually hidden but exposed to assistive tech */
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+  clip:rect(0,0,0,0);clip-path:inset(50%);white-space:nowrap;border:0}
+
+/* skip link: first focusable element, visible on focus */
+.skip{
+  position:fixed;top:12px;left:12px;z-index:100;padding:10px 18px;border-radius:var(--r-pill);
+  background:var(--white);color:var(--ink);font:700 14px/1 var(--font-ui);text-decoration:none;
+  box-shadow:var(--shadow-toast);transform:translateY(-200%);
+}
+.skip:focus,.skip:focus-visible{transform:translateY(0)}
+
+/* The prefers-reduced-motion override lives at the very end of screens.css, the last sheet that
+   defines animations, so no later rule can undo it. */

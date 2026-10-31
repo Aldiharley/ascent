@@ -1,128 +1,107 @@
-import { useEffect, useState } from "react";
-import { getAudit } from "../api";
-import type { AuditEntry, AuditLog } from "../api";
+import { useState } from "react";
+import { AuditEntryRow, kindOf } from "../components/AuditEntryRow";
+import type { AuditKind } from "../components/AuditEntryRow";
+import { EmptyState } from "../components/EmptyState";
+import { IconBadge } from "../components/IconBadge";
+import { IconChain } from "../components/icons";
+import { SegmentedControl } from "../components/SegmentedControl";
+import { ErrorCard, LoadingCard } from "../components/StateCards";
+import { useScrollable } from "../components/useScrollable";
+import { useStaleResource } from "../data/resources";
 
-type State =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "ready"; log: AuditLog };
-
-const HASH_CHARS = 12;
-
-function shortHash(h: string | undefined): string {
-  return h ? h.slice(0, HASH_CHARS) : "";
+export interface AuditProps {
+  /** Bump to refetch; the previous entries stay on screen until the new ones arrive. */
+  version?: number;
 }
 
-function EntryRow({ entry }: { entry: AuditEntry }) {
-  const hash = shortHash(entry.entry_hash);
-  if (entry.type === "gate_decision") {
-    return (
-      <div className="ev">
-        <span className="tick human" aria-hidden="true" />
-        <div className="m">
-          <b>Human decision</b> · gate {entry.gate_id ?? "?"} → {entry.decision ?? "?"}
-          <div className="h">{entry.ts ?? ""}</div>
-          {hash ? <div className="h">{hash}</div> : null}
-        </div>
-      </div>
-    );
-  }
-  if (entry.type === "gate_evaluation") {
-    return (
-      <div className="ev">
-        <span className="tick" aria-hidden="true" />
-        <div className="m">
-          <b>Policy gate</b> · {entry.decision ?? "?"} (exit {entry.exit_code ?? "?"})
-          <div className="h">{entry.ts ?? ""}</div>
-          {hash ? <div className="h">{hash}</div> : null}
-        </div>
-      </div>
-    );
-  }
-  if (entry.type === "gate_execution") {
-    return (
-      <div className="ev">
-        <span className="tick human" aria-hidden="true" />
-        <div className="m">
-          <b>Verification run</b> · gate {entry.gate_id ?? "?"} → {entry.outcome ?? "?"}
-          <div className="h">{entry.ts ?? ""}</div>
-          {hash ? <div className="h">{hash}</div> : null}
-        </div>
-      </div>
-    );
-  }
-  const conf = typeof entry.confidence === "number" ? ` (${entry.confidence.toFixed(2)})` : "";
+type TypeFilter = "all" | AuditKind;
+
+// Filter labels name the kind of record, not the row titles ("Triage", "Human decision", "Policy
+// gate", "Verification run"), so a text query for a row title matches exactly one place.
+const FILTERS: { value: AuditKind; label: string }[] = [
+  { value: "triage", label: "Verdicts" },
+  { value: "decision", label: "Decisions" },
+  { value: "policy", label: "Policy" },
+  { value: "run", label: "Runs" },
+];
+
+export function Audit({ version = 0 }: AuditProps = {}) {
+  const res = useStaleResource("audit", version);
+  const [filter, setFilter] = useState<TypeFilter>("all");
+  // Only a timeline that really scrolls is a tab stop. The hook runs before the loading/error
+  // returns below (hooks cannot be conditional), keyed on what changes what is shown.
+  const rowCount = res.status === "ready" ? res.data.entries.length : 0;
+  const [feedRef, feedScrolls] = useScrollable<HTMLDivElement>([res.status, filter, rowCount]);
+
+  if (res.status === "loading") return <LoadingCard caption="Loading audit log…" rows={5} />;
+  if (res.status === "error") return <ErrorCard title="Could not load the audit log" onRetry={res.retry} />;
+
+  const { entries, chain_ok } = res.data;
+  const kinds = entries.map(kindOf);
+  const counts: Record<AuditKind, number> = { triage: 0, decision: 0, policy: 0, run: 0 };
+  for (const k of kinds) counts[k] += 1;
+  // A refresh can empty the selected type; fall back to All rather than show an empty list.
+  const active: TypeFilter = filter !== "all" && counts[filter] > 0 ? filter : "all";
+  const shown = entries
+    .map((entry, i) => ({ entry, i }))
+    .filter(({ i }) => active === "all" || kinds[i] === active);
+
   return (
-    <div className="ev">
-      <span className="tick" aria-hidden="true" />
-      <div className="m">
-        <b>Triage</b> · finding {entry.finding_id ?? "?"} → {entry.verdict ?? "?"}
-        {conf}
-        <div className="h">{entry.ts ?? ""}</div>
-        {hash ? <div className="h">{hash}</div> : null}
-      </div>
+    <div className="stack">
+      <section className="card chain-card">
+        <IconBadge tone={chain_ok ? "teal" : "coral"} size="lg">
+          <IconChain />
+        </IconBadge>
+        {chain_ok ? (
+          <div className="chain chain-ok" role="status">
+            Hash chain OK
+          </div>
+        ) : (
+          <div className="chain chain-fail" role="alert">
+            Hash chain FAIL: log may have been tampered with
+          </div>
+        )}
+        <span className="chain-count">{entries.length === 1 ? "1 entry" : `${entries.length} entries`}</span>
+      </section>
+
+      <section className="card" aria-labelledby="audit-timeline-title">
+        <div className="card-head">
+          <h2 className="card-title" id="audit-timeline-title">
+            Timeline
+          </h2>
+          {entries.length > 0 && (
+            <SegmentedControl<TypeFilter>
+              label="Show"
+              value={active}
+              onChange={setFilter}
+              options={[
+                { value: "all", label: `All ${entries.length}` },
+                ...FILTERS.map((f) => ({
+                  value: f.value,
+                  label: `${f.label} ${counts[f.value]}`,
+                  disabled: counts[f.value] === 0,
+                })),
+              ]}
+            />
+          )}
+        </div>
+        {entries.length === 0 ? (
+          <EmptyState size={120} title="No audit entries yet" />
+        ) : (
+          // When it scrolls, it must be reachable by keyboard.
+          <div
+            className="feed feed--page"
+            role="region"
+            aria-label="Audit timeline"
+            ref={feedRef}
+            tabIndex={feedScrolls ? 0 : undefined}
+          >
+            {shown.map(({ entry, i }) => (
+              <AuditEntryRow key={entry.entry_hash ?? i} entry={entry} />
+            ))}
+          </div>
+        )}
+      </section>
     </div>
-  );
-}
-
-export function Audit() {
-  const [state, setState] = useState<State>({ status: "loading" });
-
-  useEffect(() => {
-    let live = true;
-    getAudit().then(
-      (log) => live && setState({ status: "ready", log }),
-      () => live && setState({ status: "error" }),
-    );
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  if (state.status === "loading") {
-    return (
-      <section className="panel glass" role="status">
-        <div className="phead">
-          <span className="ptitle">Loading audit log…</span>
-        </div>
-      </section>
-    );
-  }
-
-  if (state.status === "error") {
-    return (
-      <section className="panel glass" role="alert">
-        <div className="phead">
-          <span className="ptitle">Could not load the audit log</span>
-          <span className="count">check that the Ascent backend is running</span>
-        </div>
-      </section>
-    );
-  }
-
-  const { entries, chain_ok } = state.log;
-
-  return (
-    <section className="audit glass">
-      <h3>Audit log</h3>
-      {chain_ok ? (
-        <div className="chain chain-ok" role="status">
-          Hash chain OK
-        </div>
-      ) : (
-        <div className="chain chain-fail" role="alert">
-          Hash chain FAIL: log may have been tampered with
-        </div>
-      )}
-      {entries.length === 0 ? (
-        <div className="note">No audit entries yet</div>
-      ) : (
-        <div className="feed">
-          {entries.map((e, i) => (
-            <EntryRow key={e.entry_hash ?? i} entry={e} />
-          ))}
-        </div>
-      )}
-    </section>
   );
 }

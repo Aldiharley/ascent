@@ -1,104 +1,112 @@
-import { useEffect, useRef, useState } from "react";
-import { GateDecisionError, decideGate, getGates } from "../api";
+import { useEffect, useId, useRef, useState } from "react";
+import { GateDecisionError, decideGate } from "../api";
 import type { Gate, GateDecision } from "../api";
-
-type State =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "ready"; gates: Gate[] };
-
-interface ToastMsg {
-  kind: "ok" | "info" | "error";
-  title: string;
-  detail: string;
-}
-
-interface ToastItem extends ToastMsg {
-  key: number;
-}
-
-const TOAST_MS = 5000;
-const MAX_TOASTS = 4;
+import { Button } from "../components/Button";
+import { EmptyState } from "../components/EmptyState";
+import { GateCard } from "../components/GateCard";
+import { IconBadge } from "../components/IconBadge";
+import { IconShieldCheck } from "../components/icons";
+import { ListCard } from "../components/ListCard";
+import { Skeleton } from "../components/Skeleton";
+import { ErrorCard, LoadingCard } from "../components/StateCards";
+import { ToastStack, useToasts } from "../components/Toast";
+import { markGateDecided, usePendingGates } from "../data/gates";
 
 export interface GatesProps {
-  /** Called after a decision is recorded (or found already recorded), so a sibling audit view can refresh. */
+  /** Called after a decision is recorded (or found already recorded), so sibling views can refresh. */
   onDecided?: () => void;
+  /** `page` is the Approval gates screen; `compact` is the Overview "Approval required" list card. */
+  variant?: "page" | "compact";
+  /** Bump to refetch the list; the cards and toasts stay on screen until the new list arrives. */
+  version?: number;
+  /** The compact card's "See all" and "N more" controls. Omitted: no such controls are drawn. */
+  onSeeAll?: () => void;
 }
 
-export function Gates({ onDecided }: GatesProps = {}) {
-  const [state, setState] = useState<State>({ status: "loading" });
-  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const timers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
-  const inFlight = useRef<Set<string>>(new Set());
-  const nextKey = useRef(0);
-  const live = useRef(true);
+/** How many gates the compact card shows before it links to the rest. */
+const COMPACT_LIMIT = 3;
 
-  function load() {
-    setState({ status: "loading" });
-    getGates().then(
-      (gates) => live.current && setState({ status: "ready", gates }),
-      () => live.current && setState({ status: "error" }),
-    );
+type Outcome = "recorded" | "already" | "failed";
+
+async function postDecision(id: string, decision: GateDecision): Promise<Outcome> {
+  try {
+    await decideGate(id, decision);
+    return "recorded";
+  } catch (e) {
+    return e instanceof GateDecisionError && e.status === 409 ? "already" : "failed";
   }
+}
+
+export function Gates({ onDecided, variant = "page", version = 0, onSeeAll }: GatesProps = {}) {
+  // The gates still pending, from the one source every view of them shares (see data/gates.ts):
+  // a decision recorded here is hidden from the bell, the hero and the other card at the same time.
+  const res = usePendingGates(version);
+  const [deciding, setDeciding] = useState<ReadonlyMap<string, GateDecision>>(new Map());
+  const { toasts, notify, dismiss } = useToasts();
+  const inFlight = useRef<Set<string>>(new Set());
+  const live = useRef(true);
+  const introId = useId();
+  // The "Approval required" heading of whichever variant is drawn, and (page variant) the view's
+  // root: after a decision the decided card disappears, and focus goes to the heading instead of
+  // dropping to <body>.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const pageRoot = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     live.current = true;
-    load();
-    const pending = timers.current;
     return () => {
       live.current = false;
-      pending.forEach(clearTimeout);
-      pending.clear();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function notify(msg: ToastMsg) {
-    const key = nextKey.current++;
-    setToasts((prev) => [...prev, { ...msg, key }].slice(-MAX_TOASTS));
-    const t = setTimeout(() => {
-      timers.current.delete(t);
-      setToasts((prev) => prev.filter((x) => x.key !== key));
-    }, TOAST_MS);
-    timers.current.add(t);
-  }
-
-  function setBusyFor(id: string, on: boolean) {
-    setBusy((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(id);
+  function setDecidingFor(id: string, decision: GateDecision | null) {
+    setDeciding((prev) => {
+      const next = new Map(prev);
+      if (decision) next.set(id, decision);
       else next.delete(id);
       return next;
     });
   }
 
-  function removeGate(id: string) {
-    setState((s) =>
-      s.status === "ready" ? { status: "ready", gates: s.gates.filter((g) => g.id !== id) } : s,
-    );
+  /**
+   * Focus the heading, unless the user has since put focus somewhere outside this view (typing in
+   * the search box while the answer was on its way): only a focus that was lost (on <body>) or is
+   * still inside the view, on the card that is about to disappear, is moved.
+   */
+  function focusHeading() {
+    const el = heading.current;
+    if (!el) return;
+    const root = variant === "compact" ? el.closest("section") : pageRoot.current;
+    const at = document.activeElement;
+    if (!at || at === document.body || root?.contains(at)) el.focus();
   }
 
   async function decide(gate: Gate, decision: GateDecision) {
-    if (inFlight.current.has(gate.id) || busy.has(gate.id)) return;
+    if (inFlight.current.has(gate.id) || deciding.has(gate.id)) return;
     inFlight.current.add(gate.id);
-    setBusyFor(gate.id, true);
+    setDecidingFor(gate.id, decision);
     const verb = decision === "approve" ? "Approved" : "Denied";
     try {
-      await decideGate(gate.id, decision);
+      const outcome = await postDecision(gate.id, decision);
+      // Recorded (or already recorded): the audit log and the pending list have changed, whether or
+      // not this view is still on screen, so tell everyone before anything that needs a mounted view.
+      if (outcome !== "failed") {
+        markGateDecided(gate.id);
+        try {
+          onDecided?.();
+        } catch {
+          // The decision is recorded whatever the app's refresh does, and the user must still be told.
+          // Swallowed without logging: the error text could carry gate or target data.
+        }
+      }
       if (!live.current) return;
-      removeGate(gate.id);
-      onDecided?.();
-      notify({
-        kind: "ok",
-        title: `${verb}: recorded in the audit log`,
-        detail: `${gate.title}. This action does not run the command.`,
-      });
-    } catch (e) {
-      if (!live.current) return;
-      if (e instanceof GateDecisionError && e.status === 409) {
-        removeGate(gate.id);
-        onDecided?.();
+      if (outcome === "recorded") {
+        notify({
+          kind: "ok",
+          title: `${verb}: recorded in the audit log`,
+          detail: `${gate.title}. This action does not run the command.`,
+        });
+      } else if (outcome === "already") {
         notify({
           kind: "info",
           title: "Already decided",
@@ -111,132 +119,123 @@ export function Gates({ onDecided }: GatesProps = {}) {
           detail: `${gate.title}: could not record the decision. Try again.`,
         });
       }
+      // The decided card is gone (a failed one stays, and so does focus on its buttons).
+      if (outcome !== "failed") focusHeading();
+    } catch {
+      // Nothing above throws on a network or HTTP failure (postDecision reports those as an outcome),
+      // so this is a bug or a throwing subscriber. It must not become an unhandled rejection of the
+      // click handler. Logged as one constant line: the error itself could carry gate or target data.
+      console.error("gate decision handler failed");
     } finally {
       inFlight.current.delete(gate.id);
-      if (live.current) setBusyFor(gate.id, false);
+      if (live.current) setDecidingFor(gate.id, null);
     }
   }
 
-  if (state.status === "loading") {
+  const compact = variant === "compact";
+
+  if (res.status === "loading") {
+    if (compact) return <LoadingCard caption="Loading approval gates…" rows={2} h={96} />;
     return (
-      <section className="panel glass" role="status">
-        <div className="phead">
-          <span className="ptitle">Loading approval gates…</span>
+      <div role="status">
+        <div className="gate-grid">
+          {[0, 1].map((i) => (
+            <div className="card" key={i}>
+              <div className="skeleton-stack">
+                <Skeleton h={40} w="60%" r={14} />
+                <Skeleton h={16} />
+                <Skeleton h={64} r={14} />
+                <Skeleton h={44} r={999} />
+              </div>
+            </div>
+          ))}
         </div>
-      </section>
+        <p className="loading-caption">Loading approval gates…</p>
+      </div>
     );
   }
 
-  if (state.status === "error") {
-    return (
-      <section className="panel glass" role="alert">
-        <div className="phead">
-          <span className="ptitle">Could not load approval gates</span>
-          <span className="count">check that the Ascent backend is running</span>
-          <button type="button" className="deny" onClick={load}>
-            Retry
-          </button>
-        </div>
-      </section>
-    );
+  if (res.status === "error") {
+    return <ErrorCard title="Could not load approval gates" onRetry={res.retry} />;
   }
 
-  const { gates } = state;
+  const gates = res.data;
+  const card = (g: Gate) => (
+    <GateCard
+      key={g.id}
+      gate={g}
+      variant={variant}
+      deciding={deciding.get(g.id)}
+      onDecide={(d) => decide(g, d)}
+    />
+  );
+
+  if (compact) {
+    const shown = gates.slice(0, COMPACT_LIMIT);
+    const more = gates.length - shown.length;
+    return (
+      <>
+        <ListCard
+          title="Approval required"
+          titleRef={heading}
+          count={`${gates.length} pending`}
+          seeAll={onSeeAll ? { label: "approval gates", onClick: onSeeAll } : undefined}
+        >
+          {gates.length === 0 ? (
+            <EmptyState title="No actions awaiting approval" />
+          ) : (
+            <div className="gate-list">{shown.map(card)}</div>
+          )}
+          {more > 0 ? (
+            onSeeAll ? (
+              <div className="list-more">
+                <Button variant="text" onClick={onSeeAll}>
+                  {more} more in Approval gates
+                </Button>
+              </div>
+            ) : (
+              <p className="list-more">{more} more in Approval gates</p>
+            )
+          ) : null}
+        </ListCard>
+        <ToastStack toasts={toasts} onDismiss={dismiss} />
+      </>
+    );
+  }
 
   return (
     <>
-      <section className="gate glass">
-        <h3>
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z" />
-          </svg>{" "}
-          Approval required{" "}
-          <span className="pill" style={{ marginLeft: "auto" }}>
-            {gates.length} pending
-          </span>
-        </h3>
+      <div className="stack" ref={pageRoot}>
+        <section className="card intro-strip" aria-labelledby={introId}>
+          <IconBadge tone="ice">
+            <IconShieldCheck />
+          </IconBadge>
+          <div className="intro-text">
+            <div className="intro-head">
+              <h2 className="card-title" id={introId} ref={heading} tabIndex={-1}>
+                Approval required
+              </h2>
+              <span className="count">{gates.length} pending</span>
+            </div>
+            <p className="intro-sub">
+              Detect-only verification gates. Approving records your consent in the hash-chained audit log. It never
+              runs anything from this console.
+            </p>
+          </div>
+        </section>
+
         {gates.length === 0 ? (
-          <div className="note">No actions awaiting approval</div>
+          <section className="card">
+            <EmptyState size={180} title="No actions awaiting approval">
+              When triage proposes a verification step, it waits here for you.
+            </EmptyState>
+          </section>
         ) : (
-          gates.map((g) => {
-            const inScope = g.in_scope === true;
-            const working = busy.has(g.id);
-            return (
-              <div className="gcard" key={g.id}>
-                <div className="t">
-                  {g.title}
-                  {g.detect_only === true && <span className="badge-detect">DETECT-ONLY</span>}
-                </div>
-                <div className="why">{g.why}</div>
-                <div className="why">
-                  Target: <span className="loc">{g.target}</span>
-                </div>
-                <div className="cmd">{g.command}</div>
-                {typeof g.expected_evidence === "string" && g.expected_evidence !== "" && (
-                  <div className="why">
-                    <b>Expected evidence:</b> <span>{g.expected_evidence}</span>
-                  </div>
-                )}
-                {typeof g.why_it_might_fail === "string" && g.why_it_might_fail !== "" && (
-                  <div className="why">
-                    <b>Why it might fail:</b> <span>{g.why_it_might_fail}</span>
-                  </div>
-                )}
-                {inScope ? (
-                  <div className="scope-ok">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
-                      <path d="M20 6 9 17l-5-5" />
-                    </svg>{" "}
-                    In scope
-                  </div>
-                ) : (
-                  <div className="scope-bad">Out of scope: approval is blocked</div>
-                )}
-                <div className="acts">
-                  <button className="approve" disabled={!inScope || working} onClick={() => decide(g, "approve")}>
-                    Approve
-                  </button>
-                  <button className="deny" disabled={working} onClick={() => decide(g, "deny")}>
-                    Deny
-                  </button>
-                </div>
-                <div className="note">
-                  Every decision is written to the audit log. Approving records consent; it does not run the command.
-                </div>
-              </div>
-            );
-          })
+          <div className="gate-grid">{gates.map(card)}</div>
         )}
-      </section>
-
-      <div className="toast-stack">
-        <div aria-live="polite" role="status" className="toast-region">
-          {toasts.filter((t) => t.kind !== "error").map((t) => (
-            <ToastView key={t.key} toast={t} />
-          ))}
-        </div>
-        <div aria-live="assertive" role="alert" className="toast-region">
-          {toasts.filter((t) => t.kind === "error").map((t) => (
-            <ToastView key={t.key} toast={t} />
-          ))}
-        </div>
       </div>
+
+      <ToastStack toasts={toasts} onDismiss={dismiss} />
     </>
-  );
-}
-
-const TOAST_ICON: Record<ToastMsg["kind"], string> = { ok: "✓", info: "i", error: "!" };
-
-function ToastView({ toast }: { toast: ToastMsg }) {
-  return (
-    <div className={`toast glass gate-toast${toast.kind === "error" ? " toast-error" : ""}`}>
-      <div className="ic" aria-hidden="true">
-        {TOAST_ICON[toast.kind]}
-      </div>
-      <div className="m">
-        <b>{toast.title}</b>
-        <div>{toast.detail}</div>
-      </div>
-    </div>
   );
 }
