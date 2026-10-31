@@ -63,7 +63,8 @@ enum Cmd {
         /// When hit, nuclei is stopped (SIGTERM then SIGKILL) and findings collected so
         /// far are kept, but the run is marked INCOMPLETE with reason
         /// `wall_clock_limit_hit`. The engagement file cannot set this.
-        #[arg(long, default_value_t = 7200)]
+        /// Must be at least 1 second.
+        #[arg(long, default_value_t = 7200, value_parser = clap::value_parser!(u64).range(1..))]
         dast_timeout: u64,
     },
     /// Evaluate a policy against an existing output directory (CI step).
@@ -264,9 +265,11 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
             match policy {
                 Some(p) => gate_step(&out, &p, fail_on_warn),
                 None => {
-                    // Dry-run: incomplete but no scanner failures → exit 0.
-                    // Real incomplete run (timed out, scanner error, …) → exit 3.
-                    if s.incomplete_reasons.is_empty() {
+                    // A complete run or a dry run (which intentionally scans nothing)
+                    // exits 0.  Anything that is not complete — including a run with a
+                    // crashed scanner (`failed_tools` non-empty) even when
+                    // `incomplete_reasons` is otherwise empty — exits 3.
+                    if s.complete || dry_run {
                         Ok(0)
                     } else {
                         Ok(3)
