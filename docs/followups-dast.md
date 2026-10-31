@@ -9,6 +9,7 @@ These come out of the reviews and live validation of `feat/dast-coverage` and `f
 | 4 | standard | 103 min, urls=25, findings=251, 287,872 requests, 1.4% errors, 0 off scope, 241 of 11,586 templates excluded, complete |
 | 5 | active, authenticated, SAST fixture | 120 min, 307,073 requests, 15.5% errors, 0 off scope, no auth-header leak. The Juice Shop container died part-way, but the run still reported complete. Fixed by the post-scan re-probe. |
 | 6 | standard, authenticated, SAST fixture | 104 min, urls=25, findings=280 (95 triaged), 287,869 requests, 1.3% errors, 0 off scope, `stopped_answering=[]`, complete, no leak, no temp dirs left |
+| 7 | standard, authenticated, Linux (Kali) | **INCOMPLETE** — Juice Shop container stopped mid-scan. 361,595 requests, 72.6% errors, 0 off scope, 256 templates excluded, `stopped_answering=[http://127.0.0.1:3000/]`, no leak ✓, no temp dirs ✓. The `stopped_answering` detection fired correctly. Container stability on this host is unresolved (Docker/iptables restart during setup may have left the container unstable). |
 
 Tool versions: nuclei v3.11.1, nuclei-templates v10.4.9, katana and httpx from pdtm. Juice Shop's nuclei hits are info-level and triage as ABSTAIN, so `--propose` correctly proposes 0 gates.
 
