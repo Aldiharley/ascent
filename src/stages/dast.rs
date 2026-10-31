@@ -313,6 +313,8 @@ fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std
 const TRACE_MISSING: &str = "nuclei trace log missing";
 /// A host is reported as failing when at least half of at least this many requests failed.
 const FAILING_MIN_REQUESTS: usize = 20;
+/// Minimum consecutive connection errors before a subsequent success qualifies as crash-and-recover.
+const CRASH_RECOVER_MIN_ERRORS: usize = 20;
 /// Off-scope host names listed by name; the rest are counted.
 const OFF_SCOPE_NAMES_SHOWN: usize = 10;
 
@@ -499,6 +501,63 @@ impl TraceAudit {
             })
             .collect()
     }
+}
+
+/// True when `error` (case-insensitive) is one of the connection-error types
+/// that signal a crashed target: `connection refused`, `connection reset`, or `eof`.
+fn is_connection_error(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("connection refused") || e.contains("connection reset") || e.contains("eof")
+}
+
+/// Detects hosts that crashed and recovered during a nuclei pass by analysing
+/// its trace log.  A crash-and-recover means ≥ [`CRASH_RECOVER_MIN_ERRORS`]
+/// consecutive connection errors (`connection refused`, `connection reset`, `EOF`
+/// — case-insensitive) against ONE host, followed by ≥ 1 success for that same
+/// host.  Counter-cases: a streak shorter than the threshold or one with no
+/// subsequent success are not flagged.  Returns the list of affected hosts
+/// (deduplicated, first-seen order).
+pub fn detect_crash_recover(trace_path: &Path) -> Vec<String> {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(trace_path) else {
+        return vec![];
+    };
+    let reader = std::io::BufReader::new(file);
+    // per-host: (current consecutive connection-error streak, already recorded)
+    let mut state: std::collections::HashMap<String, (usize, bool)> =
+        std::collections::HashMap::new();
+    let mut recovered: Vec<String> = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(Value::Object(o)) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let s = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let address = s("address");
+        if address.trim().is_empty() {
+            continue;
+        }
+        let host = address_host(&address);
+        if host.is_empty() {
+            continue;
+        }
+        let error = s("error");
+        let failed = !(error.is_empty() || error == "none");
+        let entry = state.entry(host.clone()).or_insert((0, false));
+        if !failed {
+            // success: if we had a long-enough streak and haven't recorded it yet, record it
+            if entry.0 >= CRASH_RECOVER_MIN_ERRORS && !entry.1 {
+                entry.1 = true;
+                recovered.push(host);
+            }
+            entry.0 = 0;
+        } else if is_connection_error(&error) {
+            entry.0 += 1;
+        } else {
+            // other error type — breaks the connection-error streak
+            entry.0 = 0;
+        }
+    }
+    recovered
 }
 
 /// `-H` plus exactly ONE `"Name: value"` element (never split, never other flags).
@@ -931,6 +990,10 @@ pub struct DastSummary {
     /// Live seed URLs that no longer answered the httpx probe after the scan: the
     /// target went down part-way, so the checks after that point produced no result.
     pub stopped_answering: Vec<String>,
+    /// Hosts that crashed (≥ 20 consecutive connection errors) and then recovered
+    /// (at least one subsequent success) during the scan.  The run is INCOMPLETE
+    /// because checks during the outage produced no result.
+    pub recovered_hosts: Vec<String>,
     /// True when the `--dast-timeout` wall-clock limit was reached and nuclei was
     /// stopped before all templates finished. Findings collected up to that point
     /// are kept, but the run is INCOMPLETE.
@@ -1002,6 +1065,7 @@ pub fn run_dast(
     let mut templates_excluded = 0;
     let mut audit = TraceAudit::default();
     let mut stopped_answering = Vec::new();
+    let mut recovered_hosts: Vec<String> = Vec::new();
     let mut wall_clock_limit_hit = false;
     // The deadline applies to all nuclei passes combined; None when not live
     // (no real process is spawned) or when the runner is not timeout-capable.
@@ -1064,6 +1128,11 @@ pub fn run_dast(
                 if let Some(t) = &trace {
                     if listed > 0 {
                         let _ = audit.read(t, &guard, secret);
+                        for h in detect_crash_recover(t) {
+                            if !recovered_hosts.contains(&h) {
+                                recovered_hosts.push(h);
+                            }
+                        }
                     }
                 }
                 break 'passes;
@@ -1075,6 +1144,11 @@ pub fn run_dast(
                     // `-dast` pass only fuzzes URLs with parameters, so it may send none.
                     if n == 0 && !fuzz_pass {
                         return Err(TRACE_MISSING.into());
+                    }
+                    for h in detect_crash_recover(t) {
+                        if !recovered_hosts.contains(&h) {
+                            recovered_hosts.push(h);
+                        }
                     }
                 }
                 // Tens of MB: free it now (the scratch dir is removed on every path anyway).
@@ -1131,6 +1205,7 @@ pub fn run_dast(
             off_scope_request_count: audit.off_scope_count,
             failing_hosts: audit.failing_hosts(),
             stopped_answering,
+            recovered_hosts,
             wall_clock_limit_hit,
         },
         coverage,
