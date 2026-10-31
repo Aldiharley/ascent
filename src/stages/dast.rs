@@ -4,7 +4,7 @@
 //! what was and was not tested. dos / brute-force / default-login are never run.
 use super::enumerate::enumerate_surface;
 use super::recon::{ensure_httpx_identity, is_subfinder_candidate, probe_urls, recon};
-use super::scan::{listed_count, scan_rows, write_new_lines, TempDir};
+use super::scan::{listed_count, scan_rows_with_deadline, write_new_lines, TempDir};
 use crate::models::Finding;
 use crate::normalise::normalise_nuclei;
 use crate::runner::Runner;
@@ -931,6 +931,10 @@ pub struct DastSummary {
     /// Live seed URLs that no longer answered the httpx probe after the scan: the
     /// target went down part-way, so the checks after that point produced no result.
     pub stopped_answering: Vec<String>,
+    /// True when the `--dast-timeout` wall-clock limit was reached and nuclei was
+    /// stopped before all templates finished. Findings collected up to that point
+    /// are kept, but the run is INCOMPLETE.
+    pub wall_clock_limit_hit: bool,
 }
 
 pub struct DastOutcome {
@@ -943,11 +947,17 @@ pub struct DastOutcome {
 /// `live` is false for a dry run: every call still goes through the scope-checking
 /// runner, but nothing is sent, so no declared URL is reported unreachable and the
 /// coverage says nothing was scanned.
+///
+/// `dast_timeout_secs` is the wall-clock limit for all nuclei passes combined.
+/// When the limit is hit, nuclei is stopped (SIGTERM then SIGKILL) and whatever
+/// findings were collected so far are returned with `wall_clock_limit_hit = true`
+/// in the summary. The engagement file cannot set this; it is a CLI concern.
 pub fn run_dast(
     eng: &Engagement,
     runner: &dyn Runner,
     auth: Option<&(String, String)>,
     live: bool,
+    dast_timeout_secs: u64,
 ) -> Result<Option<DastOutcome>, Box<dyn std::error::Error>> {
     if eng.hosts.is_empty() && eng.urls.is_empty() {
         return Ok(None);
@@ -992,6 +1002,14 @@ pub fn run_dast(
     let mut templates_excluded = 0;
     let mut audit = TraceAudit::default();
     let mut stopped_answering = Vec::new();
+    let mut wall_clock_limit_hit = false;
+    // The deadline applies to all nuclei passes combined; None when not live
+    // (no real process is spawned) or when the runner is not timeout-capable.
+    let deadline = if live && runner.supports_timeout() {
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(dast_timeout_secs))
+    } else {
+        None
+    };
     if !surface.is_empty() {
         // Live only: a private scratch directory (removed on every path, also on error)
         // for the template exclusion list. A dry run lists nothing and excludes nothing.
@@ -1011,7 +1029,7 @@ pub fn run_dast(
             }
         }
         let listed = listed_count(&surface);
-        for (i, pass) in nuclei_passes(eng.dast.profile).into_iter().enumerate() {
+        'passes: for (i, pass) in nuclei_passes(eng.dast.profile).into_iter().enumerate() {
             // Tag the `-dast` fuzzing pass's rows so they normalise as `nuclei-dast`.
             let fuzz_pass = pass.iter().any(|a| a == "-dast");
             let mut args = common_nuclei_args();
@@ -1026,13 +1044,29 @@ pub fn run_dast(
                 args.extend(["-tlog".into(), t.to_string_lossy().into_owned()]);
             }
             args.extend(headers.iter().cloned());
-            for mut r in scan_rows(runner, &surface, &args).map_err(scrubbed)? {
+            let (pass_rows, timed_out) =
+                scan_rows_with_deadline(runner, &surface, &args, deadline, secret)
+                    .map_err(scrubbed)?;
+            for mut r in pass_rows {
                 if fuzz_pass {
                     if let Some(o) = r.as_object_mut() {
                         o.insert("ascent-pass".into(), json!("dast"));
                     }
                 }
                 rows.push(r);
+            }
+            if timed_out {
+                wall_clock_limit_hit = true;
+                // Audit the trace for the interrupted pass before breaking so that
+                // off-scope requests made during the partial pass are not missed.
+                // The log may be truncated; tolerate missing/unreadable files and
+                // incomplete JSON lines. Skip only when no requests were made.
+                if let Some(t) = &trace {
+                    if listed > 0 {
+                        let _ = audit.read(t, &guard, secret);
+                    }
+                }
+                break 'passes;
             }
             if let Some(t) = &trace {
                 if listed > 0 {
@@ -1052,7 +1086,8 @@ pub fn run_dast(
         // means the later checks never reached it. A seed that misses the probe once is
         // retried once. A probe that fails outright counts every seed it covered as not
         // answering, so the scan's results are kept and the run still fails closed.
-        if live {
+        // Skip the post-scan probe when the timeout hit: the target is likely fine.
+        if live && !wall_clock_limit_hit {
             let dead =
                 |urls: &[String]| probe_urls(runner, urls).map_or_else(|_| urls.to_vec(), |r| r.1);
             stopped_answering = dead(&seed);
@@ -1096,6 +1131,7 @@ pub fn run_dast(
             off_scope_request_count: audit.off_scope_count,
             failing_hosts: audit.failing_hosts(),
             stopped_answering,
+            wall_clock_limit_hit,
         },
         coverage,
     }))
@@ -1454,7 +1490,7 @@ mod tests {
             let f = Fake::new();
             let mut e = eng();
             e.dast.profile = prof;
-            run_dast(&e, &f, None, true).unwrap();
+            run_dast(&e, &f, None, true, 7200).unwrap();
             let calls = f.calls.borrow();
             let scans: Vec<_> = calls.iter().filter(|c| c.0 == "nuclei").collect();
             assert_eq!(scans.len(), nuclei_passes(prof).len(), "{prof:?}");
@@ -1778,7 +1814,7 @@ mod tests {
             ..Default::default()
         };
         let f = Fake::new();
-        assert!(run_dast(&e, &f, None, true).unwrap().is_none());
+        assert!(run_dast(&e, &f, None, true, 7200).unwrap().is_none());
         assert!(f.calls.borrow().is_empty());
     }
 
@@ -1786,7 +1822,9 @@ mod tests {
     fn run_dast_seeds_every_host_and_url_and_drops_off_scope() {
         let f = Fake::new();
         let auth = ("Authorization".to_string(), SECRET.to_string());
-        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, Some(&auth), true, 7200)
+            .unwrap()
+            .unwrap();
         assert_eq!(f.count("subfinder"), 1);
         {
             let calls = f.calls.borrow();
@@ -1833,7 +1871,7 @@ mod tests {
     fn run_dast_drops_off_scope_seeds_before_crawling_and_counts_them() {
         let mut f = Fake::new();
         f.extra_httpx = Some("https://evil.test/redirect");
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         // the off-scope seed is counted, never handed to katana, and does not abort
         assert_eq!(out.summary.seeded, 2);
         assert_eq!(out.summary.out_of_scope_dropped, 2); // 1 seed + github.com from the crawl
@@ -1849,7 +1887,7 @@ mod tests {
         f.nuclei_twice = true;
         let mut e = eng();
         e.dast.profile = DastProfile::Active; // two passes, each returning the row twice
-        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(f.count("nuclei"), 2);
         assert_eq!(out.findings.len(), 1);
         // the template-pass copy is kept, so the hit stays verifiable
@@ -1876,7 +1914,7 @@ mod tests {
             hit(Some("b"), None),
             hit(Some("a"), None),
         ]);
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.findings.len(), 2);
         assert_ne!(out.findings[0].id, out.findings[1].id);
     }
@@ -1892,7 +1930,7 @@ mod tests {
         ]);
         let mut e = eng();
         e.dast.profile = DastProfile::Active;
-        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.findings.len(), 2);
         assert!(
             out.findings.iter().all(|x| x.tool == "nuclei-dast"),
@@ -1931,7 +1969,7 @@ mod tests {
                 Ok("projectdiscovery.io".into())
             }
         }
-        let out = run_dast(&e, &Off, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &Off, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.scanned, 0);
         assert_eq!(out.summary.out_of_scope_dropped, 1);
         assert!(out.coverage["categories"]
@@ -1950,7 +1988,7 @@ mod tests {
         let mut f = Fake::new();
         f.nuclei_err = Some("nuclei exited: header Bearer s3cr3t rejected");
         let auth = ("Authorization".to_string(), SECRET.to_string());
-        let e = run_dast(&eng(), &f, Some(&auth), true)
+        let e = run_dast(&eng(), &f, Some(&auth), true, 7200)
             .err()
             .expect("error");
         let t = e.to_string();
@@ -1963,7 +2001,9 @@ mod tests {
         let mut f = Fake::new();
         f.dead = vec!["http://localhost:3000/"];
         let auth = ("Authorization".to_string(), SECRET.to_string());
-        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, Some(&auth), true, 7200)
+            .unwrap()
+            .unwrap();
         assert_eq!(out.summary.reachable, 0);
         assert_eq!(out.summary.unreachable, 1);
         assert_eq!(out.summary.unreachable_urls, vec!["http://localhost:3000/"]);
@@ -1992,7 +2032,7 @@ mod tests {
     fn run_dast_drops_and_counts_invalid_subfinder_names_without_aborting() {
         let mut f = Fake::new();
         f.subs = vec!["_dmarc.example.com", "www.example.com"];
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_dropped, 2); // _dmarc + github.com from the crawl
         let calls = f.calls.borrow();
         let recon = calls
@@ -2020,7 +2060,7 @@ mod tests {
             urls: vec!["http://127.0.0.1:3000/".into()],
             ..Default::default()
         };
-        let err = run_dast(&e, &f, None, true)
+        let err = run_dast(&e, &f, None, true, 7200)
             .err()
             .expect("python httpx refused");
         assert!(
@@ -2034,7 +2074,7 @@ mod tests {
     fn dry_run_claims_nothing_was_scanned_and_nothing_unreachable() {
         let mut f = Fake::new();
         f.dead = vec!["http://localhost:3000/"]; // a dry run cannot know
-        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, false, 7200).unwrap().unwrap();
         assert_eq!(out.summary.scanned, 0);
         assert!(out.summary.unreachable_urls.is_empty());
         assert_eq!(out.coverage["scanned"], 0);
@@ -2278,7 +2318,7 @@ mod tests {
         let dir = fixture_templates();
         let mut f = Fake::new();
         f.listing = listing(&dir, &["http/benign.yaml", "http/missing.yaml"]);
-        let e = run_dast(&eng(), &f, None, true)
+        let e = run_dast(&eng(), &f, None, true, 7200)
             .err()
             .expect("must fail closed");
         assert_eq!(
@@ -2311,7 +2351,7 @@ mod tests {
         );
         let mut e = eng();
         e.dast.profile = DastProfile::Active;
-        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true, 7200).unwrap().unwrap();
         // listed once, with no targets, before any scan
         let texts = f.text_calls.borrow();
         let tl: Vec<_> = texts
@@ -2364,7 +2404,7 @@ mod tests {
     #[test]
     fn no_off_target_template_means_no_exclusion_note() {
         let f = Fake::new();
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.templates_excluded, 0);
         assert_eq!(out.coverage["templates_excluded"], 0);
         assert!(!coverage_markdown(&out.coverage).contains("excluded"));
@@ -2375,7 +2415,7 @@ mod tests {
         for bad in ["", "nuclei v3.11.1\n", "Usage: nuclei [flags]\n"] {
             let mut f = Fake::new();
             f.listing = bad.into();
-            let e = run_dast(&eng(), &f, None, true)
+            let e = run_dast(&eng(), &f, None, true, 7200)
                 .err()
                 .expect("must fail closed");
             assert_eq!(
@@ -2456,7 +2496,7 @@ mod tests {
     #[test]
     fn dry_run_lists_no_templates() {
         let f = Fake::new();
-        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, false, 7200).unwrap().unwrap();
         assert!(!f
             .text_calls
             .borrow()
@@ -2499,7 +2539,7 @@ mod tests {
             trace_line("localhost:3000", "none"),
             trace_line("::1:3000", "none"),
         ]);
-        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true, 7200).unwrap().unwrap();
         assert!(
             out.summary.out_of_scope_requests.is_empty(),
             "{:?}",
@@ -2513,7 +2553,7 @@ mod tests {
             trace_line("localhost:3000", "none"),
             trace_line("::1:3000", "none"),
         ]);
-        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_requests, vec!["::1"]);
     }
 
@@ -2526,7 +2566,7 @@ mod tests {
                 .to_string(),
             json!({"type": "http", "address": 3000}).to_string(),
         ]);
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_requests, vec!["(no address)"]);
         assert_eq!(out.summary.off_scope_request_count, 2);
         assert_eq!(out.summary.requests_sent, 3);
@@ -2537,7 +2577,7 @@ mod tests {
         let f = Fake::new();
         let mut e = eng();
         e.dast.profile = DastProfile::Active;
-        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true, 7200).unwrap().unwrap();
         let paths = f.trace_paths.borrow();
         assert_eq!(paths.len(), 2, "one trace log per pass");
         assert_ne!(paths[0], paths[1]);
@@ -2569,7 +2609,7 @@ mod tests {
             "{\"truncated\":".into(),
             trace_line("127.0.0.1:3000", "context deadline exceeded"),
         ]);
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         let s = &out.summary;
         assert_eq!(
             s.out_of_scope_requests,
@@ -2600,7 +2640,7 @@ mod tests {
             trace_line("", "none"),
             trace_line("", "dial failed"),
         ]);
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_requests, vec!["(no address)"]);
         // fail closed: with no host anywhere, a failed request counts too
         assert_eq!(out.summary.off_scope_request_count, 2);
@@ -2621,7 +2661,7 @@ mod tests {
             // an address, when present, wins over the input
             trace_line_with_input("127.0.0.1:3000", "http://ignored.evil.test/", "none"),
         ]);
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(
             out.summary.out_of_scope_requests,
             vec!["(no address)", "evil.test", "userinfo.evil.test"]
@@ -2676,7 +2716,7 @@ mod tests {
             trace_line_with_input("", "http://127.0.0.1\\@evil.test/", "none"),
             trace_line_with_input("", "http://127.0.0.1:3000\\@evil.test/x", "none"),
         ]);
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_requests, vec!["(no address)"]);
         assert_eq!(out.summary.off_scope_request_count, 2);
     }
@@ -2689,7 +2729,7 @@ mod tests {
                 .map(|i| trace_line(&format!("h{i:02}.evil.test:80"), "none"))
                 .collect(),
         );
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         let l = &out.summary.out_of_scope_requests;
         assert_eq!(l.len(), 11, "{l:?}");
         assert_eq!(l[0], "h00.evil.test");
@@ -2711,7 +2751,7 @@ mod tests {
         lines.extend((0..21).map(|_| trace_line("127.0.0.1:3000", "none")));
         lines.extend((0..19).map(|_| trace_line("127.0.0.1:3000", "i/o timeout")));
         f.trace_lines = Some(lines);
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(
             out.summary.failing_hosts,
             vec![FailingHost {
@@ -2729,7 +2769,9 @@ mod tests {
         let mut f = Fake::new();
         f.down_after_scan = vec!["http://localhost:3000/"];
         let auth = ("Authorization".to_string(), SECRET.to_string());
-        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, Some(&auth), true, 7200)
+            .unwrap()
+            .unwrap();
         assert!(out.summary.unreachable_urls.is_empty());
         assert_eq!(
             out.summary.stopped_answering,
@@ -2762,7 +2804,7 @@ mod tests {
     #[test]
     fn seeds_still_answering_after_the_scan_are_not_reported() {
         let f = Fake::new();
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert!(out.summary.stopped_answering.is_empty());
     }
 
@@ -2771,7 +2813,7 @@ mod tests {
         let mut f = Fake::new();
         f.slow_after_scan = vec!["http://localhost:3000/"];
         f.down_after_scan = vec!["https://example.com"];
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.stopped_answering, vec!["https://example.com"]);
         let calls = f.calls.borrow();
         let retry = calls.iter().rev().find(|c| c.0 == "httpx").unwrap();
@@ -2798,7 +2840,7 @@ mod tests {
     fn a_failed_re_probe_keeps_the_findings_and_reports_every_seed() {
         let mut f = Fake::new();
         f.httpx_err_after_scan = true;
-        let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert!(!out.findings.is_empty(), "the scan's findings are kept");
         assert_eq!(
             out.summary.stopped_answering,
@@ -2809,7 +2851,7 @@ mod tests {
     #[test]
     fn a_dry_run_never_re_probes() {
         let f = Fake::new();
-        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, false, 7200).unwrap().unwrap();
         assert!(out.summary.stopped_answering.is_empty());
         let calls = f.calls.borrow();
         let probes = calls
@@ -2823,7 +2865,7 @@ mod tests {
     fn a_missing_trace_log_fails_closed() {
         let mut f = Fake::new();
         f.write_trace = false;
-        let e = run_dast(&eng(), &f, None, true)
+        let e = run_dast(&eng(), &f, None, true, 7200)
             .err()
             .expect("missing trace log");
         assert_eq!(e.to_string(), "nuclei trace log missing");
@@ -2843,7 +2885,7 @@ mod tests {
         ] {
             let mut f = Fake::new();
             f.trace_lines = Some(lines.clone());
-            let e = run_dast(&eng(), &f, None, true)
+            let e = run_dast(&eng(), &f, None, true, 7200)
                 .err()
                 .expect("empty trace log");
             assert_eq!(e.to_string(), "nuclei trace log missing", "{lines:?}");
@@ -2857,12 +2899,12 @@ mod tests {
         f.dast_trace_lines = Some(vec![]);
         let mut e = eng();
         e.dast.profile = DastProfile::Active;
-        let out = run_dast(&e, &f, None, true).unwrap().unwrap();
+        let out = run_dast(&e, &f, None, true, 7200).unwrap().unwrap();
         assert_eq!(out.summary.requests_sent, 4);
         // ...but a missing one still is
         let mut f = Fake::new();
         f.write_trace = false;
-        assert!(run_dast(&e, &f, None, true).is_err());
+        assert!(run_dast(&e, &f, None, true, 7200).is_err());
     }
 
     #[test]
@@ -2873,7 +2915,9 @@ mod tests {
             trace_line(&format!("{SECRET}.evil.test:80"), "none"),
         ]);
         let auth = ("Authorization".to_string(), SECRET.to_string());
-        let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, Some(&auth), true, 7200)
+            .unwrap()
+            .unwrap();
         let s = serde_json::to_string(&out.summary).unwrap();
         assert!(!s.contains("s3cr3t"), "{s}");
         assert!(!out.coverage.to_string().contains("s3cr3t"));
@@ -2883,7 +2927,7 @@ mod tests {
     #[test]
     fn dry_run_writes_and_audits_no_trace_log() {
         let f = Fake::new();
-        let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
+        let out = run_dast(&eng(), &f, None, false, 7200).unwrap().unwrap();
         assert!(f.trace_paths.borrow().is_empty());
         assert_eq!(out.summary.requests_sent, 0);
         assert!(!coverage_markdown(&out.coverage).contains("nuclei sent"));
