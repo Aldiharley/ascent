@@ -71,9 +71,16 @@ pub fn recon(
 /// httpx returns a row whose `input` (else `url`) equals it, ignoring one trailing
 /// `/` on either side. A URL without a host is dead and never probed. Every host
 /// passed to httpx is also a scope target.
+///
+/// When `is_reprobe` is true (post-scan re-probe only), HTTP 502/503/504 responses
+/// are treated as "not answering": a healthy service almost never returns them at
+/// the root path.  On the pre-scan probe (`is_reprobe = false`) those status codes
+/// are treated as alive so that a legitimately slow or temporarily degraded target
+/// is not silently skipped.
 pub fn probe_urls(
     runner: &dyn Runner,
     urls: &[String],
+    is_reprobe: bool,
 ) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
     let mut hosts: BTreeSet<String> = BTreeSet::new();
     let mut args: Vec<String> = vec!["-silent".into(), "-json".into(), "-rl".into(), "50".into()];
@@ -95,13 +102,14 @@ pub fn probe_urls(
     };
     let norm = |s: &str| s.strip_suffix('/').unwrap_or(s).to_string();
     // 502 Bad Gateway, 503 Service Unavailable, and 504 Gateway Timeout are treated
-    // as "not answering": the re-probe hits the root path once, and a healthy service
-    // almost never returns these there.  If it does, the operator can re-run.
-    // (A legitimate 503 is acceptable to flag: the cost of a false positive — one
-    // extra incomplete run — is much lower than missing a target that went down.)
+    // as "not answering" ONLY on the post-scan re-probe (`is_reprobe = true`): the
+    // re-probe hits the root path once, and a healthy service almost never returns
+    // these there.  On the pre-scan probe we accept every HTTP response as alive so
+    // that a declared URL whose root legitimately returns 503 is still crawled and
+    // scanned.
     let answered: BTreeSet<String> = rows
         .iter()
-        .filter(|r| !matches!(r["status_code"].as_u64(), Some(502..=504)))
+        .filter(|r| !is_reprobe || !matches!(r["status_code"].as_u64(), Some(502..=504)))
         .filter_map(|r| r["input"].as_str().or_else(|| r["url"].as_str()))
         .map(norm)
         .collect();
@@ -333,7 +341,7 @@ mod tests {
             "http://127.0.0.1:3000/".to_string(),
             "https://app.example.com/login".to_string(),
         ];
-        probe_urls(&p, &urls).unwrap();
+        probe_urls(&p, &urls, false).unwrap();
         let calls = p.calls.borrow();
         assert_eq!(calls.len(), 1);
         let (tool, args, targets) = &calls[0];
@@ -373,7 +381,7 @@ mod tests {
             "https://app.example.com/login".to_string(),
             "http://127.0.0.1:9/".to_string(),
         ];
-        let (live, dead) = probe_urls(&p, &urls).unwrap();
+        let (live, dead) = probe_urls(&p, &urls, false).unwrap();
         assert_eq!(
             live,
             vec!["http://127.0.0.1:3000/", "https://app.example.com/login"]
@@ -387,11 +395,11 @@ mod tests {
             rows: vec![],
             calls: RefCell::new(vec![]),
         };
-        let (live, dead) = probe_urls(&p, &["evil.com:8080/x".to_string()]).unwrap();
+        let (live, dead) = probe_urls(&p, &["evil.com:8080/x".to_string()], false).unwrap();
         assert!(live.is_empty());
         assert_eq!(dead, vec!["evil.com:8080/x"]);
         assert!(p.calls.borrow().is_empty());
-        let (live, dead) = probe_urls(&p, &[]).unwrap();
+        let (live, dead) = probe_urls(&p, &[], false).unwrap();
         assert!(live.is_empty() && dead.is_empty());
         assert!(p.calls.borrow().is_empty());
     }
@@ -403,5 +411,52 @@ mod tests {
         let calls = rec.calls.borrow();
         assert_eq!(calls[0].0, "subfinder");
         assert_eq!(calls[0].2, vec!["example.com".to_string()]);
+    }
+
+    #[test]
+    fn probe_urls_pre_scan_accepts_502_503_504() {
+        // I4: on the pre-scan probe (is_reprobe=false) a 502/503/504 response
+        // must still count as live so the URL is crawled and scanned.
+        for code in [502u16, 503, 504] {
+            let p = Probe {
+                rows: vec![
+                    serde_json::json!({"input": "https://app.example.com/", "status_code": code}),
+                ],
+                calls: RefCell::new(vec![]),
+            };
+            let urls = vec!["https://app.example.com/".to_string()];
+            let (live, dead) = probe_urls(&p, &urls, false).unwrap();
+            assert_eq!(
+                live,
+                vec!["https://app.example.com/"],
+                "code {code} must be live on pre-scan probe"
+            );
+            assert!(
+                dead.is_empty(),
+                "code {code} must not be dead on pre-scan probe"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_urls_reprobe_treats_502_503_504_as_dead() {
+        // I4: on the post-scan re-probe (is_reprobe=true) a 502/503/504 response
+        // must be treated as "not answering".
+        for code in [502u16, 503, 504] {
+            let p = Probe {
+                rows: vec![
+                    serde_json::json!({"input": "https://app.example.com/", "status_code": code}),
+                ],
+                calls: RefCell::new(vec![]),
+            };
+            let urls = vec!["https://app.example.com/".to_string()];
+            let (live, dead) = probe_urls(&p, &urls, true).unwrap();
+            assert!(live.is_empty(), "code {code} must NOT be live on re-probe");
+            assert_eq!(
+                dead,
+                vec!["https://app.example.com/"],
+                "code {code} must be dead on re-probe"
+            );
+        }
     }
 }
