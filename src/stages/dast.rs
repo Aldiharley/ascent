@@ -151,21 +151,34 @@ pub fn sends_off_target(template: &str) -> bool {
 /// `@Host` nor the trace log's `address` (derived from the input) shows where those
 /// sections connect. (`flow:` is not one: see [`flow_loads_modules`].)
 const NON_HTTP_SECTIONS: [&str; 10] = [
-    "javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file",
+    "javascript",
+    "network",
+    "tcp",
+    "dns",
+    "ssl",
+    "code",
+    "headless",
+    "websocket",
+    "whois",
+    "file",
 ];
 
 /// A template's lines, without a leading UTF-8 BOM on the first.
 fn template_lines(template: &str) -> std::str::Lines<'_> {
-    template.strip_prefix('\u{feff}').unwrap_or(template).lines()
+    template
+        .strip_prefix('\u{feff}')
+        .unwrap_or(template)
+        .lines()
 }
 
 /// True when a template has a top-level (column-0) non-http protocol section.
 /// A text scan; [`yaml_structure_excluded`] reads the same thing as YAML.
 pub fn has_non_http_protocol(template: &str) -> bool {
     template_lines(template).any(|line| {
-        NON_HTTP_SECTIONS
-            .iter()
-            .any(|k| line.strip_prefix(k).is_some_and(|rest| rest.starts_with(':')))
+        NON_HTTP_SECTIONS.iter().any(|k| {
+            line.strip_prefix(k)
+                .is_some_and(|rest| rest.starts_with(':'))
+        })
     })
 }
 
@@ -181,7 +194,9 @@ pub fn flow_loads_modules(template: &str) -> bool {
     for line in template_lines(template) {
         let top_level = !line.is_empty() && !line.starts_with([' ', '\t', '\r']);
         if top_level {
-            in_flow = line.strip_prefix("flow").is_some_and(|r| r.starts_with(':'));
+            in_flow = line
+                .strip_prefix("flow")
+                .is_some_and(|r| r.starts_with(':'));
         }
         if in_flow && line.to_ascii_lowercase().contains("require(") {
             return true;
@@ -216,7 +231,9 @@ pub fn yaml_structure_excluded(template: &str) -> bool {
         if NON_HTTP_SECTIONS.contains(&key.as_str()) {
             return true;
         }
-        key == "flow" && v.as_str().is_none_or(|f| f.to_ascii_lowercase().contains("require"))
+        key == "flow"
+            && v.as_str()
+                .is_none_or(|f| f.to_ascii_lowercase().contains("require"))
     })
 }
 
@@ -376,7 +393,12 @@ impl TraceAudit {
     /// it held. A request line is a JSON object with an `address`, `input`,
     /// `template` or `type` key; it is never skipped (see [`Self::record`]). Any
     /// other line is skipped.
-    fn read(&mut self, path: &Path, guard: &ScopeGuard, secret: Option<&str>) -> std::io::Result<usize> {
+    fn read(
+        &mut self,
+        path: &Path,
+        guard: &ScopeGuard,
+        secret: Option<&str>,
+    ) -> std::io::Result<usize> {
         use std::io::BufRead;
         let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
         let mut buf = Vec::new();
@@ -389,11 +411,20 @@ impl TraceAudit {
             let Ok(Value::Object(o)) = serde_json::from_slice::<Value>(&buf) else {
                 continue;
             };
-            if !["address", "input", "template", "type"].iter().any(|k| o.contains_key(*k)) {
+            if !["address", "input", "template", "type"]
+                .iter()
+                .any(|k| o.contains_key(*k))
+            {
                 continue;
             }
             let s = |k: &str| o.get(k).and_then(Value::as_str);
-            self.record(s("address"), s("input"), s("error").unwrap_or(""), guard, secret);
+            self.record(
+                s("address"),
+                s("input"),
+                s("error").unwrap_or(""),
+                guard,
+                secret,
+            );
             n += 1;
         }
         Ok(n)
@@ -442,9 +473,17 @@ impl TraceAudit {
     /// The off-scope host names, sorted, at most [`OFF_SCOPE_NAMES_SHOWN`] plus
     /// "…and N more".
     fn off_scope_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.off_scope.iter().take(OFF_SCOPE_NAMES_SHOWN).cloned().collect();
+        let mut v: Vec<String> = self
+            .off_scope
+            .iter()
+            .take(OFF_SCOPE_NAMES_SHOWN)
+            .cloned()
+            .collect();
         if self.off_scope.len() > OFF_SCOPE_NAMES_SHOWN {
-            v.push(format!("…and {} more", self.off_scope.len() - OFF_SCOPE_NAMES_SHOWN));
+            v.push(format!(
+                "…and {} more",
+                self.off_scope.len() - OFF_SCOPE_NAMES_SHOWN
+            ));
         }
         v
     }
@@ -453,7 +492,11 @@ impl TraceAudit {
         self.per_host
             .iter()
             .filter(|(_, (sent, failed))| *sent >= FAILING_MIN_REQUESTS && failed * 2 >= *sent)
-            .map(|(h, (sent, failed))| FailingHost { host: h.clone(), failed: *failed, sent: *sent })
+            .map(|(h, (sent, failed))| FailingHost {
+                host: h.clone(),
+                failed: *failed,
+                sent: *sent,
+            })
             .collect()
     }
 }
@@ -550,7 +593,13 @@ const fn def(
     fuzzed: bool,
     note: Option<&'static str>,
 ) -> Category {
-    Category { id, name, tags, fuzzed, note }
+    Category {
+        id,
+        name,
+        tags,
+        fuzzed,
+        note,
+    }
 }
 
 const IDOR_NOTE: &str = "few idor templates, mostly CVE- or product-specific; generic IDOR needs app logic and a second user";
@@ -560,13 +609,43 @@ const RATE_LIMIT_NOTE: &str = "needs load generation; Ascent never floods a targ
 const CATEGORIES: &[Category] = &[
     def("sqli", "SQL injection", &["sqli"], true, None),
     def("xss", "Cross-site scripting", &["xss"], true, None),
-    def("auth-bypass", "Authentication bypass", &["auth-bypass", "jwt"], false, None),
-    def("authz", "Authorization flaws (IDOR)", &["idor"], false, Some(IDOR_NOTE)),
+    def(
+        "auth-bypass",
+        "Authentication bypass",
+        &["auth-bypass", "jwt"],
+        false,
+        None,
+    ),
+    def(
+        "authz",
+        "Authorization flaws (IDOR)",
+        &["idor"],
+        false,
+        Some(IDOR_NOTE),
+    ),
     def("cors", "CORS misconfiguration", &["cors"], false, None),
     def("headers", "Security headers", &["headers"], false, None),
-    def("session", "Session management", &["session", "cookie", "csrf"], false, None),
-    def("ssrf", "Server-side request forgery", &["ssrf"], true, Some(SSRF_NOTE)),
-    def("lfi", "Path traversal / file inclusion", &["lfi"], true, None),
+    def(
+        "session",
+        "Session management",
+        &["session", "cookie", "csrf"],
+        false,
+        None,
+    ),
+    def(
+        "ssrf",
+        "Server-side request forgery",
+        &["ssrf"],
+        true,
+        Some(SSRF_NOTE),
+    ),
+    def(
+        "lfi",
+        "Path traversal / file inclusion",
+        &["lfi"],
+        true,
+        None,
+    ),
     def("redirect", "Open redirect", &["redirect"], true, None),
     def(
         "known-vulns",
@@ -575,7 +654,13 @@ const CATEGORIES: &[Category] = &[
         false,
         None,
     ),
-    def("rate-limit", "API rate limiting", &[], false, Some(RATE_LIMIT_NOTE)),
+    def(
+        "rate-limit",
+        "API rate limiting",
+        &[],
+        false,
+        Some(RATE_LIMIT_NOTE),
+    ),
 ];
 
 /// The tags the profile's passes run and whether it runs the `-dast` fuzzing pass,
@@ -596,9 +681,13 @@ fn tags_run(profile: DastProfile) -> (BTreeSet<String>, bool) {
 
 /// The lowest profile that runs `tag`, if any.
 fn profile_running(tag: &str) -> Option<DastProfile> {
-    [DastProfile::Passive, DastProfile::Standard, DastProfile::Active]
-        .into_iter()
-        .find(|p| tags_run(*p).0.contains(tag))
+    [
+        DastProfile::Passive,
+        DastProfile::Standard,
+        DastProfile::Active,
+    ]
+    .into_iter()
+    .find(|p| tags_run(*p).0.contains(tag))
 }
 
 /// "csrf runs in the standard profile" (grouped by profile).
@@ -729,7 +818,11 @@ pub fn coverage_markdown(cov: &Value) -> String {
     let mut out = format!(
         "\n## DAST coverage\n\nProfile: `{}` · authenticated: {} · URLs scanned: {}\n\n",
         cov["profile"].as_str().unwrap_or(""),
-        if cov["authenticated"] == true { "yes" } else { "no" },
+        if cov["authenticated"] == true {
+            "yes"
+        } else {
+            "no"
+        },
         cov["scanned"],
     );
     for c in cov["categories"].as_array().into_iter().flatten() {
@@ -751,8 +844,12 @@ pub fn coverage_markdown(cov: &Value) -> String {
     let mut notes: Vec<String> = Vec::new();
     match cov["templates_excluded"].as_u64().unwrap_or(0) {
         0 => {}
-        1 => notes.push(format!("1 template excluded: it may send requests {EXCLUDED_WHY}")),
-        n => notes.push(format!("{n} templates excluded: they may send requests {EXCLUDED_WHY}")),
+        1 => notes.push(format!(
+            "1 template excluded: it may send requests {EXCLUDED_WHY}"
+        )),
+        n => notes.push(format!(
+            "{n} templates excluded: they may send requests {EXCLUDED_WHY}"
+        )),
     }
     let plural = |n: u64| if n == 1 { "request" } else { "requests" };
     if cov["scanned"].as_u64().unwrap_or(0) > 0 {
@@ -866,14 +963,20 @@ pub fn run_dast(
     let guard = ScopeGuard::new(eng);
     // A declared URL the guard refuses is dropped and counted, never probed.
     let declared: BTreeSet<String> = eng.urls.iter().cloned().collect();
-    let (declared, url_dropped) = filter_in_scope(declared.into_iter().collect(), &|u| guard.in_scope(u));
+    let (declared, url_dropped) =
+        filter_in_scope(declared.into_iter().collect(), &|u| guard.in_scope(u));
     // Only declared URLs that answer are crawled (hosts are probed by recon).
     let (live_urls, dead_urls) = probe_urls(runner, &declared).map_err(scrubbed)?;
-    let (live_urls, dead_urls) = if live { (live_urls, dead_urls) } else { (declared, vec![]) };
+    let (live_urls, dead_urls) = if live {
+        (live_urls, dead_urls)
+    } else {
+        (declared, vec![])
+    };
     let mut seed: BTreeSet<String> = live_urls.iter().cloned().collect();
     let mut recon_dropped = 0;
     for h in &eng.hosts {
-        let (urls, d) = recon(runner, h, is_subfinder_candidate(h), &|n| guard.in_scope(n)).map_err(scrubbed)?;
+        let (urls, d) = recon(runner, h, is_subfinder_candidate(h), &|n| guard.in_scope(n))
+            .map_err(scrubbed)?;
         seed.extend(urls);
         recon_dropped += d;
     }
@@ -899,7 +1002,10 @@ pub fn run_dast(
             templates_excluded = off.len();
             if !off.is_empty() {
                 let p = dir.path().join("exclude-templates.txt");
-                let lines: Vec<String> = off.iter().map(|t| t.to_string_lossy().into_owned()).collect();
+                let lines: Vec<String> = off
+                    .iter()
+                    .map(|t| t.to_string_lossy().into_owned())
+                    .collect();
                 write_new_lines(&p, &lines)?;
                 exclude_args = vec!["-et".into(), p.to_string_lossy().into_owned()];
             }
@@ -913,7 +1019,9 @@ pub fn run_dast(
             args.extend(exclude_args.iter().cloned());
             // Each pass logs every request it sends; nuclei creates the file itself, so
             // its absence after a successful pass means nothing was logged.
-            let trace = scratch.as_ref().map(|d| d.path().join(format!("trace-{i}.jsonl")));
+            let trace = scratch
+                .as_ref()
+                .map(|d| d.path().join(format!("trace-{i}.jsonl")));
             if let Some(t) = &trace {
                 args.extend(["-tlog".into(), t.to_string_lossy().into_owned()]);
             }
@@ -945,7 +1053,8 @@ pub fn run_dast(
         // retried once. A probe that fails outright counts every seed it covered as not
         // answering, so the scan's results are kept and the run still fails closed.
         if live {
-            let dead = |urls: &[String]| probe_urls(runner, urls).map_or_else(|_| urls.to_vec(), |r| r.1);
+            let dead =
+                |urls: &[String]| probe_urls(runner, urls).map_or_else(|_| urls.to_vec(), |r| r.1);
             stopped_answering = dead(&seed);
             if !stopped_answering.is_empty() {
                 stopped_answering = dead(&stopped_answering);
@@ -953,7 +1062,13 @@ pub fn run_dast(
         }
     }
     let rows = scrub_rows(dedupe_rows(rows), secret);
-    let mut coverage = coverage(eng.dast.profile, auth.is_some(), surface.len(), !live, &rows);
+    let mut coverage = coverage(
+        eng.dast.profile,
+        auth.is_some(),
+        surface.len(),
+        !live,
+        &rows,
+    );
     let out_of_scope_requests = audit.off_scope_names();
     coverage["templates_excluded"] = json!(templates_excluded);
     coverage["requests_sent"] = json!(audit.sent);
@@ -1044,7 +1159,11 @@ pub(crate) mod test_support {
     /// request per URL of its `-l` list.
     pub fn write_default_trace(args: &[String]) {
         if let (Some(t), Some(l)) = (flag_value(args, "-tlog"), flag_value(args, "-l")) {
-            let urls: Vec<String> = std::fs::read_to_string(l).unwrap().lines().map(String::from).collect();
+            let urls: Vec<String> = std::fs::read_to_string(l)
+                .unwrap()
+                .lines()
+                .map(String::from)
+                .collect();
             std::fs::write(t, trace_for_urls(&urls).join("\n") + "\n").unwrap();
         }
     }
@@ -1164,7 +1283,9 @@ mod tests {
                             let probes_since_scan = {
                                 let calls = self.calls.borrow();
                                 let last = calls.iter().rposition(|c| c.0 == "nuclei");
-                                last.map_or(0, |i| calls[i..].iter().filter(|c| c.0 == "httpx").count())
+                                last.map_or(0, |i| {
+                                    calls[i..].iter().filter(|c| c.0 == "httpx").count()
+                                })
                             };
                             let slow = self.slow_after_scan.contains(&u) && probes_since_scan == 1;
                             let gone = (self.down_after_scan.contains(&u) && scanned) || slow;
@@ -1203,7 +1324,11 @@ mod tests {
                     let is_dast = args.iter().any(|a| a == "-dast");
                     if let Some(t) = flag_value(args, "-tlog") {
                         self.trace_paths.borrow_mut().push(t.clone());
-                        let custom = if is_dast { &self.dast_trace_lines } else { &self.trace_lines };
+                        let custom = if is_dast {
+                            &self.dast_trace_lines
+                        } else {
+                            &self.trace_lines
+                        };
                         match (self.write_trace, custom) {
                             (false, _) => {}
                             (true, None) => write_default_trace(args),
@@ -1282,17 +1407,26 @@ mod tests {
     }
 
     fn etags_of(pass: &[String]) -> &str {
-        let i = pass.iter().position(|a| a == "-etags").expect("-etags present");
+        let i = pass
+            .iter()
+            .position(|a| a == "-etags")
+            .expect("-etags present");
         &pass[i + 1]
     }
 
     #[test]
     fn etags_per_profile_standard_excludes_intrusive_active_keeps_it() {
         let p = nuclei_passes(DastProfile::Passive);
-        assert_eq!(etags_of(&p[0]), "dos,brute-force,default-login,intrusive,fuzz");
+        assert_eq!(
+            etags_of(&p[0]),
+            "dos,brute-force,default-login,intrusive,fuzz"
+        );
         // standard is non-destructive: intrusive templates (RCE/file-write chains) never run
         let st = nuclei_passes(DastProfile::Standard);
-        assert_eq!(etags_of(&st[0]), "dos,brute-force,default-login,intrusive,fuzz");
+        assert_eq!(
+            etags_of(&st[0]),
+            "dos,brute-force,default-login,intrusive,fuzz"
+        );
         // active is the opt-in "may change state" profile: intrusive runs there only
         let a = nuclei_passes(DastProfile::Active);
         assert_eq!(etags_of(&a[0]), "dos,brute-force,default-login,fuzz");
@@ -1303,10 +1437,20 @@ mod tests {
     fn nuclei_never_skips_a_host_and_runs_http_templates_only() {
         let c = common_nuclei_args();
         assert!(c.contains(&"-nmhe".to_string()), "{c:?}");
-        assert!(c.windows(2).any(|w| w[0] == "-pt" && w[1] == "http"), "{c:?}");
-        assert!(!c.iter().any(|a| a == "-mhe" || a == "-max-host-error"), "{c:?}");
+        assert!(
+            c.windows(2).any(|w| w[0] == "-pt" && w[1] == "http"),
+            "{c:?}"
+        );
+        assert!(
+            !c.iter().any(|a| a == "-mhe" || a == "-max-host-error"),
+            "{c:?}"
+        );
         // ...and every nuclei scan call of every profile carries them
-        for prof in [DastProfile::Passive, DastProfile::Standard, DastProfile::Active] {
+        for prof in [
+            DastProfile::Passive,
+            DastProfile::Standard,
+            DastProfile::Active,
+        ] {
             let f = Fake::new();
             let mut e = eng();
             e.dast.profile = prof;
@@ -1316,7 +1460,11 @@ mod tests {
             assert_eq!(scans.len(), nuclei_passes(prof).len(), "{prof:?}");
             for c in scans {
                 assert!(c.1.contains(&"-nmhe".to_string()), "{prof:?} {:?}", c.1);
-                assert!(c.1.windows(2).any(|w| w[0] == "-pt" && w[1] == "http"), "{prof:?} {:?}", c.1);
+                assert!(
+                    c.1.windows(2).any(|w| w[0] == "-pt" && w[1] == "http"),
+                    "{prof:?} {:?}",
+                    c.1
+                );
             }
         }
     }
@@ -1346,7 +1494,11 @@ mod tests {
         let c = common_nuclei_args();
         assert!(c.contains(&"-ni".to_string()), "{c:?}");
         assert!(c.contains(&"-duc".to_string()), "{c:?}");
-        for prof in [DastProfile::Passive, DastProfile::Standard, DastProfile::Active] {
+        for prof in [
+            DastProfile::Passive,
+            DastProfile::Standard,
+            DastProfile::Active,
+        ] {
             for pass in nuclei_passes(prof) {
                 assert!(pass.contains(&"-dr".to_string()), "{prof:?} {pass:?}");
                 assert!(!pass.iter().any(|a| a == "-fr" || a == "-fhr"), "{pass:?}");
@@ -1498,7 +1650,11 @@ mod tests {
     }
 
     fn strs(v: &Value) -> Vec<&str> {
-        v.as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect()
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect()
     }
 
     #[test]
@@ -1523,7 +1679,10 @@ mod tests {
 
         let st = coverage(DastProfile::Standard, false, 1, false, &[]);
         assert_eq!(cat(&st, "session")["status"], "tested");
-        assert_eq!(strs(&cat(&st, "session")["tags_missing"]), Vec::<&str>::new());
+        assert_eq!(
+            strs(&cat(&st, "session")["tags_missing"]),
+            Vec::<&str>::new()
+        );
         assert_eq!(cat(&st, "known-vulns")["status"], "tested");
         assert_eq!(
             cat(&st, "authz")["reason"],
@@ -1567,20 +1726,39 @@ mod tests {
             let d = coverage(prof, false, 5, true, &[]);
             assert_eq!(d["scanned"], 0);
             assert_eq!(cat(&d, "sqli")["reason"], "dry run: nothing was sent");
-            assert!(d["categories"].as_array().unwrap().iter().all(|c| c["status"] == "not_tested"));
+            assert!(d["categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["status"] == "not_tested"));
         }
     }
 
     #[test]
     fn coverage_markdown_is_a_list_item_per_category_not_a_table() {
-        let rows = vec![json!({"info":{"tags":["cors"]}}), json!({"info":{"tags":["cors"]}})];
+        let rows = vec![
+            json!({"info":{"tags":["cors"]}}),
+            json!({"info":{"tags":["cors"]}}),
+        ];
         let cov = coverage(DastProfile::Passive, false, 1, false, &rows);
         let md = coverage_markdown(&cov);
         assert!(md.contains("## DAST coverage"));
-        assert!(!md.contains('|'), "the dashboard renders no GFM tables: {md}");
-        assert!(md.contains("- **SQL injection** — not tested: enable the standard profile"), "{md}");
-        assert!(md.contains("- **CORS misconfiguration** — tested · 2 findings"), "{md}");
-        assert!(md.contains("- **Security headers** — tested · 0 findings"), "{md}");
+        assert!(
+            !md.contains('|'),
+            "the dashboard renders no GFM tables: {md}"
+        );
+        assert!(
+            md.contains("- **SQL injection** — not tested: enable the standard profile"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- **CORS misconfiguration** — tested · 2 findings"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- **Security headers** — tested · 0 findings"),
+            "{md}"
+        );
         assert!(
             md.contains("- **Session management** — limited · 0 findings: csrf runs in the standard profile"),
             "{md}"
@@ -1588,7 +1766,9 @@ mod tests {
         let items = md.lines().filter(|l| l.starts_with("- **")).count();
         assert_eq!(items, cov["categories"].as_array().unwrap().len());
         let one = coverage(DastProfile::Passive, false, 1, false, &rows[..1]);
-        assert!(coverage_markdown(&one).contains("- **CORS misconfiguration** — tested · 1 finding\n"));
+        assert!(
+            coverage_markdown(&one).contains("- **CORS misconfiguration** — tested · 1 finding\n")
+        );
     }
 
     #[test]
@@ -1634,7 +1814,10 @@ mod tests {
         let lists = f.nuclei_lists.borrow();
         assert!(!lists.is_empty());
         for l in lists.iter() {
-            assert!(l.contains(&"http://localhost:3000/rest/products".to_string()), "{l:?}");
+            assert!(
+                l.contains(&"http://localhost:3000/rest/products".to_string()),
+                "{l:?}"
+            );
             assert!(!l.iter().any(|u| u.contains("github.com")), "{l:?}");
         }
         assert_eq!(out.findings.len(), 1);
@@ -1688,7 +1871,11 @@ mod tests {
     #[test]
     fn multi_matcher_template_yields_one_finding_per_matcher() {
         let mut f = Fake::new();
-        f.template_rows = Some(vec![hit(Some("a"), None), hit(Some("b"), None), hit(Some("a"), None)]);
+        f.template_rows = Some(vec![
+            hit(Some("a"), None),
+            hit(Some("b"), None),
+            hit(Some("a"), None),
+        ]);
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         assert_eq!(out.findings.len(), 2);
         assert_ne!(out.findings[0].id, out.findings[1].id);
@@ -1698,12 +1885,20 @@ mod tests {
     fn dast_pass_rows_are_nuclei_dast_and_differ_by_fuzzing_parameter() {
         let mut f = Fake::new();
         f.template_rows = Some(vec![]);
-        f.dast_rows = Some(vec![hit(None, Some("q")), hit(None, Some("id")), hit(None, Some("q"))]);
+        f.dast_rows = Some(vec![
+            hit(None, Some("q")),
+            hit(None, Some("id")),
+            hit(None, Some("q")),
+        ]);
         let mut e = eng();
         e.dast.profile = DastProfile::Active;
         let out = run_dast(&e, &f, None, true).unwrap().unwrap();
         assert_eq!(out.findings.len(), 2);
-        assert!(out.findings.iter().all(|x| x.tool == "nuclei-dast"), "{:?}", out.findings);
+        assert!(
+            out.findings.iter().all(|x| x.tool == "nuclei-dast"),
+            "{:?}",
+            out.findings
+        );
     }
 
     #[test]
@@ -1744,7 +1939,10 @@ mod tests {
             .unwrap()
             .iter()
             .all(|c| c["status"] == "not_tested"));
-        assert_eq!(cat(&out.coverage, "sqli")["reason"], "no in-scope URL was reachable");
+        assert_eq!(
+            cat(&out.coverage, "sqli")["reason"],
+            "no in-scope URL was reachable"
+        );
     }
 
     #[test]
@@ -1776,10 +1974,18 @@ mod tests {
             .iter()
             .find(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://")))
             .expect("declared URLs are probed");
-        assert!(!probe.1.iter().any(|a| a == "-H" || a.contains(SECRET)), "{:?}", probe.1);
+        assert!(
+            !probe.1.iter().any(|a| a == "-H" || a.contains(SECRET)),
+            "{:?}",
+            probe.1
+        );
         assert_eq!(probe.2, vec!["localhost".to_string()]);
         let katana = calls.iter().find(|c| c.0 == "katana").unwrap();
-        assert!(!katana.1.contains(&"http://localhost:3000/".to_string()), "{:?}", katana.1);
+        assert!(
+            !katana.1.contains(&"http://localhost:3000/".to_string()),
+            "{:?}",
+            katana.1
+        );
     }
 
     #[test]
@@ -1793,8 +1999,16 @@ mod tests {
             .iter()
             .find(|c| c.0 == "httpx" && c.2.contains(&"example.com".to_string()))
             .unwrap();
-        assert!(recon.2.contains(&"www.example.com".to_string()), "{:?}", recon.2);
-        assert!(!recon.1.iter().any(|a| a.contains("_dmarc")), "{:?}", recon.1);
+        assert!(
+            recon.2.contains(&"www.example.com".to_string()),
+            "{:?}",
+            recon.2
+        );
+        assert!(
+            !recon.1.iter().any(|a| a.contains("_dmarc")),
+            "{:?}",
+            recon.1
+        );
     }
 
     #[test]
@@ -1806,8 +2020,13 @@ mod tests {
             urls: vec!["http://127.0.0.1:3000/".into()],
             ..Default::default()
         };
-        let err = run_dast(&e, &f, None, true).err().expect("python httpx refused");
-        assert!(err.to_string().contains("not ProjectDiscovery httpx"), "{err}");
+        let err = run_dast(&e, &f, None, true)
+            .err()
+            .expect("python httpx refused");
+        assert!(
+            err.to_string().contains("not ProjectDiscovery httpx"),
+            "{err}"
+        );
         assert_eq!(f.count("httpx"), 0, "nothing probed with the wrong httpx");
     }
 
@@ -1822,7 +2041,10 @@ mod tests {
         for c in out.coverage["categories"].as_array().unwrap() {
             assert_eq!(c["status"], "not_tested", "{c}");
         }
-        assert_eq!(cat(&out.coverage, "sqli")["reason"], "dry run: nothing was sent");
+        assert_eq!(
+            cat(&out.coverage, "sqli")["reason"],
+            "dry run: nothing was sent"
+        );
         // the plan still went through the (scope-checking) runner
         assert!(f.count("httpx") >= 1);
     }
@@ -1835,7 +2057,8 @@ mod tests {
 
     #[test]
     fn host_annotation_classifier() {
-        let raw = |h: &str| format!("http:\n  - raw:\n      - |\n        {h}\n        GET / HTTP/1.1\n");
+        let raw =
+            |h: &str| format!("http:\n  - raw:\n      - |\n        {h}\n        GET / HTTP/1.1\n");
         for h in [
             "@Host: https://checkip.amazonaws.com",
             "@Host: https://x.example:443",
@@ -1869,25 +2092,41 @@ mod tests {
             assert!(!off(&raw(h)), "{h} stays on the target");
         }
         // no @Host at all
-        assert!(!off("id: x\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/\"\n"));
+        assert!(!off(
+            "id: x\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/\"\n"
+        ));
         // indentation and CRLF variants
         assert!(off("http:\r\n  - raw:\r\n      - |\r\n\t\t@Host: https://evil.test\r\n        GET / HTTP/1.1\r\n"));
         assert!(!off("http:\r\n  - raw:\r\n      - |\r\n          @Host: {{Hostname}}   \r\n        GET / HTTP/1.1\r\n"));
         // one off-target request among on-target ones excludes the whole template
-        assert!(off(&format!("{}{}", raw("@Host: {{Hostname}}"), raw("@Host: https://evil.test"))));
+        assert!(off(&format!(
+            "{}{}",
+            raw("@Host: {{Hostname}}"),
+            raw("@Host: https://evil.test")
+        )));
         // a raw request written as one escaped string
-        assert!(off("    raw: [\"@Host: https://evil.test\\nGET / HTTP/1.1\\n\\n\"]\n"));
-        assert!(!off("    raw: [\"@Host: {{Hostname}}\\nGET / HTTP/1.1\\n\\n\"]\n"));
+        assert!(off(
+            "    raw: [\"@Host: https://evil.test\\nGET / HTTP/1.1\\n\\n\"]\n"
+        ));
+        assert!(!off(
+            "    raw: [\"@Host: {{Hostname}}\\nGET / HTTP/1.1\\n\\n\"]\n"
+        ));
     }
 
     #[test]
     fn template_listing_is_parsed_and_resolved_under_the_banner_dir() {
         let dir = fixture_templates();
-        let out = listing(&dir, &["http/benign.yaml", "http\\cves\\off-target.yaml", ""]);
+        let out = listing(
+            &dir,
+            &["http/benign.yaml", "http\\cves\\off-target.yaml", ""],
+        );
         let got = parse_template_listing(&out).unwrap();
         assert_eq!(
             got,
-            vec![dir.join("http").join("benign.yaml"), dir.join("http").join("cves").join("off-target.yaml")]
+            vec![
+                dir.join("http").join("benign.yaml"),
+                dir.join("http").join("cves").join("off-target.yaml")
+            ]
         );
         for bad in [
             "",
@@ -1899,10 +2138,17 @@ mod tests {
             // banner naming a directory that cannot be read
             &listing(&dir.join("no-such-dir"), &["http/a.yaml"]),
             // a relative DIR (this one exists relative to the test's working dir)
-            &listing(Path::new("tests/fixtures/nuclei-templates"), &["http/benign.yaml"]),
+            &listing(
+                Path::new("tests/fixtures/nuclei-templates"),
+                &["http/benign.yaml"],
+            ),
         ] {
             let e = parse_template_listing(bad).unwrap_err();
-            assert_eq!(e.to_string(), "nuclei template listing not recognised", "{bad:?}");
+            assert_eq!(
+                e.to_string(),
+                "nuclei template listing not recognised",
+                "{bad:?}"
+            );
         }
     }
 
@@ -1919,20 +2165,43 @@ mod tests {
     #[test]
     fn non_http_protocol_sections_are_classified() {
         // `flow:` alone is not a non-http section (its http requests are audited)
-        assert!(!has_non_http_protocol("id: x\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n"));
-        for key in ["javascript", "network", "tcp", "dns", "ssl", "code", "headless", "websocket", "whois", "file"] {
+        assert!(!has_non_http_protocol(
+            "id: x\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n"
+        ));
+        for key in [
+            "javascript",
+            "network",
+            "tcp",
+            "dns",
+            "ssl",
+            "code",
+            "headless",
+            "websocket",
+            "whois",
+            "file",
+        ] {
             let t = format!("id: x\nhttp:\n  - method: GET\n    path: ['{{{{BaseURL}}}}']\n\n{key}:\n  - x: 1\n");
             assert!(has_non_http_protocol(&t), "{key}");
             // CRLF too
-            assert!(has_non_http_protocol(&t.replace('\n', "\r\n")), "{key} crlf");
+            assert!(
+                has_non_http_protocol(&t.replace('\n', "\r\n")),
+                "{key} crlf"
+            );
             // only a top-level (column-0) key counts, never an indented one or a value
-            let nested = format!("id: x\nhttp:\n  - method: GET\n    {key}: 1\n    path: ['{key}: x']\n");
+            let nested =
+                format!("id: x\nhttp:\n  - method: GET\n    {key}: 1\n    path: ['{key}: x']\n");
             assert!(!has_non_http_protocol(&nested), "{key} nested");
         }
-        assert!(!has_non_http_protocol("id: x\ninfo:\n  name: n\nhttp:\n  - method: GET\n"));
-        assert!(!has_non_http_protocol("id: x\nrequests:\n  - method: GET\n"));
+        assert!(!has_non_http_protocol(
+            "id: x\ninfo:\n  name: n\nhttp:\n  - method: GET\n"
+        ));
+        assert!(!has_non_http_protocol(
+            "id: x\nrequests:\n  - method: GET\n"
+        ));
         // a key that only starts with a protocol name is not that protocol
-        assert!(!has_non_http_protocol("id: x\ncodename: y\nhttp:\n  - method: GET\n"));
+        assert!(!has_non_http_protocol(
+            "id: x\ncodename: y\nhttp:\n  - method: GET\n"
+        ));
         // a UTF-8 BOM before the first key
         assert!(has_non_http_protocol("\u{feff}javascript: []\nhttp: []\n"));
         assert!(flow_loads_modules("\u{feff}flow: require('x')\nhttp: []\n"));
@@ -1941,20 +2210,28 @@ mod tests {
     #[test]
     fn a_flow_is_excluded_only_when_it_loads_modules() {
         // inline flow, http only
-        assert!(!flow_loads_modules("id: x\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n"));
+        assert!(!flow_loads_modules(
+            "id: x\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n"
+        ));
         // no flow at all; `require(` elsewhere (a payload) does not count
-        assert!(!flow_loads_modules("id: x\nhttp:\n  - body: 'require(\"child_process\")'\n"));
+        assert!(!flow_loads_modules(
+            "id: x\nhttp:\n  - body: 'require(\"child_process\")'\n"
+        ));
         assert!(!flow_loads_modules(
             "id: x\nflow: http(1)\n\nhttp:\n  - body: 'require(\"child_process\")'\n"
         ));
         // inline require, any case
-        assert!(flow_loads_modules("id: x\nflow: REQUIRE(\"nuclei/net\") && http(1)\nhttp: []\n"));
+        assert!(flow_loads_modules(
+            "id: x\nflow: REQUIRE(\"nuclei/net\") && http(1)\nhttp: []\n"
+        ));
         // multi-line block scalar: require on a later line, blank lines inside, CRLF
         let block = "id: x\nflow: |\n  http(1);\n\n  let n = Require('nuclei/net');\nhttp:\n  - method: GET\n";
         assert!(flow_loads_modules(block));
         assert!(flow_loads_modules(&block.replace('\n', "\r\n")));
         // the block ends at the next top-level key
-        assert!(!flow_loads_modules("flow: |\n  http(1);\nhttp:\n  - x: 'require(1)'\n"));
+        assert!(!flow_loads_modules(
+            "flow: |\n  http(1);\nhttp:\n  - x: 'require(1)'\n"
+        ));
     }
 
     #[test]
@@ -1962,7 +2239,9 @@ mod tests {
         let http = "http:\n  - method: GET\n    path: ['{{BaseURL}}/']\n";
         // ordinary templates stay
         assert!(!excluded_template(&format!("id: x\n{http}")));
-        assert!(!excluded_template(&format!("id: x\nflow: http(1) && http(2)\n{http}")));
+        assert!(!excluded_template(&format!(
+            "id: x\nflow: http(1) && http(2)\n{http}"
+        )));
         assert!(!excluded_template(&format!(
             "id: x\nflow: |\n  http(1);\n  set('a', 1);\n{http}  - body: 'require(\"x\")'\n"
         )));
@@ -1999,8 +2278,13 @@ mod tests {
         let dir = fixture_templates();
         let mut f = Fake::new();
         f.listing = listing(&dir, &["http/benign.yaml", "http/missing.yaml"]);
-        let e = run_dast(&eng(), &f, None, true).err().expect("must fail closed");
-        assert_eq!(e.to_string(), "nuclei listed a template that cannot be read");
+        let e = run_dast(&eng(), &f, None, true)
+            .err()
+            .expect("must fail closed");
+        assert_eq!(
+            e.to_string(),
+            "nuclei listed a template that cannot be read"
+        );
         assert_eq!(f.count("nuclei"), 0, "never scan unfiltered");
     }
 
@@ -2030,7 +2314,10 @@ mod tests {
         let out = run_dast(&e, &f, None, true).unwrap().unwrap();
         // listed once, with no targets, before any scan
         let texts = f.text_calls.borrow();
-        let tl: Vec<_> = texts.iter().filter(|c| c.1.iter().any(|a| a == "-tl")).collect();
+        let tl: Vec<_> = texts
+            .iter()
+            .filter(|c| c.1.iter().any(|a| a == "-tl"))
+            .collect();
         assert_eq!(tl.len(), 1);
         assert_eq!(tl[0].0, "nuclei");
         assert_eq!(tl[0].1, ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]);
@@ -2047,7 +2334,12 @@ mod tests {
         let excludes = f.nuclei_excludes.borrow();
         assert_eq!(excludes.len(), 2, "both active passes");
         for et in excludes.iter() {
-            let got: BTreeSet<PathBuf> = et.as_ref().expect("-et on every pass").iter().map(PathBuf::from).collect();
+            let got: BTreeSet<PathBuf> = et
+                .as_ref()
+                .expect("-et on every pass")
+                .iter()
+                .map(PathBuf::from)
+                .collect();
             assert_eq!(got, want);
             assert!(got.iter().all(|p| p.is_absolute()), "{got:?}");
         }
@@ -2083,8 +2375,14 @@ mod tests {
         for bad in ["", "nuclei v3.11.1\n", "Usage: nuclei [flags]\n"] {
             let mut f = Fake::new();
             f.listing = bad.into();
-            let e = run_dast(&eng(), &f, None, true).err().expect("must fail closed");
-            assert_eq!(e.to_string(), "nuclei template listing not recognised", "{bad:?}");
+            let e = run_dast(&eng(), &f, None, true)
+                .err()
+                .expect("must fail closed");
+            assert_eq!(
+                e.to_string(),
+                "nuclei template listing not recognised",
+                "{bad:?}"
+            );
             assert_eq!(f.count("nuclei"), 0, "never scan unfiltered");
         }
     }
@@ -2120,24 +2418,38 @@ mod tests {
         );
         for p in &yaml_only {
             let t = std::fs::read_to_string(p).unwrap_or_default();
-            let why = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(t.strip_prefix('\u{feff}').unwrap_or(&t)) {
+            let why = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(
+                t.strip_prefix('\u{feff}').unwrap_or(&t),
+            ) {
                 Err(e) => format!("does not parse: {e}"),
                 Ok(v) if !v.is_mapping() => "root is not a mapping".into(),
                 Ok(_) => "protocol key or flow".into(),
             };
             eprintln!("  yaml: {} ({why})", p.display());
         }
-        let tl: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"].iter().map(|s| s.to_string()).collect();
+        let tl: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let before = parse_template_listing(&r.run_text("nuclei", &tl, &[]).unwrap()).unwrap();
         let dir = TempDir::create().unwrap();
         let et = dir.path().join("exclude-templates.txt");
-        write_new_lines(&et, &off.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap();
+        write_new_lines(
+            &et,
+            &off.iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         let mut args = tl.clone();
         args.extend(["-et".to_string(), et.to_string_lossy().into_owned()]);
         let after = parse_template_listing(&r.run_text("nuclei", &args, &[]).unwrap()).unwrap();
         eprintln!("listed {} -> {} with -et", before.len(), after.len());
         assert!(off.iter().all(|p| before.contains(p)));
-        assert!(off.iter().all(|p| !after.contains(p)), "nuclei did not honour -et");
+        assert!(
+            off.iter().all(|p| !after.contains(p)),
+            "nuclei did not honour -et"
+        );
         assert_eq!(before.len() - after.len(), off.len());
     }
 
@@ -2145,8 +2457,16 @@ mod tests {
     fn dry_run_lists_no_templates() {
         let f = Fake::new();
         let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
-        assert!(!f.text_calls.borrow().iter().any(|c| c.1.iter().any(|a| a == "-tl")));
-        assert!(!f.calls.borrow().iter().any(|c| c.1.iter().any(|a| a == "-et")));
+        assert!(!f
+            .text_calls
+            .borrow()
+            .iter()
+            .any(|c| c.1.iter().any(|a| a == "-tl")));
+        assert!(!f
+            .calls
+            .borrow()
+            .iter()
+            .any(|c| c.1.iter().any(|a| a == "-et")));
         assert_eq!(out.summary.templates_excluded, 0);
     }
 
@@ -2154,7 +2474,10 @@ mod tests {
 
     #[test]
     fn address_host_strips_port_and_brackets() {
-        assert_eq!(address_host("checkip.amazonaws.com:3000"), "checkip.amazonaws.com");
+        assert_eq!(
+            address_host("checkip.amazonaws.com:3000"),
+            "checkip.amazonaws.com"
+        );
         assert_eq!(address_host("127.0.0.1:3000"), "127.0.0.1");
         assert_eq!(address_host("[::1]:3000"), "::1");
         assert_eq!(address_host("[::1]"), "::1");
@@ -2172,14 +2495,24 @@ mod tests {
         let mut e = eng();
         e.cidrs.push("::1/128".into());
         let mut f = Fake::new();
-        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line("::1:3000", "none")]);
+        f.trace_lines = Some(vec![
+            trace_line("localhost:3000", "none"),
+            trace_line("::1:3000", "none"),
+        ]);
         let out = run_dast(&e, &f, None, true).unwrap().unwrap();
-        assert!(out.summary.out_of_scope_requests.is_empty(), "{:?}", out.summary.out_of_scope_requests);
+        assert!(
+            out.summary.out_of_scope_requests.is_empty(),
+            "{:?}",
+            out.summary.out_of_scope_requests
+        );
         // ...and the port is never read as part of the address: ::1:3000 is not ::0.1.48.0
         let mut e = eng();
         e.cidrs.push("::1:3000/128".into());
         let mut f = Fake::new();
-        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line("::1:3000", "none")]);
+        f.trace_lines = Some(vec![
+            trace_line("localhost:3000", "none"),
+            trace_line("::1:3000", "none"),
+        ]);
         let out = run_dast(&e, &f, None, true).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_requests, vec!["::1"]);
     }
@@ -2189,7 +2522,8 @@ mod tests {
         let mut f = Fake::new();
         f.trace_lines = Some(vec![
             trace_line("localhost:3000", "none"),
-            json!({"template": "http/x.yaml", "type": "http", "input": "", "error": "none"}).to_string(),
+            json!({"template": "http/x.yaml", "type": "http", "input": "", "error": "none"})
+                .to_string(),
             json!({"type": "http", "address": 3000}).to_string(),
         ]);
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
@@ -2237,20 +2571,35 @@ mod tests {
         ]);
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         let s = &out.summary;
-        assert_eq!(s.out_of_scope_requests, vec!["::1", "checkip.amazonaws.com"]);
+        assert_eq!(
+            s.out_of_scope_requests,
+            vec!["::1", "checkip.amazonaws.com"]
+        );
         assert_eq!(s.off_scope_request_count, 3);
         // malformed lines are skipped, not counted
         assert_eq!(s.requests_sent, 5);
         assert_eq!(s.request_errors, 2);
-        assert_eq!(out.coverage["out_of_scope_requests"], json!(["::1", "checkip.amazonaws.com"]));
+        assert_eq!(
+            out.coverage["out_of_scope_requests"],
+            json!(["::1", "checkip.amazonaws.com"])
+        );
         let md = coverage_markdown(&out.coverage);
-        assert!(md.contains("nuclei sent 3 requests to hosts outside the scope: ::1, checkip.amazonaws.com"), "{md}");
+        assert!(
+            md.contains(
+                "nuclei sent 3 requests to hosts outside the scope: ::1, checkip.amazonaws.com"
+            ),
+            "{md}"
+        );
     }
 
     #[test]
     fn a_request_with_neither_address_nor_input_host_is_never_assumed_in_scope() {
         let mut f = Fake::new();
-        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line("", "none"), trace_line("", "dial failed")]);
+        f.trace_lines = Some(vec![
+            trace_line("localhost:3000", "none"),
+            trace_line("", "none"),
+            trace_line("", "dial failed"),
+        ]);
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         assert_eq!(out.summary.out_of_scope_requests, vec!["(no address)"]);
         // fail closed: with no host anywhere, a failed request counts too
@@ -2283,7 +2632,10 @@ mod tests {
 
     #[test]
     fn input_host_parses_leniently() {
-        assert_eq!(input_host("http://127.0.0.1:3000/%u002e/WEB-INF/web.xml"), "127.0.0.1");
+        assert_eq!(
+            input_host("http://127.0.0.1:3000/%u002e/WEB-INF/web.xml"),
+            "127.0.0.1"
+        );
         assert_eq!(input_host("http://127.0.0.1@evil.test/"), "evil.test");
         assert_eq!(input_host("https://Example.COM/a?b#c"), "example.com");
         assert_eq!(input_host("http://[::1]:3000/x"), "::1");
@@ -2332,7 +2684,11 @@ mod tests {
     #[test]
     fn the_off_scope_list_is_capped_at_ten_names() {
         let mut f = Fake::new();
-        f.trace_lines = Some((0..12).map(|i| trace_line(&format!("h{i:02}.evil.test:80"), "none")).collect());
+        f.trace_lines = Some(
+            (0..12)
+                .map(|i| trace_line(&format!("h{i:02}.evil.test:80"), "none"))
+                .collect(),
+        );
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         let l = &out.summary.out_of_scope_requests;
         assert_eq!(l.len(), 11, "{l:?}");
@@ -2358,7 +2714,11 @@ mod tests {
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         assert_eq!(
             out.summary.failing_hosts,
-            vec![FailingHost { host: "localhost".into(), failed: 15, sent: 30 }]
+            vec![FailingHost {
+                host: "localhost".into(),
+                failed: 15,
+                sent: 30
+            }]
         );
         assert_eq!(out.summary.requests_sent, 89);
         assert_eq!(out.summary.request_errors, 53);
@@ -2371,8 +2731,14 @@ mod tests {
         let auth = ("Authorization".to_string(), SECRET.to_string());
         let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
         assert!(out.summary.unreachable_urls.is_empty());
-        assert_eq!(out.summary.stopped_answering, vec!["http://localhost:3000/"]);
-        assert_eq!(out.coverage["stopped_answering"], json!(["http://localhost:3000/"]));
+        assert_eq!(
+            out.summary.stopped_answering,
+            vec!["http://localhost:3000/"]
+        );
+        assert_eq!(
+            out.coverage["stopped_answering"],
+            json!(["http://localhost:3000/"])
+        );
         let md = coverage_markdown(&out.coverage);
         assert!(md.contains("stopped answering during the scan: http://localhost:3000/ — the checks after that point produced no result; the run is INCOMPLETE"), "{md}");
         // re-probed after the last nuclei pass, with every live seed and no auth header
@@ -2384,7 +2750,10 @@ mod tests {
                 .position(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://")))
                 .expect("re-probe runs after the scan");
         let args = &calls[reprobe].1;
-        assert!(!args.iter().any(|a| a == "-H" || a.contains(SECRET)), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a == "-H" || a.contains(SECRET)),
+            "{args:?}"
+        );
         for u in ["http://localhost:3000/", "https://example.com"] {
             assert!(args.contains(&u.to_string()), "{u} re-probed: {args:?}");
         }
@@ -2407,9 +2776,22 @@ mod tests {
         let calls = f.calls.borrow();
         let retry = calls.iter().rev().find(|c| c.0 == "httpx").unwrap();
         // only the URLs that missed the first re-probe are retried
-        assert!(retry.1.contains(&"http://localhost:3000/".to_string()), "{:?}", retry.1);
-        assert!(retry.1.contains(&"https://example.com".to_string()), "{:?}", retry.1);
-        assert_eq!(retry.1.iter().filter(|a| *a == "-u").count(), 2, "{:?}", retry.1);
+        assert!(
+            retry.1.contains(&"http://localhost:3000/".to_string()),
+            "{:?}",
+            retry.1
+        );
+        assert!(
+            retry.1.contains(&"https://example.com".to_string()),
+            "{:?}",
+            retry.1
+        );
+        assert_eq!(
+            retry.1.iter().filter(|a| *a == "-u").count(),
+            2,
+            "{:?}",
+            retry.1
+        );
     }
 
     #[test]
@@ -2418,7 +2800,10 @@ mod tests {
         f.httpx_err_after_scan = true;
         let out = run_dast(&eng(), &f, None, true).unwrap().unwrap();
         assert!(!out.findings.is_empty(), "the scan's findings are kept");
-        assert_eq!(out.summary.stopped_answering, vec!["http://localhost:3000/", "https://example.com"]);
+        assert_eq!(
+            out.summary.stopped_answering,
+            vec!["http://localhost:3000/", "https://example.com"]
+        );
     }
 
     #[test]
@@ -2427,7 +2812,10 @@ mod tests {
         let out = run_dast(&eng(), &f, None, false).unwrap().unwrap();
         assert!(out.summary.stopped_answering.is_empty());
         let calls = f.calls.borrow();
-        let probes = calls.iter().filter(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://"))).count();
+        let probes = calls
+            .iter()
+            .filter(|c| c.0 == "httpx" && c.1.iter().any(|a| a.contains("://")))
+            .count();
         assert_eq!(probes, 1, "only the up-front probe of the declared URLs");
     }
 
@@ -2435,18 +2823,29 @@ mod tests {
     fn a_missing_trace_log_fails_closed() {
         let mut f = Fake::new();
         f.write_trace = false;
-        let e = run_dast(&eng(), &f, None, true).err().expect("missing trace log");
+        let e = run_dast(&eng(), &f, None, true)
+            .err()
+            .expect("missing trace log");
         assert_eq!(e.to_string(), "nuclei trace log missing");
         let p = f.trace_paths.borrow()[0].clone();
-        assert!(!std::path::Path::new(&p).parent().unwrap().exists(), "scratch dir left behind");
+        assert!(
+            !std::path::Path::new(&p).parent().unwrap().exists(),
+            "scratch dir left behind"
+        );
     }
 
     #[test]
     fn a_trace_log_with_nothing_parseable_is_missing() {
-        for lines in [vec![], vec!["garbage".to_string()], vec!["{\"no_address\":1}".to_string()]] {
+        for lines in [
+            vec![],
+            vec!["garbage".to_string()],
+            vec!["{\"no_address\":1}".to_string()],
+        ] {
             let mut f = Fake::new();
             f.trace_lines = Some(lines.clone());
-            let e = run_dast(&eng(), &f, None, true).err().expect("empty trace log");
+            let e = run_dast(&eng(), &f, None, true)
+                .err()
+                .expect("empty trace log");
             assert_eq!(e.to_string(), "nuclei trace log missing", "{lines:?}");
         }
     }
@@ -2469,7 +2868,10 @@ mod tests {
     #[test]
     fn trace_derived_text_is_scrubbed() {
         let mut f = Fake::new();
-        f.trace_lines = Some(vec![trace_line("localhost:3000", "none"), trace_line(&format!("{SECRET}.evil.test:80"), "none")]);
+        f.trace_lines = Some(vec![
+            trace_line("localhost:3000", "none"),
+            trace_line(&format!("{SECRET}.evil.test:80"), "none"),
+        ]);
         let auth = ("Authorization".to_string(), SECRET.to_string());
         let out = run_dast(&eng(), &f, Some(&auth), true).unwrap().unwrap();
         let s = serde_json::to_string(&out.summary).unwrap();
@@ -2489,9 +2891,19 @@ mod tests {
 
     #[test]
     fn an_old_summary_without_the_audit_fields_still_parses() {
-        let s: DastSummary = serde_json::from_str(r#"{"profile":"standard","scanned":3,"unreachable_urls":[]}"#).unwrap();
+        let s: DastSummary =
+            serde_json::from_str(r#"{"profile":"standard","scanned":3,"unreachable_urls":[]}"#)
+                .unwrap();
         assert_eq!(s.scanned, 3);
-        assert_eq!((s.requests_sent, s.request_errors, s.off_scope_request_count, s.templates_excluded), (0, 0, 0, 0));
+        assert_eq!(
+            (
+                s.requests_sent,
+                s.request_errors,
+                s.off_scope_request_count,
+                s.templates_excluded
+            ),
+            (0, 0, 0, 0)
+        );
         assert!(s.out_of_scope_requests.is_empty() && s.failing_hosts.is_empty());
         assert!(s.stopped_answering.is_empty());
     }

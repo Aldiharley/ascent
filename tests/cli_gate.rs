@@ -5,10 +5,17 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static N: AtomicUsize = AtomicUsize::new(0);
-const ENG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/samples/engagement.example.yaml");
+const ENG: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/samples/engagement.example.yaml"
+);
 
 fn tmp() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ascent_cli_{}_{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let d = std::env::temp_dir().join(format!(
+        "ascent_cli_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -20,7 +27,10 @@ fn write(dir: &Path, name: &str, text: &str) -> String {
 }
 /// Runs `ascent` with captured stdout/stderr (nothing leaks into the test output).
 fn ascent(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ascent")).args(args).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_ascent"))
+        .args(args)
+        .output()
+        .unwrap()
 }
 fn code(o: &Output) -> i32 {
     o.status.code().unwrap()
@@ -48,7 +58,8 @@ fn gate(dir: &Path, policy_text: &str, extra: &[&str]) -> i32 {
 fn clean_complete_run_passes_with_0() {
     let d = out_dir(vec![], true);
     assert_eq!(gate(&d, POLICY, &[]), 0);
-    let g: Value = serde_json::from_str(&std::fs::read_to_string(d.join("gate.json")).unwrap()).unwrap();
+    let g: Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("gate.json")).unwrap()).unwrap();
     assert_eq!(g["decision"], "PASS");
 }
 #[test]
@@ -75,7 +86,13 @@ fn malformed_policy_exits_2() {
 fn gate_with_a_nonexistent_policy_exits_2() {
     let d = out_dir(vec![], true);
     let missing = d.join("no-such-policy.yaml");
-    let o = ascent(&["gate", "--policy", missing.to_str().unwrap(), "--out", d.to_str().unwrap()]);
+    let o = ascent(&[
+        "gate",
+        "--policy",
+        missing.to_str().unwrap(),
+        "--out",
+        d.to_str().unwrap(),
+    ]);
     assert_eq!(code(&o), 2);
     assert!(!d.join("gate.json").exists());
 }
@@ -91,7 +108,11 @@ fn incomplete_or_missing_run_status_exits_3() {
 #[test]
 fn broken_audit_chain_exits_4_and_writes_no_gate() {
     let d = out_dir(vec![], true);
-    write(&d, "audit.jsonl", "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n");
+    write(
+        &d,
+        "audit.jsonl",
+        "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n",
+    );
     assert_eq!(gate(&d, POLICY, &[]), 4);
     assert!(!d.join("gate.json").exists());
 }
@@ -100,15 +121,34 @@ fn dry_run_with_policy_is_incomplete_3() {
     let d = tmp();
     let p = write(&d, "policy.yaml", POLICY);
     let out = d.join("out");
-    let o = ascent(&["run", "--engagement", ENG, "--out", out.to_str().unwrap(), "--dry-run", "--policy", &p]);
+    let o = ascent(&[
+        "run",
+        "--engagement",
+        ENG,
+        "--out",
+        out.to_str().unwrap(),
+        "--dry-run",
+        "--policy",
+        &p,
+    ]);
     assert_eq!(code(&o), 3);
-    assert!(out.join("gate.json").exists(), "an INCOMPLETE verdict is still recorded");
+    assert!(
+        out.join("gate.json").exists(),
+        "an INCOMPLETE verdict is still recorded"
+    );
 }
 #[test]
 fn dry_run_without_policy_exits_0_and_reports_incomplete_on_stderr() {
     let d = tmp();
     let out = d.join("out");
-    let o = ascent(&["run", "--engagement", ENG, "--out", out.to_str().unwrap(), "--dry-run"]);
+    let o = ascent(&[
+        "run",
+        "--engagement",
+        ENG,
+        "--out",
+        out.to_str().unwrap(),
+        "--dry-run",
+    ]);
     assert_eq!(code(&o), 0);
     let stderr = String::from_utf8_lossy(&o.stderr);
     assert!(stderr.contains("run INCOMPLETE"), "stderr: {stderr}");
@@ -118,14 +158,30 @@ fn bad_policy_fails_before_any_scan() {
     let d = tmp();
     let p = write(&d, "policy.yaml", "version: 9\n");
     let out = d.join("out");
-    let o = ascent(&["run", "--engagement", ENG, "--out", out.to_str().unwrap(), "--dry-run", "--policy", &p]);
+    let o = ascent(&[
+        "run",
+        "--engagement",
+        ENG,
+        "--out",
+        out.to_str().unwrap(),
+        "--dry-run",
+        "--policy",
+        &p,
+    ]);
     assert_eq!(code(&o), 2);
     assert!(!out.join("queue.json").exists(), "nothing ran");
 }
 #[test]
 fn missing_engagement_exits_2() {
     let d = tmp();
-    let o = ascent(&["run", "--engagement", "definitely/not/here.yaml", "--out", d.to_str().unwrap(), "--dry-run"]);
+    let o = ascent(&[
+        "run",
+        "--engagement",
+        "definitely/not/here.yaml",
+        "--out",
+        d.to_str().unwrap(),
+        "--dry-run",
+    ]);
     assert_eq!(code(&o), 2);
 }
 #[test]
@@ -137,8 +193,20 @@ fn unknown_engagement_key_exits_2_and_writes_nothing() {
         "eng.yaml",
         "name: t\nhost: [x.com]\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\n",
     );
-    let o = ascent(&["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--dry-run"]);
-    assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    let o = ascent(&[
+        "run",
+        "--engagement",
+        &eng,
+        "--out",
+        out.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(
+        code(&o),
+        2,
+        "stderr: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     assert!(!out.join("queue.json").exists(), "nothing ran");
 }
 #[test]
@@ -146,9 +214,22 @@ fn bad_source_exits_2() {
     let d = tmp();
     let out = d.join("out");
     let missing = d.join("no-such-source");
-    let o = ascent(&["run", "--engagement", ENG, "--out", out.to_str().unwrap(), "--dry-run",
-                     "--source", missing.to_str().unwrap()]);
-    assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    let o = ascent(&[
+        "run",
+        "--engagement",
+        ENG,
+        "--out",
+        out.to_str().unwrap(),
+        "--dry-run",
+        "--source",
+        missing.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        code(&o),
+        2,
+        "stderr: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     assert!(!out.join("queue.json").exists(), "nothing ran");
 }
 const AUTH_ENG: &str = "name: t\nurls: ['http://127.0.0.1:9/']\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\ndast:\n  auth:\n    header: Authorization\n    value_env: ASCENT_CLI_TEST_UNSET_AUTH\n";
@@ -159,11 +240,23 @@ fn dry_run_never_needs_the_auth_secret() {
     let out = d.join("out");
     let eng = write(&d, "eng.yaml", AUTH_ENG);
     let o = Command::new(env!("CARGO_BIN_EXE_ascent"))
-        .args(["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--dry-run"])
+        .args([
+            "run",
+            "--engagement",
+            &eng,
+            "--out",
+            out.to_str().unwrap(),
+            "--dry-run",
+        ])
         .env_remove("ASCENT_CLI_TEST_UNSET_AUTH")
         .output()
         .unwrap();
-    assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        code(&o),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     assert!(out.join("queue.json").exists());
 }
 
@@ -177,16 +270,25 @@ fn missing_auth_secret_exits_2_before_scanning() {
         .env_remove("ASCENT_CLI_TEST_UNSET_AUTH")
         .output()
         .unwrap();
-    assert_eq!(code(&o), 2, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        code(&o),
+        2,
+        "stderr: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     assert!(!out.join("queue.json").exists(), "nothing ran");
 }
 
 /// PATH with ProjectDiscovery's default install dir first (a pip-installed Python `httpx`
 /// can shadow ProjectDiscovery httpx on PATH).
 fn pd_path() -> std::ffi::OsString {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .unwrap_or_default();
     let mut dirs = vec![PathBuf::from(home).join(".pdtm").join("go").join("bin")];
-    dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
     std::env::join_paths(dirs).unwrap()
 }
 
@@ -202,7 +304,15 @@ fn unreachable_declared_url_is_incomplete_3() {
         "name: t\nurls: ['http://127.0.0.1:9/']\nstarts: '2026-01-01T00:00:00Z'\nends: '2030-01-01T00:00:00Z'\n",
     );
     let o = Command::new(env!("CARGO_BIN_EXE_ascent"))
-        .args(["run", "--engagement", &eng, "--out", out.to_str().unwrap(), "--policy", &p])
+        .args([
+            "run",
+            "--engagement",
+            &eng,
+            "--out",
+            out.to_str().unwrap(),
+            "--policy",
+            &p,
+        ])
         .env("PATH", pd_path())
         .output()
         .unwrap();
@@ -210,11 +320,19 @@ fn unreachable_declared_url_is_incomplete_3() {
     assert_eq!(code(&o), 3, "stderr: {stderr}");
     if out.join("gate.json").exists() {
         // the scanners are installed: the verdict must name why nothing was tested
-        let g: Value = serde_json::from_str(&std::fs::read_to_string(out.join("gate.json")).unwrap()).unwrap();
+        let g: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("gate.json")).unwrap()).unwrap();
         assert_eq!(g["decision"], "INCOMPLETE");
         let reasons = g["incomplete_reasons"].to_string();
-        assert!(reasons.contains("DAST: declared URL(s) unreachable: http://127.0.0.1:9/"), "{g}");
-        assert!(stderr.contains("run INCOMPLETE") && stderr.contains("DAST: no in-scope URL was reachable"), "{stderr}");
+        assert!(
+            reasons.contains("DAST: declared URL(s) unreachable: http://127.0.0.1:9/"),
+            "{g}"
+        );
+        assert!(
+            stderr.contains("run INCOMPLETE")
+                && stderr.contains("DAST: no in-scope URL was reachable"),
+            "{stderr}"
+        );
     } else {
         // no scanners on this machine: the run fails before a verdict, still exit 3
         assert!(stderr.contains("error:"), "{stderr}");
@@ -226,20 +344,43 @@ fn tampered_audit_during_run_exits_4_and_rewrites_nothing() {
     let d = tmp();
     let out = d.join("out");
     std::fs::create_dir_all(&out).unwrap();
-    write(&out, "audit.jsonl", "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n");
+    write(
+        &out,
+        "audit.jsonl",
+        "{\"prev_hash\":\"x\",\"entry_hash\":\"y\"}\n",
+    );
     write(&out, "queue.json", "[\"sentinel\"]");
     write(&out, "run.json", "{\"sentinel\":true}");
-    let o = ascent(&["run", "--engagement", ENG, "--out", out.to_str().unwrap(), "--dry-run"]);
-    assert_eq!(code(&o), 4, "stderr: {}", String::from_utf8_lossy(&o.stderr));
-    assert_eq!(std::fs::read_to_string(out.join("queue.json")).unwrap(), "[\"sentinel\"]");
-    assert_eq!(std::fs::read_to_string(out.join("run.json")).unwrap(), "{\"sentinel\":true}");
+    let o = ascent(&[
+        "run",
+        "--engagement",
+        ENG,
+        "--out",
+        out.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(
+        code(&o),
+        4,
+        "stderr: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("queue.json")).unwrap(),
+        "[\"sentinel\"]"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("run.json")).unwrap(),
+        "{\"sentinel\":true}"
+    );
 }
 #[test]
 fn sarif_subcommand_regenerates_files() {
     let d = out_dir(vec![item("HIGH")], true);
     let o = ascent(&["sarif", "--out", d.to_str().unwrap()]);
     assert_eq!(code(&o), 0);
-    let s: Value = serde_json::from_str(&std::fs::read_to_string(d.join("ascent.sarif")).unwrap()).unwrap();
+    let s: Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("ascent.sarif")).unwrap()).unwrap();
     assert_eq!(s["runs"][0]["results"].as_array().unwrap().len(), 1);
 }
 #[test]

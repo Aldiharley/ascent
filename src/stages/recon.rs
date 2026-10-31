@@ -99,10 +99,9 @@ pub fn probe_urls(
         .filter_map(|r| r["input"].as_str().or_else(|| r["url"].as_str()))
         .map(norm)
         .collect();
-    let (live, dead): (Vec<String>, Vec<String>) = urls
-        .iter()
-        .cloned()
-        .partition(|u| Url::parse(u).is_ok_and(|p| p.host_str().is_some()) && answered.contains(&norm(u)));
+    let (live, dead): (Vec<String>, Vec<String>) = urls.iter().cloned().partition(|u| {
+        Url::parse(u).is_ok_and(|p| p.host_str().is_some()) && answered.contains(&norm(u))
+    });
     Ok((live, dead))
 }
 
@@ -229,7 +228,12 @@ mod tests {
             &vec!["app.example.com".to_string(), "example.com".to_string()]
         );
         assert!(args.contains(&"app.example.com".to_string()));
-        assert!(!args.iter().any(|a| a.contains("_dmarc") || a.contains("evil.test")), "{args:?}");
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("_dmarc") || a.contains("evil.test")),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -315,7 +319,10 @@ mod tests {
 
     #[test]
     fn probe_urls_uses_exact_args_and_url_hosts_as_targets() {
-        let p = Probe { rows: vec![], calls: RefCell::new(vec![]) };
+        let p = Probe {
+            rows: vec![],
+            calls: RefCell::new(vec![]),
+        };
         let urls = vec![
             "http://127.0.0.1:3000/".to_string(),
             "https://app.example.com/login".to_string(),
@@ -370,7 +377,10 @@ mod tests {
 
     #[test]
     fn probe_urls_host_less_url_is_dead_and_never_probed() {
-        let p = Probe { rows: vec![], calls: RefCell::new(vec![]) };
+        let p = Probe {
+            rows: vec![],
+            calls: RefCell::new(vec![]),
+        };
         let (live, dead) = probe_urls(&p, &["evil.com:8080/x".to_string()]).unwrap();
         assert!(live.is_empty());
         assert_eq!(dead, vec!["evil.com:8080/x"]);

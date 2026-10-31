@@ -129,7 +129,8 @@ fn build_dast(req: &NewScanRequest) -> Result<DastConfig, PrepareError> {
         }),
         _ => {
             return Err(PrepareError::BadDast(
-                "set both the auth header name and the environment variable name, or neither".into(),
+                "set both the auth header name and the environment variable name, or neither"
+                    .into(),
             ))
         }
     };
@@ -205,7 +206,8 @@ pub fn prepare(
         ends,
         dast: &dast,
     };
-    let yaml = serde_yaml_ng::to_string(&body).map_err(|e| PrepareError::Internal(e.to_string()))?;
+    let yaml =
+        serde_yaml_ng::to_string(&body).map_err(|e| PrepareError::Internal(e.to_string()))?;
     let yaml = format!("{HEADER}{yaml}");
 
     Ok(Prepared {
@@ -273,7 +275,12 @@ mod tests {
 
     #[test]
     fn auth_names_are_written_and_round_trip() {
-        let p = prep(&req_dast("passive", " Authorization ", " ASCENT_DAST_AUTH ")).unwrap();
+        let p = prep(&req_dast(
+            "passive",
+            " Authorization ",
+            " ASCENT_DAST_AUTH ",
+        ))
+        .unwrap();
         assert_eq!(p.auth_header, "Authorization");
         let a = parse(&p).dast.auth.expect("auth present");
         assert_eq!(a.header, "Authorization");
@@ -290,7 +297,10 @@ mod tests {
             ("aggressive", "", ""),
         ] {
             assert!(
-                matches!(prep(&req_dast(profile, header, env)), Err(PrepareError::BadDast(_))),
+                matches!(
+                    prep(&req_dast(profile, header, env)),
+                    Err(PrepareError::BadDast(_))
+                ),
                 "{profile:?} {header:?} {env:?}"
             );
         }
@@ -298,7 +308,10 @@ mod tests {
 
     #[test]
     fn bad_dast_error_never_echoes_a_pasted_token() {
-        for (h, e) in [("Bearer s3cr3t-tok", "ASCENT_DAST_AUTH"), ("Authorization", "Bearer s3cr3t-tok")] {
+        for (h, e) in [
+            ("Bearer s3cr3t-tok", "ASCENT_DAST_AUTH"),
+            ("Authorization", "Bearer s3cr3t-tok"),
+        ] {
             match prep(&req_dast("standard", h, e)) {
                 Err(PrepareError::BadDast(m)) => assert!(!m.contains("s3cr3t"), "{m}"),
                 other => panic!("expected BadDast, got {other:?}"),
@@ -325,8 +338,14 @@ mod tests {
 
     #[test]
     fn empty_and_unusable_names_are_refused() {
-        assert_eq!(prep(&req("   ", &["example.com"], "")), Err(PrepareError::EmptyName));
-        assert_eq!(prep(&req("!!!", &["example.com"], "")), Err(PrepareError::UnusableName));
+        assert_eq!(
+            prep(&req("   ", &["example.com"], "")),
+            Err(PrepareError::EmptyName)
+        );
+        assert_eq!(
+            prep(&req("!!!", &["example.com"], "")),
+            Err(PrepareError::UnusableName)
+        );
     }
 
     #[test]
@@ -337,14 +356,22 @@ mod tests {
 
     #[test]
     fn all_blank_targets_is_no_targets() {
-        assert_eq!(prep(&req("Acme", &["", "   "], "")), Err(PrepareError::NoTargets));
+        assert_eq!(
+            prep(&req("Acme", &["", "   "], "")),
+            Err(PrepareError::NoTargets)
+        );
         assert_eq!(prep(&req("Acme", &[], "")), Err(PrepareError::NoTargets));
     }
 
     #[test]
     fn one_bad_target_rejects_the_whole_request() {
         // A good + bad mix writes nothing and names every bad entry.
-        let err = prep(&req("Acme", &["example.com", "evil.com/path", "exa mple.com"], "")).unwrap_err();
+        let err = prep(&req(
+            "Acme",
+            &["example.com", "evil.com/path", "exa mple.com"],
+            "",
+        ))
+        .unwrap_err();
         assert_eq!(
             err,
             PrepareError::RejectedTargets(vec!["evil.com/path".into(), "exa mple.com".into()])

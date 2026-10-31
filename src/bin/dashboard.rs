@@ -116,7 +116,9 @@ async fn create_engagement(
         std::path::Path::new(p).is_dir()
     }) {
         Ok(p) => p,
-        Err(E::EmptyName) => return Err(err(StatusCode::BAD_REQUEST, "engagement name is required")),
+        Err(E::EmptyName) => {
+            return Err(err(StatusCode::BAD_REQUEST, "engagement name is required"))
+        }
         Err(E::UnusableName) => {
             return Err(err(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -132,7 +134,9 @@ async fn create_engagement(
         Err(E::SourceNotFound(p)) => {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({ "ok": false, "error": format!("source path not found: {p}"), "field": "source" })),
+                Json(
+                    json!({ "ok": false, "error": format!("source path not found: {p}"), "field": "source" }),
+                ),
             ))
         }
         Err(E::BadDast(m)) => {
@@ -589,7 +593,11 @@ mod tests {
         let resp = app_for(&dir).oneshot(api_get("/api/gate")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await, Value::Null);
-        std::fs::write(dir.join("gate.json"), r#"{"decision":"PASS","exit_code":0}"#).unwrap();
+        std::fs::write(
+            dir.join("gate.json"),
+            r#"{"decision":"PASS","exit_code":0}"#,
+        )
+        .unwrap();
         let resp = app_for(&dir).oneshot(api_get("/api/gate")).await.unwrap();
         assert_eq!(body_json(resp).await["decision"], "PASS");
     }
@@ -1103,10 +1111,9 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["dast"]["profile"], "active");
         assert_eq!(v["dast"]["auth_header"], "Authorization");
-        let eng = scope::load_engagement(
-            dir.join("engagements").join("acme.yaml").to_str().unwrap(),
-        )
-        .unwrap();
+        let eng =
+            scope::load_engagement(dir.join("engagements").join("acme.yaml").to_str().unwrap())
+                .unwrap();
         assert_eq!(eng.dast.profile, scope::DastProfile::Active);
         assert_eq!(eng.dast.auth.unwrap().value_env, "ASCENT_DAST_AUTH");
     }

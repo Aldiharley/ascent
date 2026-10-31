@@ -199,23 +199,34 @@ mod tests {
         assert!(!got.iter().any(|a| a == "-u"), "{got:?}");
         assert_eq!(targets, &vec!["app.example.com".to_string()]);
         assert_eq!(rec.lists.borrow()[0], vec!["https://app.example.com/"]);
-        assert!(!std::path::Path::new(&got[5]).exists(), "list file left behind");
+        assert!(
+            !std::path::Path::new(&got[5]).exists(),
+            "list file left behind"
+        );
     }
 
     #[test]
     fn a_long_surface_goes_through_one_list_file() {
         let rec = Rec::default();
-        let urls: Vec<String> = (0..3000).map(|i| format!("https://app.example.com/p/{i}?q=1")).collect();
+        let urls: Vec<String> = (0..3000)
+            .map(|i| format!("https://app.example.com/p/{i}?q=1"))
+            .collect();
         scan_rows(&rec, &urls, &jsonl()).unwrap();
         let calls = rec.calls.borrow();
         let (_, got, _) = &calls[0];
-        assert!(got.iter().map(String::len).sum::<usize>() < 1024, "command line grows with the surface");
+        assert!(
+            got.iter().map(String::len).sum::<usize>() < 1024,
+            "command line grows with the surface"
+        );
         assert_eq!(rec.lists.borrow()[0], urls);
     }
 
     #[test]
     fn list_file_is_removed_when_nuclei_fails_and_names_are_unique() {
-        let rec = Rec { fail: true, ..Default::default() };
+        let rec = Rec {
+            fail: true,
+            ..Default::default()
+        };
         assert!(scan_rows(&rec, &["https://app.example.com/".to_string()], &jsonl()).is_err());
         assert!(scan_rows(&rec, &["https://app.example.com/".to_string()], &jsonl()).is_err());
         let calls = rec.calls.borrow();
@@ -245,7 +256,9 @@ mod tests {
                 .push((t.to_string(), a.to_vec(), g.to_vec()));
             if let Some(w) = a.windows(2).find(|w| w[0] == "-l") {
                 let text = std::fs::read_to_string(&w[1]).unwrap();
-                self.lists.borrow_mut().push(text.lines().map(String::from).collect());
+                self.lists
+                    .borrow_mut()
+                    .push(text.lines().map(String::from).collect());
             }
             if self.fail {
                 return Err("nuclei crashed".into());

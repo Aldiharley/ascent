@@ -95,13 +95,22 @@ struct Failure {
 }
 impl Failure {
     fn usage(m: impl ToString) -> Self {
-        Failure { code: 2, msg: m.to_string() }
+        Failure {
+            code: 2,
+            msg: m.to_string(),
+        }
     }
     fn incomplete(m: impl ToString) -> Self {
-        Failure { code: 3, msg: m.to_string() }
+        Failure {
+            code: 3,
+            msg: m.to_string(),
+        }
     }
     fn integrity(m: impl ToString) -> Self {
-        Failure { code: 4, msg: m.to_string() }
+        Failure {
+            code: 4,
+            msg: m.to_string(),
+        }
     }
 }
 
@@ -145,9 +154,15 @@ fn gate_step(out: &str, policy: &Policy, fail_on_warn: bool) -> Result<u8, Failu
         result.counts.demoted_fp
     );
     for e in result.failed.iter().take(10) {
-        println!("  FAIL {} {} {} — {}", e.severity, e.rule_id, e.locus, e.reason);
+        println!(
+            "  FAIL {} {} {} — {}",
+            e.severity, e.rule_id, e.locus, e.reason
+        );
     }
-    println!("gate:   {}", std::path::Path::new(out).join("gate.json").display());
+    println!(
+        "gate:   {}",
+        std::path::Path::new(out).join("gate.json").display()
+    );
     Ok(result.exit_code)
 }
 
@@ -204,18 +219,26 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
                 );
                 println!(
                     "coverage: {}",
-                    std::path::Path::new(&out).join("dast-coverage.json").display()
+                    std::path::Path::new(&out)
+                        .join("dast-coverage.json")
+                        .display()
                 );
             }
             if !s.complete {
                 // stderr, so CI logs show it even when stdout is captured.
-                eprintln!("run INCOMPLETE (dry run or failed scanners: {:?})", s.failed_tools);
+                eprintln!(
+                    "run INCOMPLETE (dry run or failed scanners: {:?})",
+                    s.failed_tools
+                );
                 for r in &s.incomplete_reasons {
                     eprintln!("  {r}");
                 }
             }
             println!("report: {}\naudit:  {}", s.report_path, s.audit_path);
-            println!("sarif:  {}", std::path::Path::new(&out).join("ascent.sarif").display());
+            println!(
+                "sarif:  {}",
+                std::path::Path::new(&out).join("ascent.sarif").display()
+            );
             if do_propose {
                 let queue_path = std::path::Path::new(&out).join("queue.json");
                 let items: Vec<TriageItem> = std::fs::read_to_string(&queue_path)
@@ -235,15 +258,28 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
                 None => Ok(0),
             }
         }
-        Cmd::Gate { policy, out, fail_on_warn } => {
+        Cmd::Gate {
+            policy,
+            out,
+            fail_on_warn,
+        } => {
             let p = load_policy(&policy).map_err(Failure::usage)?;
             gate_step(&out, &p, fail_on_warn)
         }
         Cmd::Sarif { out, source_root } => {
             let items = read_queue(&out).map_err(Failure::incomplete)?;
-            sarif::write_sarif(&out, &items, source_root.as_deref()).map_err(Failure::incomplete)?;
-            println!("sarif: {}", std::path::Path::new(&out).join("ascent.sarif").display());
-            println!("sarif: {}", std::path::Path::new(&out).join("ascent-dast.sarif").display());
+            sarif::write_sarif(&out, &items, source_root.as_deref())
+                .map_err(Failure::incomplete)?;
+            println!(
+                "sarif: {}",
+                std::path::Path::new(&out).join("ascent.sarif").display()
+            );
+            println!(
+                "sarif: {}",
+                std::path::Path::new(&out)
+                    .join("ascent-dast.sarif")
+                    .display()
+            );
             Ok(0)
         }
         Cmd::Verify { engagement, out } => {
@@ -385,8 +421,24 @@ mod tests {
 
     #[test]
     fn parses_run_policy_flags() {
-        let c = Cli::try_parse_from(["ascent", "run", "--engagement", "e", "--policy", "p.yaml", "--fail-on-warn"]).unwrap();
-        let super::Cmd::Run { policy, fail_on_warn, .. } = c.cmd else { panic!("expected Run") };
+        let c = Cli::try_parse_from([
+            "ascent",
+            "run",
+            "--engagement",
+            "e",
+            "--policy",
+            "p.yaml",
+            "--fail-on-warn",
+        ])
+        .unwrap();
+        let super::Cmd::Run {
+            policy,
+            fail_on_warn,
+            ..
+        } = c.cmd
+        else {
+            panic!("expected Run")
+        };
         assert_eq!(policy.as_deref(), Some("p.yaml"));
         assert!(fail_on_warn);
     }
@@ -394,11 +446,26 @@ mod tests {
     #[test]
     fn parses_gate_and_sarif() {
         let c = Cli::try_parse_from(["ascent", "gate", "--policy", "p.yaml"]).unwrap();
-        let super::Cmd::Gate { policy, out, fail_on_warn } = c.cmd else { panic!("expected Gate") };
-        assert_eq!((policy.as_str(), out.as_str(), fail_on_warn), ("p.yaml", "out", false));
-        assert!(Cli::try_parse_from(["ascent", "gate"]).is_err(), "--policy is required");
+        let super::Cmd::Gate {
+            policy,
+            out,
+            fail_on_warn,
+        } = c.cmd
+        else {
+            panic!("expected Gate")
+        };
+        assert_eq!(
+            (policy.as_str(), out.as_str(), fail_on_warn),
+            ("p.yaml", "out", false)
+        );
+        assert!(
+            Cli::try_parse_from(["ascent", "gate"]).is_err(),
+            "--policy is required"
+        );
         let c = Cli::try_parse_from(["ascent", "sarif", "--source-root", "./src"]).unwrap();
-        let super::Cmd::Sarif { source_root, .. } = c.cmd else { panic!("expected Sarif") };
+        let super::Cmd::Sarif { source_root, .. } = c.cmd else {
+            panic!("expected Sarif")
+        };
         assert_eq!(source_root.as_deref(), Some("./src"));
     }
 }

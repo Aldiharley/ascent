@@ -86,7 +86,11 @@ impl Runner for ToolRunner {
         // look like "0 findings" to the policy gate.
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
             return Err(format!("{tool} exited with {}: {}", out.status, last.trim()).into());
         }
         Ok(parse_jsonl(&String::from_utf8_lossy(&out.stdout)))

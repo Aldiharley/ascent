@@ -17,7 +17,12 @@ const CREDENTIAL_CWES: [&str; 3] = ["CWE-798", "CWE-259", "CWE-321"];
 
 /// `"secret" | "sca" | "dast" | "sast"`.
 pub fn kind(f: &Value) -> &'static str {
-    let cwe = s(f, "cwe").split(':').next().unwrap_or("").trim().to_ascii_uppercase();
+    let cwe = s(f, "cwe")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
     match s(f, "tool") {
         "gitleaks" => "secret",
         "trivy" => "sca",
@@ -61,11 +66,20 @@ pub fn relative_to(file: &str, root: &str) -> String {
     let p = clean_path(file);
     let r = clean_path(root);
     let r = r.trim_end_matches('/');
-    if r.is_empty() || r == "." || p.len() <= r.len() || p.as_bytes()[r.len()] != b'/' || !p.is_char_boundary(r.len()) {
+    if r.is_empty()
+        || r == "."
+        || p.len() <= r.len()
+        || p.as_bytes()[r.len()] != b'/'
+        || !p.is_char_boundary(r.len())
+    {
         return p;
     }
     let (head, rest) = p.split_at(r.len());
-    let same = if cfg!(windows) { head.eq_ignore_ascii_case(r) } else { head == r };
+    let same = if cfg!(windows) {
+        head.eq_ignore_ascii_case(r)
+    } else {
+        head == r
+    };
     if same {
         rest[1..].to_string()
     } else {
@@ -103,11 +117,19 @@ pub fn normalise_url(raw: &str) -> String {
     let Ok(u) = url::Url::parse(raw.trim()) else {
         return raw.trim().to_string();
     };
-    let mut out = format!("{}://{}", u.scheme(), u.host_str().unwrap_or("").to_ascii_lowercase());
+    let mut out = format!(
+        "{}://{}",
+        u.scheme(),
+        u.host_str().unwrap_or("").to_ascii_lowercase()
+    );
     if let Some(p) = u.port() {
         out.push_str(&format!(":{p}"));
     }
-    let path: Vec<&str> = u.path().split('/').map(|seg| if volatile(seg) { "{}" } else { seg }).collect();
+    let path: Vec<&str> = u
+        .path()
+        .split('/')
+        .map(|seg| if volatile(seg) { "{}" } else { seg })
+        .collect();
     out.push_str(&path.join("/"));
     let mut names: Vec<String> = u.query_pairs().map(|(k, _)| k.into_owned()).collect();
     names.sort();
@@ -165,16 +187,24 @@ mod tests {
         json!({"id":"x","tool":"opengrep","rule_id":rule,"severity":"HIGH","file":file,
                "line":line,"url":"","category":"SAST","code":code})
     }
-    fn one(f: Value) -> String { fingerprints(&[f], None).remove(0) }
+    fn one(f: Value) -> String {
+        fingerprints(&[f], None).remove(0)
+    }
 
     #[test]
     fn has_version_prefix() {
         let fp = one(sast("r", "a.py", 1, "x()"));
-        assert!(fp.starts_with("ascent/v1:") && fp.len() == "ascent/v1:".len() + 64, "{fp}");
+        assert!(
+            fp.starts_with("ascent/v1:") && fp.len() == "ascent/v1:".len() + 64,
+            "{fp}"
+        );
     }
     #[test]
     fn sast_survives_line_shift_and_whitespace() {
-        assert_eq!(one(sast("r", "a.py", 10, "q( x )")), one(sast("r", "a.py", 42, "q(x)")));
+        assert_eq!(
+            one(sast("r", "a.py", 10, "q( x )")),
+            one(sast("r", "a.py", 42, "q(x)"))
+        );
     }
     #[test]
     fn sast_changes_with_rule_path_or_code() {
@@ -189,16 +219,23 @@ mod tests {
     }
     #[test]
     fn secret_ignores_line_and_code() {
-        let s = |line: i64, code: &str| json!({"id":"g","tool":"gitleaks","rule_id":"aws",
-            "file":"c.py","line":line,"url":"","code":code});
+        let s = |line: i64, code: &str| {
+            json!({"id":"g","tool":"gitleaks","rule_id":"aws",
+            "file":"c.py","line":line,"url":"","code":code})
+        };
         assert_eq!(one(s(2, "")), one(s(9, "AKIAEXAMPLE")));
     }
     #[test]
     fn sca_is_stable_across_separators_versions_and_roots() {
-        let s = |file: &str, ver: &str| json!({"id": format!("trivy:CVE-1:{file}:axios"),
+        let s = |file: &str, ver: &str| {
+            json!({"id": format!("trivy:CVE-1:{file}:axios"),
             "tool":"trivy","rule_id":"CVE-1","file":file,"line":0,"url":"",
-            "code": format!("pkg=axios installed={ver} fixed=0.21.2 purl=pkg:npm/axios@{ver}")});
-        assert_eq!(one(s("src\\package-lock.json", "0.21.1")), one(s("src/package-lock.json", "0.21.2")));
+            "code": format!("pkg=axios installed={ver} fixed=0.21.2 purl=pkg:npm/axios@{ver}")})
+        };
+        assert_eq!(
+            one(s("src\\package-lock.json", "0.21.1")),
+            one(s("src/package-lock.json", "0.21.2"))
+        );
         assert_eq!(
             fingerprints(&[s("./app/package-lock.json", "0.21.1")], Some("./app")),
             fingerprints(&[s("package-lock.json", "0.21.1")], None)
@@ -209,26 +246,36 @@ mod tests {
     }
     #[test]
     fn sca_without_evidence_falls_back_to_the_id_package() {
-        let s = |file: &str| json!({"id": format!("trivy:CVE-1:{file}:axios"),"tool":"trivy",
-            "rule_id":"CVE-1","file":file,"line":0,"url":""});
-        assert_eq!(one(s("a\\package-lock.json")), one(s("a/package-lock.json")));
+        let s = |file: &str| {
+            json!({"id": format!("trivy:CVE-1:{file}:axios"),"tool":"trivy",
+            "rule_id":"CVE-1","file":file,"line":0,"url":""})
+        };
+        assert_eq!(
+            one(s("a\\package-lock.json")),
+            one(s("a/package-lock.json"))
+        );
     }
     #[test]
     fn sast_credential_findings_are_keyed_like_secrets() {
-        let f = |code: &str, line: i64| json!({"id":"o","tool":"opengrep","rule_id":"generic.hardcoded.cred",
-            "file":"d.py","line":line,"url":"","cwe":"CWE-798","code":code});
+        let f = |code: &str, line: i64| {
+            json!({"id":"o","tool":"opengrep","rule_id":"generic.hardcoded.cred",
+            "file":"d.py","line":line,"url":"","cwe":"CWE-798","code":code})
+        };
         assert_eq!(kind(&f("k = 'aa11'", 1)), "secret");
         assert_eq!(one(f("k = 'aa11'", 1)), one(f("k = 'bb22'", 9)));
     }
     #[test]
     fn dast_ignores_query_values_ids_and_host_case() {
-        let d = |u: &str| json!({"id":"n","tool":"nuclei","rule_id":"sqli","url":u,"file":"","line":0});
+        let d =
+            |u: &str| json!({"id":"n","tool":"nuclei","rule_id":"sqli","url":u,"file":"","line":0});
         assert_eq!(
             one(d("https://App.Example.com/users/42?b=2&a=1")),
             one(d("https://app.example.com/users/7?a=9&b=3"))
         );
-        assert_ne!(one(d("https://app.example.com/users/42?a=1")),
-                   one(d("https://app.example.com/users/42?c=1")));
+        assert_ne!(
+            one(d("https://app.example.com/users/42?a=1")),
+            one(d("https://app.example.com/users/42?c=1"))
+        );
     }
     #[test]
     fn identical_findings_get_distinct_stable_fingerprints() {
@@ -242,22 +289,40 @@ mod tests {
         assert_eq!(normalise_path(".\\src\\a.py", Some("./src")), "a.py");
         assert_eq!(normalise_path("src/a.py", Some("src/")), "a.py");
         assert_eq!(normalise_path("./lib/b.rs", None), "lib/b.rs");
-        assert_eq!(one(sast("r", "src\\a.py", 1, "x")), one(sast("r", "src/a.py", 1, "x")));
+        assert_eq!(
+            one(sast("r", "src\\a.py", 1, "x")),
+            one(sast("r", "src/a.py", 1, "x"))
+        );
     }
     #[test]
     fn relative_to_strips_a_posix_root() {
         assert_eq!(relative_to("/home/x/src/a.py", "/home/x/src"), "a.py");
-        assert_eq!(relative_to("/home/x/src/lib/b.rs", "/home/x/src/"), "lib/b.rs");
+        assert_eq!(
+            relative_to("/home/x/src/lib/b.rs", "/home/x/src/"),
+            "lib/b.rs"
+        );
     }
     #[test]
     fn relative_to_strips_a_windows_verbatim_root() {
-        assert_eq!(relative_to("\\\\?\\M:\\proj\\src\\a.py", "M:/proj/src"), "a.py");
-        assert_eq!(relative_to("M:\\proj\\src\\a.py", "\\\\?\\M:\\proj\\src"), "a.py");
+        assert_eq!(
+            relative_to("\\\\?\\M:\\proj\\src\\a.py", "M:/proj/src"),
+            "a.py"
+        );
+        assert_eq!(
+            relative_to("M:\\proj\\src\\a.py", "\\\\?\\M:\\proj\\src"),
+            "a.py"
+        );
     }
     #[test]
     fn relative_to_leaves_paths_outside_the_root_normalised_but_unchanged() {
-        assert_eq!(relative_to("/elsewhere/a.py", "/home/x/src"), "/elsewhere/a.py");
-        assert_eq!(relative_to("/home/x/srcfoo/a.py", "/home/x/src"), "/home/x/srcfoo/a.py");
+        assert_eq!(
+            relative_to("/elsewhere/a.py", "/home/x/src"),
+            "/elsewhere/a.py"
+        );
+        assert_eq!(
+            relative_to("/home/x/srcfoo/a.py", "/home/x/src"),
+            "/home/x/srcfoo/a.py"
+        );
         assert_eq!(relative_to(".\\lib\\b.rs", "/home/x/src"), "lib/b.rs");
     }
     #[test]
@@ -271,13 +336,21 @@ mod tests {
     }
     #[test]
     fn normalise_path_uses_relative_to() {
-        assert_eq!(normalise_path("\\\\?\\M:\\proj\\src\\a.py", Some("M:/proj/src")), "a.py");
+        assert_eq!(
+            normalise_path("\\\\?\\M:\\proj\\src\\a.py", Some("M:/proj/src")),
+            "a.py"
+        );
     }
     #[test]
     fn url_normalisation() {
-        assert_eq!(normalise_url("HTTPS://Ex.com:443/a/123/b?z=1&y=2#f"), "https://ex.com/a/{}/b?y&z");
-        assert_eq!(normalise_url("http://ex.com:8080/u/550e8400-e29b-41d4-a716-446655440000"),
-                   "http://ex.com:8080/u/{}");
+        assert_eq!(
+            normalise_url("HTTPS://Ex.com:443/a/123/b?z=1&y=2#f"),
+            "https://ex.com/a/{}/b?y&z"
+        );
+        assert_eq!(
+            normalise_url("http://ex.com:8080/u/550e8400-e29b-41d4-a716-446655440000"),
+            "http://ex.com:8080/u/{}"
+        );
         assert_eq!(normalise_url("not a url"), "not a url");
     }
     #[test]
@@ -286,6 +359,11 @@ mod tests {
         assert_eq!(kind(&json!({"tool":"trivy"})), "sca");
         assert_eq!(kind(&json!({"tool":"nuclei","url":"https://x/"})), "dast");
         assert_eq!(kind(&json!({"tool":"opengrep","url":""})), "sast");
-        assert_eq!(kind(&json!({"tool":"opengrep","url":"","cwe":"CWE-798: Use of Hard-coded Credentials"})), "secret");
+        assert_eq!(
+            kind(
+                &json!({"tool":"opengrep","url":"","cwe":"CWE-798: Use of Hard-coded Credentials"})
+            ),
+            "secret"
+        );
     }
 }
