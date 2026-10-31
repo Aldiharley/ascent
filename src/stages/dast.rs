@@ -1039,7 +1039,7 @@ pub fn run_dast(
     let (declared, url_dropped) =
         filter_in_scope(declared.into_iter().collect(), &|u| guard.in_scope(u));
     // Only declared URLs that answer are crawled (hosts are probed by recon).
-    let (live_urls, dead_urls) = probe_urls(runner, &declared).map_err(scrubbed)?;
+    let (live_urls, dead_urls) = probe_urls(runner, &declared, false).map_err(scrubbed)?;
     let (live_urls, dead_urls) = if live {
         (live_urls, dead_urls)
     } else {
@@ -1070,7 +1070,12 @@ pub fn run_dast(
     // The deadline applies to all nuclei passes combined; None when not live
     // (no real process is spawned) or when the runner is not timeout-capable.
     let deadline = if live && runner.supports_timeout() {
-        Some(std::time::Instant::now() + std::time::Duration::from_secs(dast_timeout_secs))
+        let d = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(dast_timeout_secs))
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                "--dast-timeout value overflows the system clock; use a smaller value".into()
+            })?;
+        Some(d)
     } else {
         None
     };
@@ -1162,8 +1167,9 @@ pub fn run_dast(
         // answering, so the scan's results are kept and the run still fails closed.
         // Skip the post-scan probe when the timeout hit: the target is likely fine.
         if live && !wall_clock_limit_hit {
-            let dead =
-                |urls: &[String]| probe_urls(runner, urls).map_or_else(|_| urls.to_vec(), |r| r.1);
+            let dead = |urls: &[String]| {
+                probe_urls(runner, urls, true).map_or_else(|_| urls.to_vec(), |r| r.1)
+            };
             stopped_answering = dead(&seed);
             if !stopped_answering.is_empty() {
                 stopped_answering = dead(&stopped_answering);
