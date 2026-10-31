@@ -272,6 +272,9 @@ fn dast_incomplete_reasons(eng: &Engagement, d: &DastSummary) -> Vec<String> {
             d.stopped_answering.join(", ")
         ));
     }
+    for host in &d.recovered_hosts {
+        reasons.push(format!("target_recovered_during_scan:{host}"));
+    }
     reasons
 }
 
