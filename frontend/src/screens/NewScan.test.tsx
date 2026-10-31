@@ -10,8 +10,9 @@ function stubClipboard(writeText: (text: string) => Promise<void>) {
 
 // The hint under the select for the Active profile: backend's standard profile excludes the
 // `intrusive` templates, active keeps them (and adds parameter fuzzing), so the warning says so.
+// A live active run took a Juice Shop lab container down, so it also warns about that.
 const ACTIVE_HINT =
-  "Adds intrusive templates and parameter fuzzing — may change application state. Use only on a lab or staging target.";
+  "Adds intrusive templates and parameter fuzzing — may change application state or take the target down. Use only on a lab or staging target.";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
@@ -109,7 +110,7 @@ test("the DAST profile select defaults to Standard and offers all three profiles
   expect(Array.from(select.options).map((o) => o.value)).toEqual(["passive", "standard", "active"]);
   expect(screen.getByRole("option", { name: /^Passive — non-intrusive checks only$/ })).toBeInTheDocument();
   expect(screen.getByRole("option", { name: /^Standard — .*\(default\)$/ })).toBeInTheDocument();
-  expect(screen.getByRole("option", { name: /^Active — adds parameter fuzzing/ })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: /^Active — adds intrusive templates and parameter fuzzing/})).toBeInTheDocument();
   expect(screen.getByText(/Ascent never stores the value/)).toBeInTheDocument();
 });
 

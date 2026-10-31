@@ -16,7 +16,7 @@ const PROFILE_OPTIONS: { value: DastProfile; label: string }[] = [
   },
   {
     value: "active",
-    label: "Active — adds parameter fuzzing; only for targets you may actively test",
+    label: "Active — adds intrusive templates and parameter fuzzing; only for targets you may actively test",
   },
 ];
 
@@ -26,7 +26,7 @@ const PROFILE_HINTS: Record<DastProfile, string> = {
   standard: "Passive checks plus known-vulnerability and injection templates. The default.",
   // The standard profile excludes the `intrusive` templates; active keeps them and adds fuzzing.
   active:
-    "Adds intrusive templates and parameter fuzzing — may change application state. Use only on a lab or staging target.",
+    "Adds intrusive templates and parameter fuzzing — may change application state or take the target down. Use only on a lab or staging target.",
 };
 
 export interface NewScanProps {
