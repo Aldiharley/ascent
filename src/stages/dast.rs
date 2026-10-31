@@ -1045,7 +1045,8 @@ pub fn run_dast(
             }
             args.extend(headers.iter().cloned());
             let (pass_rows, timed_out) =
-                scan_rows_with_deadline(runner, &surface, &args, deadline).map_err(scrubbed)?;
+                scan_rows_with_deadline(runner, &surface, &args, deadline, secret)
+                    .map_err(scrubbed)?;
             for mut r in pass_rows {
                 if fuzz_pass {
                     if let Some(o) = r.as_object_mut() {

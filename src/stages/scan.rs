@@ -151,6 +151,7 @@ pub fn scan_rows_with_deadline(
     urls: &[String],
     args: &[String],
     deadline: Option<std::time::Instant>,
+    secret: Option<&str>,
 ) -> Result<(Vec<serde_json::Value>, bool), Box<dyn std::error::Error>> {
     let (hosts, listed) = scannable(urls);
     if hosts.is_empty() {
@@ -168,6 +169,9 @@ pub fn scan_rows_with_deadline(
         return Ok((rows, false));
     };
 
+    // `secret` must be captured by value in the stderr thread; clone it once here.
+    let secret_owned: Option<String> = secret.map(str::to_owned);
+
     // Already past the deadline before we even start.
     let now = std::time::Instant::now();
     if now >= dl {
@@ -178,7 +182,7 @@ pub fn scan_rows_with_deadline(
     let mut child = std::process::Command::new("nuclei")
         .args(&full_args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     // Read stdout in a background thread (nuclei may flush lazily).
@@ -194,13 +198,42 @@ pub fn scan_rows_with_deadline(
         let _ = tx.send(buf);
     });
 
+    // Read stderr in a background thread; scrub each line before printing so
+    // the auth header value never surfaces in output.  The last scrubbed line
+    // is forwarded to the main thread for use in error messages.
+    let child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| -> Box<dyn std::error::Error> { "nuclei stderr pipe missing".into() })?;
+    let (etx, erx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(child_stderr);
+        let mut last = String::new();
+        for line in reader.lines().map_while(Result::ok) {
+            let scrubbed = match &secret_owned {
+                Some(v) if !v.is_empty() => line.replace(v.as_str(), "***"),
+                _ => line,
+            };
+            eprintln!("{scrubbed}");
+            last = scrubbed;
+        }
+        let _ = etx.send(last);
+    });
+
     // Poll until done or deadline.
     let timed_out = loop {
         match child.try_wait()? {
             Some(status) => {
                 if !status.success() {
                     let code = status.code().unwrap_or(-1);
-                    return Err(format!("nuclei exited with code {code}").into());
+                    let last_stderr = erx
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .unwrap_or_default();
+                    if last_stderr.is_empty() {
+                        return Err(format!("nuclei exited with code {code}").into());
+                    }
+                    return Err(format!("nuclei exited with code {code}: {last_stderr}").into());
                 }
                 break false;
             }
