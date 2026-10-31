@@ -215,16 +215,6 @@ export const IconPlayCircle = glyph(
   </>,
 );
 
-/** Clipboard. */
-export const IconClipboard = glyph(
-  "IconClipboard",
-  <>
-    <rect x="5" y="4.5" width="14" height="17" rx="2.5" />
-    <rect x="9" y="2.5" width="6" height="4" rx="1.5" />
-    <path d="M9 11.5h6M9 15.5h4" />
-  </>,
-);
-
 /** Two overlapping sheets (copy). */
 export const IconCopy = glyph(
   "IconCopy",
@@ -245,6 +235,3 @@ export const IconShieldDots = glyph(
     <path d="M8.5 12h.01M12 12h.01M15.5 12h.01" strokeWidth="3" />
   </>,
 );
-
-/** Down chevron. */
-export const IconChevronDown = glyph("IconChevronDown", <path d="m6 9 6 6 6-6" />);

@@ -245,11 +245,60 @@ test("the sidebar stacks above the content so the rail's label tooltips are not 
 });
 
 test("the sidebar tightens on short viewports (and scrolls when even that is not enough) instead of clipping the policy card", () => {
-  expect(shellCss).toMatch(/@media \(min-width:1280px\) and \(max-height:800px\)\{[^@]*\.sb-card > \.ibadge\{display:none\}/);
+  // 880px, not 800px: a 900px-tall laptop screen minus browser chrome must get the tight tier too.
+  expect(shellCss).toMatch(/@media \(min-width:1280px\) and \(max-height:880px\)\{[^@]*\.sb-card > \.ibadge\{display:none\}/);
   expect(shellCss).toMatch(/@media \(max-width:1279px\) and \(max-height:620px\)\{[^@]*\.sb-nav button\{height:44px\}/);
   expect(shellCss).toMatch(/@media \(max-width:1279px\) and \(max-height:480px\)\{\s*\.sidebar\{overflow-y:auto\}/);
   // the tiers sit before the phone block, whose own sizes must keep winning at 640px and below
   expect(shellCss.indexOf("max-height:620px")).toBeLessThan(shellCss.indexOf("max-width:640px"));
+});
+
+const SHEETS = [
+  ["base", baseCss], ["components", componentsCss], ["shell", shellCss], ["screens", screensCss],
+] as const;
+
+test("weight 800 is only ever asked of the display face: the UI face is loaded up to 700 (spec 1.2)", () => {
+  // Plus Jakarta Sans 800 is not loaded, so `800` on --font-ui silently renders as 700.
+  for (const [name, css] of SHEETS) {
+    const offenders = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => /font(-weight)?\s*:\s*800\b/.test(body) && !/var\(--font-display\)/.test(body))
+      .map(([, sel]) => sel.trim());
+    expect(offenders, `${name}.css`).toEqual([]);
+  }
+});
+
+test("the refresh button's busy state has a static cue, so reduced motion (no spin) still shows it", () => {
+  const dot = rule(componentsCss, '.icon-btn[aria-busy="true"]::after');
+  expect(dot.content).toBe('""');
+  expect(dot.background).toMatch(/^var\(--/);
+  expect(contrast(resolve(dot.background), resolve("--white"))).toBeGreaterThanOrEqual(3);
+  expect(rule(componentsCss, '.icon-btn[aria-busy="true"] svg').opacity).toBeDefined();
+  // the cue lives outside the reduced-motion block, which therefore cannot switch it off
+  const reduced = screensCss.slice(screensCss.search(/@media \(prefers-reduced-motion/));
+  expect(reduced).not.toMatch(/aria-busy/);
+});
+
+test("reduced motion also drops animation delays, so staggered entrances never hold content invisible", () => {
+  const reduced = screensCss.slice(screensCss.search(/@media \(prefers-reduced-motion/));
+  expect(reduced).toMatch(/\*,\*::before,\*::after\{[^}]*animation-delay:0s!important/);
+  // the card entrance is one of those staggered animations, filled backwards (invisible until it starts)
+  expect(rule(componentsCss, ".card--enter").animation).toMatch(/\bboth\b/);
+});
+
+test("dead selectors stay deleted", () => {
+  const all = SHEETS.map(([, css]) => css).join("\n");
+  for (const sel of [
+    /\.card-sub\b/, /\.count-badge\b/, /\.col-3\b/, /\.col-6\b/, /\.on-dark\b/, /\.tabbar\b/, /\.tnum\b/,
+    /\.policy--(PASS|CONDITIONAL|FAIL)\b/, /\.report (table|th|td|tbody)\b/,
+  ]) {
+    expect(all, String(sel)).not.toMatch(sel);
+  }
+});
+
+test("the text button has the spec's 4px side padding, and its comment sits outside the declarations", () => {
+  const raw = load("components.css");
+  expect(raw).not.toMatch(/\.btn-text\{[^}]*\/\*/);
+  expect(rule(componentsCss, ".btn-text").padding).toBe("0 4px");
 });
 
 test("the donut draw-in starts from a custom property the chart sets, not a copied number", () => {

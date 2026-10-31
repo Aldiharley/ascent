@@ -3,16 +3,14 @@
 
 /* ---------- 12-column content grid (3.1), gap 20px ---------- */
 .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:var(--s-5);min-width:0}
-.col-3{grid-column:span 3}.col-4{grid-column:span 4}.col-5{grid-column:span 5}
-.col-6{grid-column:span 6}.col-7{grid-column:span 7}.col-12{grid-column:1 / -1}
+.col-4{grid-column:span 4}.col-5{grid-column:span 5}.col-7{grid-column:span 7}.col-12{grid-column:1 / -1}
 .grid > *{min-width:0}
 @media (max-width:1279px){
   .col-4{grid-column:span 6}
   .col-4.col-last{grid-column:1 / -1}   /* the third list card spans the row */
 }
 @media (max-width:1023px){
-  .col-3{grid-column:span 6}
-  .col-4,.col-5,.col-6,.col-7{grid-column:1 / -1}
+  .col-4,.col-5,.col-7{grid-column:1 / -1}
 }
 @media (max-width:640px){
   .kpi:not(.kpi--compact){min-height:148px}
@@ -79,14 +77,14 @@
 
 /* ---------- policy gate card (4.4) ---------- */
 .policy{position:relative;background:var(--p-inc-tint);backdrop-filter:none;-webkit-backdrop-filter:none;overflow:hidden}
-.policy--PASS,.policy--pass{background:var(--p-pass-tint)}
-.policy--CONDITIONAL,.policy--conditional{background:var(--p-cond-tint)}
-.policy--FAIL,.policy--fail{background:var(--p-fail-tint)}
-.policy--FAIL::before,.policy--fail::before{content:"";position:absolute;inset:0 auto 0 0;width:6px;background:var(--coral-700)}
+.policy--pass{background:var(--p-pass-tint)}
+.policy--conditional{background:var(--p-cond-tint)}
+.policy--fail{background:var(--p-fail-tint)}
+.policy--fail::before{content:"";position:absolute;inset:0 auto 0 0;width:6px;background:var(--coral-700)}
 .policy-headline{font:800 20px/1.25 var(--font-display);color:var(--p-inc-head)}
-.policy--pass .policy-headline,.policy--PASS .policy-headline{color:var(--p-pass-head)}
-.policy--conditional .policy-headline,.policy--CONDITIONAL .policy-headline{color:var(--p-cond-head)}
-.policy--fail .policy-headline,.policy--FAIL .policy-headline{color:var(--p-fail-head)}
+.policy--pass .policy-headline{color:var(--p-pass-head)}
+.policy--conditional .policy-headline{color:var(--p-cond-head)}
+.policy--fail .policy-headline{color:var(--p-fail-head)}
 .stat-row{display:flex;flex-wrap:wrap;gap:var(--s-3)}
 .stat{padding:10px 14px;border-radius:var(--r-md);background:rgba(255,255,255,.70);font:var(--t-small);color:var(--ink-2)}
 .stat b{font:800 20px/1.2 var(--font-display);color:var(--ink);font-variant-numeric:tabular-nums}
@@ -228,12 +226,7 @@
 .report pre{background:var(--code-bg);border-radius:var(--r-md);padding:14px 16px;overflow:auto}
 .report pre code{background:none;padding:0}
 .report blockquote{margin:12px 0;padding:2px 16px;border-left:4px solid var(--teal-300);color:var(--ink-2)}
-.report table{display:block;overflow:auto;border-collapse:collapse;border-radius:var(--r-md);
-  border:1px solid var(--border-soft);margin:12px 0}
-.report th{background:var(--surface-sunken);font:var(--t-micro);text-transform:uppercase;
-  letter-spacing:var(--tracking-caps);color:var(--ink-2);text-align:left;padding:10px 14px}
-.report td{font-size:13.5px;padding:10px 14px;text-align:left;border-top:1px solid var(--border-soft)}
-.report tbody tr:nth-child(even) td{background:var(--paper-25)}
+/* no table rules: the report renders plain CommonMark (no GFM plugin), which has no tables */
 
 /* ---------- Audit (3.6) ---------- */
 .feed{display:flex;flex-direction:column;gap:var(--s-3);overflow:auto;padding-right:4px}
@@ -332,8 +325,10 @@
 /* Reduced motion (spec 1.9). Deliberately the last rule set loaded: components.css and screens.css
    define the animations and transitions this must override. Keep it a single block, at the end. */
 @media (prefers-reduced-motion:reduce){
-  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;
-    transition-duration:.001ms!important;scroll-behavior:auto!important}
+  /* animation-delay too: a staggered entrance filled backwards would otherwise hold content
+     invisible for its delay, motion or not */
+  *,*::before,*::after{animation-duration:.001ms!important;animation-delay:0s!important;
+    animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
   .mascot--float{animation:none}
   .skeleton{background:var(--surface-sunken)}
 }

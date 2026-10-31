@@ -28,14 +28,14 @@ h1,h2,h3,h4,p{margin:0}
 a{color:var(--link)}
 code,kbd,pre,samp{font-family:var(--font-mono)}
 b,strong{font-weight:700}
-.num,.tnum{font-variant-numeric:tabular-nums}
+.num{font-variant-numeric:tabular-nums}
 
 /* every text, count and number that aligns in columns */
 td,th,.n,.count{font-variant-numeric:tabular-nums}
 
 /* default keyboard focus ring (light surfaces); dark surfaces switch to --focus-on-dark */
 :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.on-dark :focus-visible,.sidebar :focus-visible,.hero :focus-visible,.tabbar :focus-visible{
+.sidebar :focus-visible,.hero :focus-visible{
   outline-color:var(--focus-on-dark);
 }
 
