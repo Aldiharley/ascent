@@ -66,6 +66,21 @@ fn is_env_name(s: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
 }
 
+/// Hop-by-hop and framing headers that must never be used as auth headers.
+/// Checked case-insensitively.
+const DENIED_AUTH_HEADERS: &[&str] = &[
+    "Host",
+    "Content-Length",
+    "Transfer-Encoding",
+    "Connection",
+    "Keep-Alive",
+    "Proxy-Authenticate",
+    "Proxy-Authorization",
+    "TE",
+    "Trailer",
+    "Upgrade",
+];
+
 /// Errors name the field and the rule only, never the offending text: a token pasted
 /// into a name field must not reach stderr or the dashboard's 422 body.
 pub fn validate_dast(d: &DastConfig) -> Result<(), String> {
@@ -75,6 +90,16 @@ pub fn validate_dast(d: &DastConfig) -> Result<(), String> {
                 "dast.auth.header is not a valid HTTP header name (letters, digits and !#$%&'*+.^_`|~- only)"
                     .into(),
             );
+        }
+        let lower = a.header.to_ascii_lowercase();
+        if let Some(denied) = DENIED_AUTH_HEADERS
+            .iter()
+            .find(|&&h| h.to_ascii_lowercase() == lower)
+        {
+            return Err(format!(
+                "dast.auth.header must not be a hop-by-hop or framing header; \
+                 {denied} is not allowed as an auth header"
+            ));
         }
         if !is_env_name(&a.value_env) {
             return Err(
