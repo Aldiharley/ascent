@@ -94,8 +94,14 @@ pub fn probe_urls(
         runner.run_json("httpx", &args, &hv)?
     };
     let norm = |s: &str| s.strip_suffix('/').unwrap_or(s).to_string();
+    // 502 Bad Gateway, 503 Service Unavailable, and 504 Gateway Timeout are treated
+    // as "not answering": the re-probe hits the root path once, and a healthy service
+    // almost never returns these there.  If it does, the operator can re-run.
+    // (A legitimate 503 is acceptable to flag: the cost of a false positive — one
+    // extra incomplete run — is much lower than missing a target that went down.)
     let answered: BTreeSet<String> = rows
         .iter()
+        .filter(|r| !matches!(r["status_code"].as_u64(), Some(502..=504)))
         .filter_map(|r| r["input"].as_str().or_else(|| r["url"].as_str()))
         .map(norm)
         .collect();
