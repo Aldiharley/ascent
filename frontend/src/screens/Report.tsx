@@ -36,8 +36,10 @@ interface Section {
  */
 function useActiveSection(body: React.RefObject<HTMLElement | null>, sections: readonly Section[]) {
   const [active, setActive] = useState<string | null>(null);
+  // Derive validity during render instead of calling setActive(null) synchronously in the effect,
+  // which would trigger a cascading re-render every time sections change.
+  const validIds = useMemo(() => new Set(sections.map((s) => s.id)), [sections]);
   useEffect(() => {
-    setActive(null);
     const root = body.current;
     if (!root || sections.length === 0 || typeof IntersectionObserver === "undefined") return;
     const ids = new Set(sections.map((s) => s.id));
@@ -68,7 +70,7 @@ function useActiveSection(body: React.RefObject<HTMLElement | null>, sections: r
     for (const h of heads) io.observe(h);
     return () => io.disconnect();
   }, [body, sections]);
-  return active;
+  return active !== null && validIds.has(active) ? active : null;
 }
 
 function ReportBody({ markdown }: { markdown: string }) {

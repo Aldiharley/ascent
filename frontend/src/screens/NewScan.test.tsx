@@ -55,11 +55,12 @@ test("creating a scan posts parsed targets with the CSRF header and shows the ru
   expect(onCreated).toHaveBeenCalledTimes(1);
 
   // Posted with the right method/header and blank lines dropped + trimmed.
-  const [url, init] = spy.mock.calls[0];
+  // The call is asserted above, so non-null assertions are safe here.
+  const [url, init] = spy.mock.calls[0] as [string, RequestInit];
   expect(url).toBe("/api/engagements");
-  expect(init?.method).toBe("POST");
-  expect((init?.headers as Record<string, string>)["X-Ascent"]).toBe("1");
-  const sent = JSON.parse(init?.body as string);
+  expect(init.method).toBe("POST");
+  expect((init.headers as Record<string, string>)["X-Ascent"]).toBe("1");
+  const sent = JSON.parse(init.body as string) as Record<string, unknown>;
   expect(sent.name).toBe("Acme");
   expect(sent.targets).toEqual(["example.com", "10.0.0.0/24", "http://localhost:3000/"]);
 });

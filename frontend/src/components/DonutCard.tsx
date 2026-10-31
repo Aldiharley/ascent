@@ -61,17 +61,12 @@ export function DonutCard({ items }: { items: readonly TriageItem[] }) {
   const gap = drawn.length >= 2 ? 3 : 0;
   const name = `${title}: ${segments.map((s) => `${s.label} ${s.value}`).join(", ")}`;
 
-  let before = 0;
-  const arcs = drawn.map((s) => {
-    const arc = {
-      key: s.label,
-      color: s.color,
-      dash: Math.max((C * s.value) / total - gap, 0),
-      offset: -((C * before) / total),
-    };
-    before += s.value;
-    return arc;
-  });
+  const arcs = drawn.map((s, i) => ({
+    key: s.label,
+    color: s.color,
+    dash: Math.max((C * s.value) / total - gap, 0),
+    offset: -((C * drawn.slice(0, i).reduce((sum, d) => sum + d.value, 0)) / total),
+  }));
 
   return (
     <section className="card chart-card" aria-labelledby={`${uid}-title`}>
