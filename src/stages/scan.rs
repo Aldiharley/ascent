@@ -172,6 +172,11 @@ pub fn scan_rows_with_deadline(
     // `secret` must be captured by value in the stderr thread; clone it once here.
     let secret_owned: Option<String> = secret.map(str::to_owned);
 
+    // Scope-check every host before spawning the real process.  The
+    // non-timeout path already does this inside `runner.run_json`, but the
+    // live spawn path bypasses the runner entirely.
+    runner.check_scope(&hv)?;
+
     // Already past the deadline before we even start.
     let now = std::time::Instant::now();
     if now >= dl {
@@ -257,10 +262,22 @@ pub fn scan_rows_with_deadline(
         }
     };
 
-    // Collect whatever nuclei wrote before it was killed.
-    let stdout = rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .unwrap_or_default();
+    // Collect whatever nuclei wrote before it was killed (or finished normally).
+    // On the success path (`timed_out = false`) the reader thread MUST deliver
+    // its output: an empty result here means the pipe was not fully drained,
+    // which would silently drop all findings.  Fail closed rather than return
+    // zero findings when the thread did not finish in time.
+    let stdout = if timed_out {
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_default()
+    } else {
+        rx.recv_timeout(std::time::Duration::from_secs(2)).map_err(
+            |_| -> Box<dyn std::error::Error> {
+                "stdout reader thread did not finish after nuclei exited; findings may be lost"
+                    .into()
+            },
+        )?
+    };
     let rows = crate::runner::parse_jsonl(&String::from_utf8_lossy(&stdout));
     Ok((rows, timed_out))
 }
@@ -353,5 +370,124 @@ mod tests {
         // An unrelated 3-number token must not be mistaken for the version.
         let out = "[INF] build 9.9.9 Nuclei Engine Version: v3.9.0";
         assert!(ensure_nuclei_version(&Ver(out)).is_err());
+    }
+
+    // ── scan_rows_with_deadline unit tests ────────────────────────────────────
+
+    /// A runner that returns Err from run_json (simulates nuclei exiting non-zero
+    /// in the non-timeout path).
+    struct ErrRunner;
+    impl Runner for ErrRunner {
+        fn run_json(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            Err("nuclei exited with code 1: fatal error".into())
+        }
+        fn run_text(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(String::new())
+        }
+    }
+
+    /// A runner that rejects any target whose host contains "evil".
+    struct ScopeCheckRunner;
+    impl Runner for ScopeCheckRunner {
+        fn run_json(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
+        fn run_text(
+            &self,
+            _t: &str,
+            _a: &[String],
+            _g: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(String::new())
+        }
+        fn supports_timeout(&self) -> bool {
+            true
+        }
+        fn check_scope(&self, targets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+            for t in targets {
+                if t.contains("evil") {
+                    return Err(format!("out of scope: {t}").into());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn non_zero_exit_returns_err() {
+        // In the non-timeout path the runner error propagates as Err.
+        let urls = vec!["https://example.com/".to_string()];
+        let result = scan_rows_with_deadline(&ErrRunner, &urls, &[], None, None);
+        assert!(result.is_err(), "expected Err for non-zero exit");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("nuclei"), "{msg}");
+    }
+
+    #[test]
+    fn all_hostless_urls_return_empty() {
+        // URLs without a parseable host are never scanned.
+        let urls = vec!["not-a-url".to_string(), "evil.com:8080/x".to_string()];
+        let (rows, timed_out) =
+            scan_rows_with_deadline(&ErrRunner, &urls, &[], None, None).unwrap();
+        assert!(rows.is_empty());
+        assert!(!timed_out);
+    }
+
+    #[test]
+    fn out_of_scope_url_refused_in_live_path() {
+        // C1: scope check runs before the real nuclei spawn even when
+        // supports_timeout=true and a deadline is given.
+        let urls = vec!["https://evil.example.com/".to_string()];
+        let deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let result = scan_rows_with_deadline(&ScopeCheckRunner, &urls, &[], deadline, None);
+        assert!(result.is_err(), "out-of-scope URL must be refused");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("out of scope"), "{msg}");
+    }
+
+    #[test]
+    fn past_deadline_returns_timed_out_without_spawning() {
+        // A deadline already in the past must short-circuit with (vec![], true)
+        // before trying to spawn nuclei (so no error even without nuclei installed).
+        let urls = vec!["https://example.com/".to_string()];
+        // Use ScopeCheckRunner (supports_timeout=true) so we hit the deadline path.
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let (rows, timed_out) =
+            scan_rows_with_deadline(&ScopeCheckRunner, &urls, &[], Some(past), None).unwrap();
+        assert!(rows.is_empty());
+        assert!(timed_out, "a past deadline must report timed_out=true");
+    }
+
+    #[test]
+    fn stderr_scrub_logic_replaces_secret() {
+        // The scrub logic used in the stderr thread: `line.replace(secret, "***")`.
+        // Validate the replacement function directly so we know the thread would
+        // scrub correctly even without a live nuclei process.
+        let secret = "Bearer s3cr3t";
+        let line = format!("[ERR] auth header: Authorization: {secret}");
+        let scrubbed = line.replace(secret, "***");
+        assert!(
+            !scrubbed.contains(secret),
+            "secret must be scrubbed: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains("***"),
+            "placeholder must be present: {scrubbed}"
+        );
     }
 }

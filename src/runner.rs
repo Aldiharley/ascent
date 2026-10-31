@@ -20,6 +20,12 @@ pub trait Runner {
     fn supports_timeout(&self) -> bool {
         false
     }
+    /// Assert that every `target` is in scope before a real process is spawned.
+    /// The default is a no-op (test runners have no scope guard); `ToolRunner`
+    /// overrides this to run the same check as `run_json`/`run_text`.
+    fn check_scope(&self, _targets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
 }
 
 pub fn parse_jsonl(stdout: &str) -> Vec<Value> {
@@ -59,6 +65,9 @@ impl ToolRunner {
 impl Runner for ToolRunner {
     fn supports_timeout(&self) -> bool {
         !self.dry_run
+    }
+    fn check_scope(&self, targets: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        self.check(targets)
     }
 
     fn run_text(
