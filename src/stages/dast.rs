@@ -1337,6 +1337,9 @@ mod tests {
         dast_trace_lines: Option<Vec<String>>,
         /// The `-tlog` path of each nuclei scan call.
         trace_paths: RefCell<Vec<String>>,
+        /// URLs that answer the re-probe after the scan with a specific HTTP status code.
+        /// Used to test 502/503/504 handling.
+        status_code_after_scan: Vec<(&'static str, u16)>,
     }
     impl Fake {
         fn new() -> Self {
@@ -1361,6 +1364,7 @@ mod tests {
                 nuclei_lists: RefCell::new(vec![]),
                 template_rows: None,
                 dast_rows: None,
+                status_code_after_scan: vec![],
             }
         }
         fn count(&self, tool: &str) -> usize {
@@ -1400,8 +1404,20 @@ mod tests {
                             };
                             let slow = self.slow_after_scan.contains(&u) && probes_since_scan == 1;
                             let gone = (self.down_after_scan.contains(&u) && scanned) || slow;
+                            let sc = scanned
+                                .then(|| {
+                                    self.status_code_after_scan
+                                        .iter()
+                                        .find(|(url, _)| *url == u)
+                                        .map(|(_, code)| *code)
+                                })
+                                .flatten();
                             if !self.dead.contains(&u) && !gone {
-                                v.push(json!({"input": u, "url": u}));
+                                if let Some(code) = sc {
+                                    v.push(json!({"input": u, "url": u, "status_code": code}));
+                                } else {
+                                    v.push(json!({"input": u, "url": u}));
+                                }
                             }
                         } else if u == "example.com" {
                             v.push(json!({"url":"https://example.com"}));
@@ -3087,6 +3103,44 @@ mod tests {
         assert!(
             recovered.is_empty(),
             "20-error streak without success must NOT be flagged; got {recovered:?}"
+        );
+    }
+
+    // ── re-probe 502/503/504 tests ────────────────────────────────────────────
+
+    #[test]
+    fn reprobe_502_treated_as_not_answering() {
+        let mut f = Fake::new();
+        f.status_code_after_scan = vec![("http://localhost:3000/", 502)];
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
+        assert!(
+            out.summary.stopped_answering.contains(&"http://localhost:3000/".to_string()),
+            "502 re-probe must land in stopped_answering; got {:?}",
+            out.summary.stopped_answering
+        );
+    }
+
+    #[test]
+    fn reprobe_503_treated_as_not_answering() {
+        let mut f = Fake::new();
+        f.status_code_after_scan = vec![("http://localhost:3000/", 503)];
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
+        assert!(
+            out.summary.stopped_answering.contains(&"http://localhost:3000/".to_string()),
+            "503 re-probe must land in stopped_answering; got {:?}",
+            out.summary.stopped_answering
+        );
+    }
+
+    #[test]
+    fn reprobe_200_not_in_stopped_answering() {
+        // Regression guard: a 200 response must NOT appear in stopped_answering.
+        let f = Fake::new();
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
+        assert!(
+            out.summary.stopped_answering.is_empty(),
+            "200 re-probe must NOT appear in stopped_answering; got {:?}",
+            out.summary.stopped_answering
         );
     }
 }
