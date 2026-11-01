@@ -357,13 +357,37 @@ fn fingerprint_templates_dir(dir: &Path) -> Result<u64, Box<dyn std::error::Erro
 /// **Fail-open on reads:** any I/O or parse error reading the cache causes a
 /// fresh nuclei run.  **Fail-closed on nuclei errors:** a nuclei error is still
 /// propagated as an error; only cache-read failures are ignored.
-/// **Path safety:** cached paths that do not start with `templates_dir` are
-/// silently dropped to prevent cache-poisoning outside the templates root.
+/// **Path safety:** every path (from cache or from a live nuclei run) is
+/// canonicalized and checked against the canonicalized `templates_dir`.  If
+/// ANY path falls outside the directory the entire result is an error — partial
+/// lists are never returned because a partial exclusion list creates false
+/// negatives.
 pub fn list_templates_cached(
     runner: &dyn Runner,
     templates_dir: &Path,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    // Canonicalize once so symlinks and `..` components cannot bypass the check.
+    let canon_dir = templates_dir.canonicalize()?;
+
     let current_fp = fingerprint_templates_dir(templates_dir)?;
+
+    /// Validate that every path is under `root` (both canonicalized).
+    /// Returns `Err` if any path escapes — callers must treat this as a cache
+    /// miss (not as an empty list).
+    fn validate_paths(paths: &[PathBuf], root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        for p in paths {
+            let canon = p
+                .canonicalize()
+                .map_err(|e| format!("template path {p:?} cannot be canonicalized: {e}"))?;
+            if !canon.starts_with(root) {
+                return Err(format!(
+                    "template path {canon:?} is outside the templates directory {root:?}"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
 
     // Fail-open: any error reading or parsing the cache just falls through.
     let cache_path = templates_dir.join(".ascent-tl-cache.json");
@@ -375,10 +399,10 @@ pub fn list_templates_cached(
                         .iter()
                         .filter_map(|s| s.as_str())
                         .map(PathBuf::from)
-                        // Security: reject any cached path not under templates_dir.
-                        .filter(|p| p.starts_with(templates_dir))
                         .collect();
                     if !paths.is_empty() {
+                        // Fail-closed: any rogue path in the cache is an error.
+                        validate_paths(&paths, &canon_dir)?;
                         return Ok(paths);
                     }
                 }
@@ -393,6 +417,9 @@ pub fn list_templates_cached(
         .collect();
     let out = runner.run_text("nuclei", &args, &[])?;
     let paths = parse_template_listing(&out)?;
+
+    // Fail-closed: nuclei must not return paths outside the templates dir.
+    validate_paths(&paths, &canon_dir)?;
 
     // Fail-open on write: a write failure must not prevent the caller from proceeding.
     let template_strs: Vec<&str> = paths.iter().filter_map(|p| p.to_str()).collect();
@@ -3433,6 +3460,13 @@ mod tests {
     #[test]
     fn cached_listing_no_cache_runs_nuclei_and_writes_cache() {
         let dir = TempDir::create().unwrap();
+        // Create the yaml file so validate_paths can canonicalize it.
+        std::fs::create_dir_all(dir.path().join("http")).unwrap();
+        std::fs::copy(
+            fixture_templates().join("http").join("benign.yaml"),
+            dir.path().join("http").join("benign.yaml"),
+        )
+        .unwrap();
         let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
 
         let paths = list_templates_cached(&fake, dir.path()).unwrap();
@@ -3498,7 +3532,14 @@ mod tests {
     #[test]
     fn cached_listing_stale_cache_reruns_nuclei_and_overwrites() {
         let dir = TempDir::create().unwrap();
-        // fingerprint 1 will never match an empty-dir walk (hash starts at FNV offset).
+        // Create the yaml file so validate_paths can canonicalize it.
+        std::fs::create_dir_all(dir.path().join("http")).unwrap();
+        std::fs::copy(
+            fixture_templates().join("http").join("benign.yaml"),
+            dir.path().join("http").join("benign.yaml"),
+        )
+        .unwrap();
+        // fingerprint 1 will never match — ensures cache is treated as stale.
         let stale_cache = serde_json::json!({
             "fingerprint": 1u64,
             "templates": ["/old/stale.yaml"]
@@ -3571,8 +3612,8 @@ mod tests {
         );
     }
 
-    /// Cached paths that point outside `templates_dir` must be silently dropped
-    /// and cause a fresh nuclei run (cache-poisoning guard).
+    /// Cached paths that point outside `templates_dir` must cause an error
+    /// (fail-closed: a partial exclusion list is worse than no list).
     #[test]
     fn cached_listing_rejects_paths_outside_templates_dir() {
         let dir = TempDir::create().unwrap();
@@ -3586,7 +3627,10 @@ mod tests {
         // Inject a path that lives outside the templates dir.
         let poisoned = serde_json::json!({
             "fingerprint": current_fp,
-            "templates": ["/etc/passwd", "/tmp/evil.yaml"]
+            "templates": [
+                dir.path().join("http/benign.yaml").to_str().unwrap(),
+                "/etc/passwd"
+            ]
         });
         std::fs::write(
             dir.path().join(".ascent-tl-cache.json"),
@@ -3595,19 +3639,55 @@ mod tests {
         .unwrap();
 
         let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
-        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+        let result = list_templates_cached(&fake, dir.path());
 
-        // All poisoned paths must be dropped; nuclei re-runs for fresh results.
-        assert_eq!(
-            *fake.tl_calls.borrow(),
-            1,
-            "nuclei -tl must run when cached paths are outside templates_dir"
+        // Any path outside templates_dir → hard error, not a partial list.
+        assert!(
+            result.is_err(),
+            "expected an error when a cached path escapes templates_dir, got {result:?}"
         );
-        for p in &paths {
-            assert!(
-                p.starts_with(dir.path()),
-                "returned path {p:?} is outside templates_dir"
-            );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("outside the templates directory"),
+            "error message must explain the problem, got: {msg}"
+        );
+    }
+
+    /// A fresh nuclei run that returns a path outside `templates_dir` must also
+    /// be rejected (fail-closed on nuclei output, not just on cache).
+    #[test]
+    fn fresh_nuclei_output_rejects_paths_outside_templates_dir() {
+        let dir = TempDir::create().unwrap();
+        // The fake returns a listing that includes a path outside the dir.
+        struct RogueFake {
+            listing: String,
         }
+        impl Runner for RogueFake {
+            fn run_json(
+                &self,
+                _: &str,
+                _: &[String],
+                _: &[String],
+            ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+                Ok(vec![])
+            }
+            fn run_text(
+                &self,
+                _: &str,
+                _: &[String],
+                _: &[String],
+            ) -> Result<String, Box<dyn std::error::Error>> {
+                Ok(self.listing.clone())
+            }
+        }
+        // Produce a listing that pretends /etc/passwd is a nuclei template.
+        let rogue = RogueFake {
+            listing: "[INF] Loading templates from /etc/passwd\n/etc/passwd\n".to_string(),
+        };
+        let result = list_templates_cached(&rogue, dir.path());
+        assert!(
+            result.is_err(),
+            "expected an error when nuclei output contains a path outside templates_dir"
+        );
     }
 }
