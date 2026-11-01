@@ -2,3 +2,4 @@
 out/
 .superpowers/
 *.pdb
+.ascent-tl-cache.json
