@@ -338,7 +338,8 @@ fn address_host(address: &str) -> String {
     } else {
         a.rsplit_once(':').map_or(a, |(h, _)| h)
     };
-    host.to_ascii_lowercase()
+    // A trailing dot is valid FQDN syntax; strip it so `localhost.` == `localhost`.
+    host.to_ascii_lowercase().trim_end_matches('.').to_string()
 }
 
 /// The host of a trace line's `input` (the URL nuclei requested; for an
@@ -3174,9 +3175,7 @@ mod tests {
     #[test]
     fn trace_address_with_trailing_dot_is_in_scope() {
         let mut f = Fake::new();
-        f.trace_lines = Some(vec![
-            trace_line("localhost.:3000", "none"),
-        ]);
+        f.trace_lines = Some(vec![trace_line("localhost.:3000", "none")]);
         let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
         assert!(
             out.summary.out_of_scope_requests.is_empty(),
