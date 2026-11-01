@@ -66,6 +66,13 @@ enum Cmd {
         /// Must be at least 1 second.
         #[arg(long, default_value_t = 7200, value_parser = clap::value_parser!(u64).range(1..))]
         dast_timeout: u64,
+        /// Path to the nuclei templates directory (e.g. ~/nuclei-templates).
+        /// When provided, the `nuclei -tl` walk (~20 s) is cached and skipped on
+        /// subsequent runs whose templates directory has not changed.  When omitted,
+        /// the directory is auto-detected from the `nuclei -tl` banner and the cache
+        /// is primed automatically.
+        #[arg(long)]
+        nuclei_templates_dir: Option<std::path::PathBuf>,
     },
     /// Evaluate a policy against an existing output directory (CI step).
     Gate {
@@ -185,6 +192,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
             policy,
             fail_on_warn,
             dast_timeout,
+            nuclei_templates_dir,
         } => {
             // Load the policy BEFORE scanning so a bad policy fails fast (exit 2).
             let policy = policy
@@ -202,6 +210,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, Failure> {
                 dry_run,
                 source.as_deref(),
                 dast_timeout,
+                nuclei_templates_dir.as_deref(),
             )
             .map_err(|e| {
                 // Typed errors pick the exit code; never match on message text.
