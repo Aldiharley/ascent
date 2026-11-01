@@ -286,19 +286,85 @@ pub fn parse_template_listing(out: &str) -> Result<Vec<PathBuf>, Box<dyn std::er
     Ok(paths)
 }
 
+/// Returns the template paths from `nuclei -tl`, using a JSON disk cache so that
+/// the ~20-second walk is skipped when the templates directory has not changed.
+///
+/// **Cache location:** `<templates_dir>/.ascent-tl-cache.json`
+/// **Cache key:** the last-modified time (Unix seconds, `u64`) of `templates_dir`.
+/// **Fail-open on reads:** any I/O or parse error reading the cache causes a fresh
+/// nuclei run.  **Fail-closed on nuclei errors:** a nuclei error is still propagated
+/// as an error; only cache-read failures are ignored.
+pub fn list_templates_cached(
+    runner: &dyn Runner,
+    templates_dir: &Path,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let current_mtime = std::fs::metadata(templates_dir)?
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Fail-open: any error reading or parsing the cache just falls through.
+    let cache_path = templates_dir.join(".ascent-tl-cache.json");
+    if let Ok(data) = std::fs::read_to_string(&cache_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+            if v["mtime"].as_u64() == Some(current_mtime) {
+                if let Some(arr) = v["templates"].as_array() {
+                    let paths: Vec<PathBuf> = arr
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .map(PathBuf::from)
+                        .collect();
+                    if !paths.is_empty() {
+                        return Ok(paths);
+                    }
+                }
+            }
+        }
+    }
+
+    // Cache miss or unreadable: run nuclei -tl (fail-closed on nuclei errors).
+    let args: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let out = runner.run_text("nuclei", &args, &[])?;
+    let paths = parse_template_listing(&out)?;
+
+    // Fail-open on write: a write failure must not prevent the caller from proceeding.
+    let template_strs: Vec<&str> = paths.iter().filter_map(|p| p.to_str()).collect();
+    let cache = serde_json::json!({
+        "mtime": current_mtime,
+        "templates": template_strs,
+    });
+    let _ = std::fs::write(&cache_path, cache.to_string());
+
+    Ok(paths)
+}
+
 /// The installed http templates Ascent never runs: those that send a request off
 /// the target ([`sends_off_target`]), those with a non-http protocol section
 /// ([`has_non_http_protocol`]) and those whose flow loads a JS module
 /// ([`flow_loads_modules`]). Lists the templates once (no targets, no network).
 /// A listed template that cannot be read is an error: Ascent cannot tell what it
 /// sends, nor be sure the path it would exclude is the one nuclei loads.
-fn off_target_templates(runner: &dyn Runner) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let args: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let out = runner.run_text("nuclei", &args, &[])?;
-    let listed = parse_template_listing(&out)?;
+///
+/// When `templates_dir` is `Some`, uses [`list_templates_cached`] so the ~20-second
+/// `nuclei -tl` walk is skipped when the templates directory has not changed.
+fn off_target_templates(
+    runner: &dyn Runner,
+    templates_dir: Option<&Path>,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let listed = if let Some(dir) = templates_dir {
+        list_templates_cached(runner, dir)?
+    } else {
+        let args: Vec<String> = ["-tl", "-nc", "-duc", "-silent", "-pt", "http"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = runner.run_text("nuclei", &args, &[])?;
+        parse_template_listing(&out)?
+    };
     let mut off: BTreeSet<PathBuf> = BTreeSet::new();
     for p in listed {
         let bytes = std::fs::read(&p).map_err(|_| TEMPLATE_UNREADABLE)?;
@@ -1086,7 +1152,7 @@ pub fn run_dast(
         let scratch = if live { Some(TempDir::create()?) } else { None };
         let mut exclude_args: Vec<String> = Vec::new();
         if let Some(dir) = &scratch {
-            let off = off_target_templates(runner).map_err(scrubbed)?;
+            let off = off_target_templates(runner, None).map_err(scrubbed)?;
             templates_excluded = off.len();
             if !off.is_empty() {
                 let p = dir.path().join("exclude-templates.txt");
@@ -2532,7 +2598,7 @@ mod tests {
     #[ignore]
     fn real_nuclei_listing_excludes_exactly_the_off_target_templates() {
         let r = crate::runner::ToolRunner::new(ScopeGuard::new(&Engagement::default()), false);
-        let off = off_target_templates(&r).unwrap();
+        let off = off_target_templates(&r, None).unwrap();
         // Why each one is excluded (a template can match several reasons).
         let (mut host, mut section, mut flow, mut yaml_only) = (0, 0, 0, Vec::new());
         for p in &off {
@@ -3200,5 +3266,144 @@ mod tests {
             "notlocalhost. must remain out of scope"
         );
         assert_eq!(out.summary.off_scope_request_count, 1);
+    }
+
+    // ── list_templates_cached unit tests ─────────────────────────────────────
+
+    use crate::stages::scan::TempDir;
+
+    /// Minimal fake runner for cache tests: records how many times nuclei -tl
+    /// was called and returns a configurable listing.
+    struct CacheFake {
+        tl_calls: RefCell<u32>,
+        listing: String,
+    }
+    impl CacheFake {
+        fn new(dir: &std::path::Path, rel: &[&str]) -> Self {
+            CacheFake {
+                tl_calls: RefCell::new(0),
+                listing: listing(dir, rel),
+            }
+        }
+    }
+    impl Runner for CacheFake {
+        fn run_json(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
+        fn run_text(
+            &self,
+            tool: &str,
+            args: &[String],
+            _: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            if tool == "nuclei" && args.iter().any(|a| a == "-tl") {
+                *self.tl_calls.borrow_mut() += 1;
+                Ok(self.listing.clone())
+            } else {
+                Err(format!("unexpected call: {tool} {}", args.join(" ")).into())
+            }
+        }
+    }
+
+    /// No cache file present → nuclei is called once and the cache is written.
+    #[test]
+    fn cached_listing_no_cache_runs_nuclei_and_writes_cache() {
+        let dir = TempDir::create().unwrap();
+        let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
+
+        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+
+        assert_eq!(*fake.tl_calls.borrow(), 1, "nuclei -tl must be called once");
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0].ends_with("http/benign.yaml"),
+            "unexpected path: {:?}",
+            paths[0]
+        );
+        let cache_path = dir.path().join(".ascent-tl-cache.json");
+        assert!(cache_path.exists(), "cache file must be written");
+        let data = std::fs::read_to_string(&cache_path).unwrap();
+        let v: Value = serde_json::from_str(&data).unwrap();
+        assert!(v["mtime"].as_u64().is_some(), "cache must contain mtime");
+        assert!(
+            v["templates"].as_array().is_some_and(|a| !a.is_empty()),
+            "cache must list templates"
+        );
+    }
+
+    /// Cache file present with a matching mtime → nuclei is NOT called.
+    #[test]
+    fn cached_listing_valid_cache_skips_nuclei() {
+        let dir = TempDir::create().unwrap();
+        let current_mtime = std::fs::metadata(dir.path())
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expected = dir
+            .path()
+            .join("http/benign.yaml")
+            .to_string_lossy()
+            .into_owned();
+        let cache = serde_json::json!({
+            "mtime": current_mtime,
+            "templates": [expected]
+        });
+        std::fs::write(dir.path().join(".ascent-tl-cache.json"), cache.to_string()).unwrap();
+
+        let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
+        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+
+        assert_eq!(
+            *fake.tl_calls.borrow(),
+            0,
+            "nuclei -tl must NOT be called when cache is valid"
+        );
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], std::path::PathBuf::from(&expected));
+    }
+
+    /// Cache file present with a stale mtime → nuclei is called and cache is overwritten.
+    #[test]
+    fn cached_listing_stale_cache_reruns_nuclei_and_overwrites() {
+        let dir = TempDir::create().unwrap();
+        let stale_cache = serde_json::json!({
+            "mtime": 1u64,   // epoch+1: will never match a real directory mtime
+            "templates": ["/old/stale.yaml"]
+        });
+        std::fs::write(
+            dir.path().join(".ascent-tl-cache.json"),
+            stale_cache.to_string(),
+        )
+        .unwrap();
+
+        let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
+        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+
+        assert_eq!(
+            *fake.tl_calls.borrow(),
+            1,
+            "nuclei -tl must be called when cache is stale"
+        );
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0].ends_with("http/benign.yaml"),
+            "must return fresh paths, got {:?}",
+            paths[0]
+        );
+        let data = std::fs::read_to_string(dir.path().join(".ascent-tl-cache.json")).unwrap();
+        let v: Value = serde_json::from_str(&data).unwrap();
+        assert_ne!(
+            v["mtime"].as_u64(),
+            Some(1u64),
+            "stale mtime must be overwritten"
+        );
     }
 }
