@@ -286,34 +286,97 @@ pub fn parse_template_listing(out: &str) -> Result<Vec<PathBuf>, Box<dyn std::er
     Ok(paths)
 }
 
+/// Compute a recursive fingerprint of all `*.yaml`/`*.yml` files under `dir`.
+///
+/// The fingerprint is a FNV-1a 64-bit hash over the sorted list of
+/// `(path_bytes, file_size_u64_le, mtime_secs_u64_le)` tuples.  Subdirectory
+/// mtimes are intentionally **not** included because a directory mtime only
+/// updates when its own direct entries change, not when nested files change.
+/// File-level mtimes and sizes catch any modification anywhere in the tree.
+fn fingerprint_templates_dir(dir: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+    // Collect all yaml/yml paths, sorted for determinism.
+    let mut entries: Vec<PathBuf> = Vec::new();
+    fn walk(d: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(d)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            let path = entry.path();
+            if ft.is_dir() {
+                walk(&path, out)?;
+            } else if ft.is_file() {
+                let name = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if name == "yaml" || name == "yml" {
+                    out.push(path);
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(dir, &mut entries)?;
+    entries.sort();
+
+    // FNV-1a 64-bit.
+    const OFFSET: u64 = 14695981039346656037;
+    const PRIME: u64 = 1099511628211;
+    let mut h = OFFSET;
+    let fnv_bytes = |h: &mut u64, bytes: &[u8]| {
+        for &b in bytes {
+            *h ^= b as u64;
+            *h = h.wrapping_mul(PRIME);
+        }
+    };
+
+    for path in &entries {
+        let meta = std::fs::metadata(path)?;
+        let mtime = meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let size = meta.len();
+        if let Some(s) = path.to_str() {
+            fnv_bytes(&mut h, s.as_bytes());
+        }
+        fnv_bytes(&mut h, &size.to_le_bytes());
+        fnv_bytes(&mut h, &mtime.to_le_bytes());
+    }
+    Ok(h)
+}
+
 /// Returns the template paths from `nuclei -tl`, using a JSON disk cache so that
 /// the ~20-second walk is skipped when the templates directory has not changed.
 ///
 /// **Cache location:** `<templates_dir>/.ascent-tl-cache.json`
-/// **Cache key:** the last-modified time (Unix seconds, `u64`) of `templates_dir`.
-/// **Fail-open on reads:** any I/O or parse error reading the cache causes a fresh
-/// nuclei run.  **Fail-closed on nuclei errors:** a nuclei error is still propagated
-/// as an error; only cache-read failures are ignored.
+/// **Cache key:** FNV-1a 64-bit fingerprint over all `*.yaml`/`*.yml` file
+/// paths, sizes and mtimes found recursively under `templates_dir`.  Unlike a
+/// single directory mtime, this detects changes to nested files.
+/// **Fail-open on reads:** any I/O or parse error reading the cache causes a
+/// fresh nuclei run.  **Fail-closed on nuclei errors:** a nuclei error is still
+/// propagated as an error; only cache-read failures are ignored.
+/// **Path safety:** cached paths that do not start with `templates_dir` are
+/// silently dropped to prevent cache-poisoning outside the templates root.
 pub fn list_templates_cached(
     runner: &dyn Runner,
     templates_dir: &Path,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let current_mtime = std::fs::metadata(templates_dir)?
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let current_fp = fingerprint_templates_dir(templates_dir)?;
 
     // Fail-open: any error reading or parsing the cache just falls through.
     let cache_path = templates_dir.join(".ascent-tl-cache.json");
     if let Ok(data) = std::fs::read_to_string(&cache_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            if v["mtime"].as_u64() == Some(current_mtime) {
+            if v["fingerprint"].as_u64() == Some(current_fp) {
                 if let Some(arr) = v["templates"].as_array() {
                     let paths: Vec<PathBuf> = arr
                         .iter()
                         .filter_map(|s| s.as_str())
                         .map(PathBuf::from)
+                        // Security: reject any cached path not under templates_dir.
+                        .filter(|p| p.starts_with(templates_dir))
                         .collect();
                     if !paths.is_empty() {
                         return Ok(paths);
@@ -334,7 +397,7 @@ pub fn list_templates_cached(
     // Fail-open on write: a write failure must not prevent the caller from proceeding.
     let template_strs: Vec<&str> = paths.iter().filter_map(|p| p.to_str()).collect();
     let cache = serde_json::json!({
-        "mtime": current_mtime,
+        "fingerprint": current_fp,
         "templates": template_strs,
     });
     let _ = std::fs::write(&cache_path, cache.to_string());
@@ -3385,31 +3448,36 @@ mod tests {
         assert!(cache_path.exists(), "cache file must be written");
         let data = std::fs::read_to_string(&cache_path).unwrap();
         let v: Value = serde_json::from_str(&data).unwrap();
-        assert!(v["mtime"].as_u64().is_some(), "cache must contain mtime");
+        assert!(
+            v["fingerprint"].as_u64().is_some(),
+            "cache must contain fingerprint"
+        );
         assert!(
             v["templates"].as_array().is_some_and(|a| !a.is_empty()),
             "cache must list templates"
         );
     }
 
-    /// Cache file present with a matching mtime → nuclei is NOT called.
+    /// Cache file present with a matching fingerprint → nuclei is NOT called.
     #[test]
     fn cached_listing_valid_cache_skips_nuclei() {
         let dir = TempDir::create().unwrap();
-        let current_mtime = std::fs::metadata(dir.path())
-            .unwrap()
-            .modified()
-            .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // Create the actual yaml file so the fingerprint walk finds it.
+        std::fs::create_dir_all(dir.path().join("http")).unwrap();
+        std::fs::copy(
+            fixture_templates().join("http").join("benign.yaml"),
+            dir.path().join("http").join("benign.yaml"),
+        )
+        .unwrap();
         let expected = dir
             .path()
             .join("http/benign.yaml")
             .to_string_lossy()
             .into_owned();
+        // Compute the real fingerprint so the cache is valid.
+        let current_fp = fingerprint_templates_dir(dir.path()).unwrap();
         let cache = serde_json::json!({
-            "mtime": current_mtime,
+            "fingerprint": current_fp,
             "templates": [expected]
         });
         std::fs::write(dir.path().join(".ascent-tl-cache.json"), cache.to_string()).unwrap();
@@ -3426,12 +3494,13 @@ mod tests {
         assert_eq!(paths[0], std::path::PathBuf::from(&expected));
     }
 
-    /// Cache file present with a stale mtime → nuclei is called and cache is overwritten.
+    /// Cache file present with a stale fingerprint → nuclei is called and cache is overwritten.
     #[test]
     fn cached_listing_stale_cache_reruns_nuclei_and_overwrites() {
         let dir = TempDir::create().unwrap();
+        // fingerprint 1 will never match an empty-dir walk (hash starts at FNV offset).
         let stale_cache = serde_json::json!({
-            "mtime": 1u64,   // epoch+1: will never match a real directory mtime
+            "fingerprint": 1u64,
             "templates": ["/old/stale.yaml"]
         });
         std::fs::write(
@@ -3457,9 +3526,9 @@ mod tests {
         let data = std::fs::read_to_string(dir.path().join(".ascent-tl-cache.json")).unwrap();
         let v: Value = serde_json::from_str(&data).unwrap();
         assert_ne!(
-            v["mtime"].as_u64(),
+            v["fingerprint"].as_u64(),
             Some(1u64),
-            "stale mtime must be overwritten"
+            "stale fingerprint must be overwritten"
         );
     }
 
@@ -3500,5 +3569,45 @@ mod tests {
             "nuclei -tl called {tl_count} times across two run_dast calls; \
              expected exactly 1 (cache hit on second call)"
         );
+    }
+
+    /// Cached paths that point outside `templates_dir` must be silently dropped
+    /// and cause a fresh nuclei run (cache-poisoning guard).
+    #[test]
+    fn cached_listing_rejects_paths_outside_templates_dir() {
+        let dir = TempDir::create().unwrap();
+        std::fs::create_dir_all(dir.path().join("http")).unwrap();
+        std::fs::copy(
+            fixture_templates().join("http").join("benign.yaml"),
+            dir.path().join("http").join("benign.yaml"),
+        )
+        .unwrap();
+        let current_fp = fingerprint_templates_dir(dir.path()).unwrap();
+        // Inject a path that lives outside the templates dir.
+        let poisoned = serde_json::json!({
+            "fingerprint": current_fp,
+            "templates": ["/etc/passwd", "/tmp/evil.yaml"]
+        });
+        std::fs::write(
+            dir.path().join(".ascent-tl-cache.json"),
+            poisoned.to_string(),
+        )
+        .unwrap();
+
+        let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
+        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+
+        // All poisoned paths must be dropped; nuclei re-runs for fresh results.
+        assert_eq!(
+            *fake.tl_calls.borrow(),
+            1,
+            "nuclei -tl must run when cached paths are outside templates_dir"
+        );
+        for p in &paths {
+            assert!(
+                p.starts_with(dir.path()),
+                "returned path {p:?} is outside templates_dir"
+            );
+        }
     }
 }
