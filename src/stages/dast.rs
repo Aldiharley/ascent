@@ -3201,4 +3201,144 @@ mod tests {
         );
         assert_eq!(out.summary.off_scope_request_count, 1);
     }
+
+    // ── list_templates_cached unit tests ─────────────────────────────────────
+
+    use crate::stages::scan::TempDir;
+
+    /// Minimal fake runner for cache tests: records how many times nuclei -tl
+    /// was called and returns a configurable listing.
+    struct CacheFake {
+        tl_calls: RefCell<u32>,
+        listing: String,
+    }
+    impl CacheFake {
+        fn new(dir: &std::path::Path, rel: &[&str]) -> Self {
+            CacheFake {
+                tl_calls: RefCell::new(0),
+                listing: listing(dir, rel),
+            }
+        }
+    }
+    impl Runner for CacheFake {
+        fn run_json(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &[String],
+        ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
+        fn run_text(
+            &self,
+            tool: &str,
+            args: &[String],
+            _: &[String],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            if tool == "nuclei" && args.iter().any(|a| a == "-tl") {
+                *self.tl_calls.borrow_mut() += 1;
+                Ok(self.listing.clone())
+            } else {
+                Err(format!("unexpected call: {tool} {}", args.join(" ")).into())
+            }
+        }
+    }
+
+    /// No cache file present → nuclei is called once and the cache is written.
+    #[test]
+    fn cached_listing_no_cache_runs_nuclei_and_writes_cache() {
+        let dir = TempDir::create().unwrap();
+        let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
+
+        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+
+        assert_eq!(*fake.tl_calls.borrow(), 1, "nuclei -tl must be called once");
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0].ends_with("http/benign.yaml"),
+            "unexpected path: {:?}",
+            paths[0]
+        );
+        let cache_path = dir.path().join(".ascent-tl-cache.json");
+        assert!(cache_path.exists(), "cache file must be written");
+        let data = std::fs::read_to_string(&cache_path).unwrap();
+        let v: Value = serde_json::from_str(&data).unwrap();
+        assert!(v["mtime"].as_u64().is_some(), "cache must contain mtime");
+        assert!(
+            v["templates"].as_array().is_some_and(|a| !a.is_empty()),
+            "cache must list templates"
+        );
+    }
+
+    /// Cache file present with a matching mtime → nuclei is NOT called.
+    #[test]
+    fn cached_listing_valid_cache_skips_nuclei() {
+        let dir = TempDir::create().unwrap();
+        let current_mtime = std::fs::metadata(dir.path())
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expected = dir
+            .path()
+            .join("http/benign.yaml")
+            .to_string_lossy()
+            .into_owned();
+        let cache = serde_json::json!({
+            "mtime": current_mtime,
+            "templates": [expected]
+        });
+        std::fs::write(dir.path().join(".ascent-tl-cache.json"), cache.to_string()).unwrap();
+
+        let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
+        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+
+        assert_eq!(
+            *fake.tl_calls.borrow(),
+            0,
+            "nuclei -tl must NOT be called when cache is valid"
+        );
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], std::path::PathBuf::from(&expected));
+    }
+
+    /// Cache file present with a stale mtime → nuclei is called and cache is overwritten.
+    #[test]
+    fn cached_listing_stale_cache_reruns_nuclei_and_overwrites() {
+        let dir = TempDir::create().unwrap();
+        let stale_cache = serde_json::json!({
+            "mtime": 1u64,   // epoch+1: will never match a real directory mtime
+            "templates": ["/old/stale.yaml"]
+        });
+        std::fs::write(
+            dir.path().join(".ascent-tl-cache.json"),
+            stale_cache.to_string(),
+        )
+        .unwrap();
+
+        let fake = CacheFake::new(dir.path(), &["http/benign.yaml"]);
+        let paths = list_templates_cached(&fake, dir.path()).unwrap();
+
+        assert_eq!(
+            *fake.tl_calls.borrow(),
+            1,
+            "nuclei -tl must be called when cache is stale"
+        );
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0].ends_with("http/benign.yaml"),
+            "must return fresh paths, got {:?}",
+            paths[0]
+        );
+        let data =
+            std::fs::read_to_string(dir.path().join(".ascent-tl-cache.json")).unwrap();
+        let v: Value = serde_json::from_str(&data).unwrap();
+        assert_ne!(
+            v["mtime"].as_u64(),
+            Some(1u64),
+            "stale mtime must be overwritten"
+        );
+    }
 }
