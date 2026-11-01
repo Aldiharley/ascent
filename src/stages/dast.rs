@@ -338,7 +338,8 @@ fn address_host(address: &str) -> String {
     } else {
         a.rsplit_once(':').map_or(a, |(h, _)| h)
     };
-    host.to_ascii_lowercase()
+    // A trailing dot is valid FQDN syntax; strip it so `localhost.` == `localhost`.
+    host.to_ascii_lowercase().trim_end_matches('.').to_string()
 }
 
 /// The host of a trace line's `input` (the URL nuclei requested; for an
@@ -3152,5 +3153,52 @@ mod tests {
             "200 re-probe must NOT appear in stopped_answering; got {:?}",
             out.summary.stopped_answering
         );
+    }
+
+    // ---- trailing-dot normalisation (DAST item 8) ----
+
+    /// `address_host` must strip a trailing dot so that DNS-style FQDNs like
+    /// `localhost.` are treated as `localhost`.
+    #[test]
+    fn address_host_strips_trailing_dot_from_fqdn() {
+        assert_eq!(address_host("localhost.:3000"), "localhost");
+        assert_eq!(address_host("example.com.:443"), "example.com");
+        // no trailing dot: unchanged
+        assert_eq!(address_host("example.com:443"), "example.com");
+        // uppercase is still lowercased
+        assert_eq!(address_host("EXAMPLE.COM.:80"), "example.com");
+    }
+
+    /// A nuclei trace log that contains `localhost.` (trailing dot, as some DNS
+    /// resolvers emit) against a scope declared as `http://localhost:3000/` must
+    /// NOT produce an INCOMPLETE.
+    #[test]
+    fn trace_address_with_trailing_dot_is_in_scope() {
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![trace_line("localhost.:3000", "none")]);
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
+        assert!(
+            out.summary.out_of_scope_requests.is_empty(),
+            "localhost. should be in scope; got {:?}",
+            out.summary.out_of_scope_requests
+        );
+        assert_eq!(out.summary.off_scope_request_count, 0);
+    }
+
+    /// Counter-test: `notlocalhost.` must still be refused (we are not widening scope).
+    #[test]
+    fn trace_address_with_trailing_dot_wrong_host_is_out_of_scope() {
+        let mut f = Fake::new();
+        f.trace_lines = Some(vec![
+            trace_line("localhost.:3000", "none"),
+            trace_line("notlocalhost.:3000", "none"),
+        ]);
+        let out = run_dast(&eng(), &f, None, true, 7200).unwrap().unwrap();
+        assert_eq!(
+            out.summary.out_of_scope_requests,
+            vec!["notlocalhost"],
+            "notlocalhost. must remain out of scope"
+        );
+        assert_eq!(out.summary.off_scope_request_count, 1);
     }
 }
